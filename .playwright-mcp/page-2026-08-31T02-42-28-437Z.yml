@@ -1,0 +1,101 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e5]:
+    - link "Feature Tracker" [ref=f1e7] [cursor=pointer]:
+      - /url: /dashboard
+    - generic [ref=f1e14]:
+      - generic [ref=f1e15]: Navigation
+      - list [ref=f1e16]:
+        - listitem [ref=f1e17]:
+          - link "Dashboard" [ref=f1e18] [cursor=pointer]:
+            - /url: /dashboard
+        - listitem [ref=f1e25]:
+          - link "Project" [ref=f1e26] [cursor=pointer]:
+            - /url: /projects
+        - listitem [ref=f1e30]:
+          - link "Issue Tracker" [ref=f1e31] [cursor=pointer]:
+            - /url: /issue-tracker
+    - list [ref=f1e43]:
+      - listitem [ref=f1e44]:
+        - button "Meraz Zoarder meraz-zoarder@yopmail.com" [ref=f1e45] [cursor=pointer]:
+          - generic [ref=f1e46]:
+            - generic [ref=f1e47]: Meraz Zoarder
+            - generic [ref=f1e48]: meraz-zoarder@yopmail.com
+      - listitem [ref=f1e49]:
+        - button "বাংলা ↻" [ref=f1e50] [cursor=pointer]:
+          - generic [ref=f1e51]: বাংলা
+          - generic [ref=f1e52]: ↻
+      - listitem [ref=f1e53]:
+        - button "Sign out" [ref=f1e54] [cursor=pointer]
+      - listitem [ref=f1e59]:
+        - button "Collapse sidebar" [ref=f1e60] [cursor=pointer]:
+          - generic [ref=f1e64]: Collapse
+    - button "Toggle Sidebar" [ref=f1e65]
+  - main [ref=f1e66]:
+    - generic [ref=f1e67]:
+      - generic [ref=f1e68]:
+        - button "Toggle sidebar" [ref=f1e69] [cursor=pointer]:
+          - generic [ref=f1e70]: Toggle Sidebar
+        - link "Feature Tracker" [ref=f1e74] [cursor=pointer]:
+          - /url: /dashboard
+      - generic [ref=f1e76]:
+        - generic [ref=f1e77]:
+          - button "Change language" [ref=f1e78] [cursor=pointer]
+          - button "Notifications (2 unread)" [ref=f1e83] [cursor=pointer]:
+            - generic [ref=f1e87]: "2"
+          - 'button "Theme: Light. Change theme." [ref=f1e88] [cursor=pointer]'
+        - button "Open user menu" [ref=f1e95] [cursor=pointer]:
+          - generic [ref=f1e96]: MZ
+    - generic [ref=f1e100]:
+      - generic [ref=f1e101]:
+        - heading "Dashboard" [level=1] [ref=f1e102]
+        - paragraph [ref=f1e103]: Welcome back, Meraz Zoarder. Here's a snapshot of your workspace.
+      - region "Workspace statistics" [ref=f1e104]:
+        - generic [ref=f1e105]:
+          - paragraph [ref=f1e110]: Projects
+          - paragraph [ref=f1e112]: "2"
+        - generic [ref=f1e113]:
+          - paragraph [ref=f1e119]: Features
+          - paragraph [ref=f1e121]: "5"
+        - generic [ref=f1e122]:
+          - paragraph [ref=f1e129]: Flows
+          - paragraph [ref=f1e131]: "8"
+      - generic [ref=f1e132]:
+        - region [ref=f1e133]:
+          - generic [ref=f1e134]:
+            - generic [ref=f1e135]:
+              - heading "Recent Projects" [level=3] [ref=f1e136]
+              - link "View all" [ref=f1e137] [cursor=pointer]:
+                - /url: /projects
+            - list [ref=f1e141]:
+              - listitem [ref=f1e142]:
+                - link "Mobile App Aug 28, 2024" [ref=f1e143] [cursor=pointer]:
+                  - /url: /projects/proj-2
+                  - generic [ref=f1e144]: Mobile App
+                  - generic [ref=f1e145]: Aug 28, 2024
+              - listitem [ref=f1e146]:
+                - link "E-commerce Platform Aug 25, 2024" [ref=f1e147] [cursor=pointer]:
+                  - /url: /projects/proj-1
+                  - generic [ref=f1e148]: E-commerce Platform
+                  - generic [ref=f1e149]: Aug 25, 2024
+        - region [ref=f1e150]:
+          - generic [ref=f1e151]:
+            - generic [ref=f1e152]:
+              - heading "Recent Flows" [level=3] [ref=f1e153]
+              - generic [ref=f1e154]: "5"
+            - list [ref=f1e156]:
+              - listitem [ref=f1e157]:
+                - generic [ref=f1e158]: Change Avatar Flow
+                - generic [ref=f1e159]: Aug 15, 2024
+              - listitem [ref=f1e160]:
+                - generic [ref=f1e161]: Edit Profile Flow
+                - generic [ref=f1e162]: Aug 14, 2024
+              - listitem [ref=f1e163]:
+                - generic [ref=f1e164]: Welcome Screen Flow
+                - generic [ref=f1e165]: Aug 13, 2024
+              - listitem [ref=f1e166]:
+                - generic [ref=f1e167]: Payment Flow
+                - generic [ref=f1e168]: Aug 9, 2024
+              - listitem [ref=f1e169]:
+                - generic [ref=f1e170]: Remove from Cart Flow
+                - generic [ref=f1e171]: Aug 7, 2024
+  - region "Notifications alt+T"

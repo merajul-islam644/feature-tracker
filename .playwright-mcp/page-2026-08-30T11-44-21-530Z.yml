@@ -1,0 +1,15 @@
+- generic [ref=f1e4]:
+  - generic [ref=f1e5]:
+    - heading "Welcome back" [level=1] [ref=f1e10]
+    - paragraph [ref=f1e11]: Sign in to your Feature Tracker account.
+  - generic [ref=f1e12]:
+    - generic [ref=f1e13]:
+      - generic [ref=f1e14]: Email*
+      - textbox "Email" [ref=f1e15]:
+        - /placeholder: you@example.com
+    - generic [ref=f1e16]:
+      - generic [ref=f1e17]: Password*
+      - textbox "Password" [ref=f1e18]:
+        - /placeholder: ••••••••
+    - button "Sign in" [ref=f1e19] [cursor=pointer]
+    - paragraph [ref=f1e21]: Demo mode — any non-empty credentials work.

@@ -1,0 +1,154 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "MailCraft" [ref=e4] [cursor=pointer]:
+      - /url: ../
+    - generic [ref=e10]: Live demo
+    - navigation "Primary" [ref=e11]:
+      - link "Documentation" [ref=e12] [cursor=pointer]:
+        - /url: ../DOCS.html
+      - link "Overview" [ref=e13] [cursor=pointer]:
+        - /url: ../
+      - link "npm" [ref=e14] [cursor=pointer]:
+        - /url: https://www.npmjs.com/package/@seliseblocks/mailcraft
+    - button "Switch to dark" [ref=e16] [cursor=pointer]
+  - generic [ref=e17]:
+    - generic [ref=e18]:
+      - generic [ref=e19]: Template
+      - combobox "Template" [ref=e20] [cursor=pointer]:
+        - option "Activate your account" [selected]
+        - option "Back in stock"
+        - option "Cart left behind"
+        - option "Community giveaway"
+        - option "Frontend Futures invite"
+        - option "Give 25 get 25"
+        - option "Invoice paid"
+        - option "Meet Nova launch"
+        - option "Mega weekend sale"
+        - option "Order confirmed"
+        - option "Rate your headphones"
+        - option "Reset your password"
+        - option "Thank-you promo code"
+        - option "The Sunday Brief"
+        - option "Welcome to your workspace"
+        - option "Your order shipped"
+        - option "Your password was changed"
+        - option "Your sign-in code"
+    - generic [ref=e21]:
+      - generic [ref=e22]: Language
+      - combobox "Language" [ref=e23] [cursor=pointer]:
+        - option "English" [selected]
+        - option "Arabic"
+        - option "Bangla"
+        - option "Dzongkha"
+        - option "Bulgarian"
+        - option "Catalan"
+        - option "Czech"
+        - option "Danish"
+        - option "German"
+        - option "Swiss German"
+        - option "Greek"
+        - option "Spanish"
+        - option "Estonian"
+        - option "Finnish"
+        - option "French"
+        - option "Croatian"
+        - option "Hungarian"
+        - option "Italian"
+        - option "Lithuanian"
+        - option "Latvian"
+        - option "Norwegian Bokmål"
+        - option "Dutch"
+        - option "Polish"
+        - option "Portuguese"
+        - option "Romanian"
+        - option "Russian"
+        - option "Slovak"
+        - option "Slovenian"
+        - option "Swedish"
+        - option "Turkish"
+        - option "Ukrainian"
+    - generic [ref=e24]:
+      - generic [ref=e25]: Font
+      - combobox "Font" [ref=e26] [cursor=pointer]:
+        - option "Default (Manrope)" [selected]
+        - option "Match host app"
+        - option "Serif"
+        - option "Verdana"
+    - generic [ref=e27]:
+      - generic [ref=e28]: Brand
+      - textbox "Brand" [ref=e29] [cursor=pointer]: "#0065b3"
+  - generic [ref=e32]:
+    - generic [ref=e33]:
+      - banner [ref=e34]:
+        - generic [ref=e35]: MailCraft
+        - generic [ref=e42]: saved 08:29 PM
+        - generic [ref=e44]:
+          - button "Desktop" [pressed] [ref=e45] [cursor=pointer]
+          - button "Mobile" [ref=e48] [cursor=pointer]
+        - generic [ref=e51]:
+          - button "Undo — ⌘Z" [ref=e52] [cursor=pointer]
+          - button "Redo — ⌘⇧Z" [disabled] [ref=e56]
+          - button "Dark mode" [ref=e60] [cursor=pointer]: Dark
+          - button "Draft email content with AI" [ref=e63] [cursor=pointer]: Draft
+          - button "Edit the raw HTML with a live preview" [ref=e67] [cursor=pointer]: Code
+          - button "Preview the email" [ref=e72] [cursor=pointer]: Preview
+          - button "Export your email" [ref=e76] [cursor=pointer]: Export
+      - generic [ref=e79]:
+        - main [ref=e80]:
+          - generic [ref=e84]:
+            - paragraph [ref=e91]: "{{ company }}"
+            - generic [ref=e94]:
+              - paragraph [ref=e98]: Account activation
+              - 'heading "One last step, {{ first_name }}" [level=1] [ref=e101]'
+              - paragraph [ref=e105]: "Welcome to {{ company }}. Tap the button below to activate your account — it takes less than ten seconds."
+            - link "Activate my account" [ref=e111]:
+              - /url: https://example.com/activate
+            - generic [ref=e117]:
+              - paragraph [ref=e118]: "Button not working? Paste this into your browser:"
+              - paragraph [ref=e119]:
+                - link "https://example.com/activate" [ref=e120]:
+                  - /url: https://example.com/activate
+            - generic [ref=e126]:
+              - text: This link is personal to
+              - strong [ref=e127]: "{{ email }}"
+              - text: "and expires in 24 hours. If you didn’t create an account with {{ company }}, you can safely ignore this email."
+            - paragraph [ref=e134]:
+              - link "Unsubscribe" [ref=e135]:
+                - /url: "{{ unsubscribe_url }}"
+              - text: ·
+              - link "Notification settings" [ref=e136]:
+                - /url: https://example.com/preferences
+          - generic [ref=e137]:
+            - generic [ref=e138]: 6 rows · 8 blocks · 600px
+            - generic [ref=e140]:
+              - button "75%" [ref=e141] [cursor=pointer]
+              - button "100%" [pressed] [ref=e142] [cursor=pointer]
+              - button "125%" [ref=e143] [cursor=pointer]
+        - complementary [ref=e144]:
+          - tablist [ref=e145]:
+            - tab "Design" [selected] [ref=e146] [cursor=pointer]
+            - tab "Content blocks" [ref=e150] [cursor=pointer]
+            - tab "Sections" [ref=e154] [cursor=pointer]
+            - tab "Assets" [ref=e157] [cursor=pointer]
+            - tab "Layers" [ref=e162] [cursor=pointer]
+            - tab "Settings" [ref=e164] [cursor=pointer]
+            - tab "Variables" [ref=e168] [cursor=pointer]
+          - generic [ref=e174]:
+            - generic [ref=e176]:
+              - generic [ref=e177]: Nothing selected
+              - generic [ref=e178]: Inspector
+            - generic [ref=e180]:
+              - paragraph [ref=e181]:
+                - text: Pick a row or block on the canvas to style it here. Drag blocks in from the
+                - strong [ref=e182]: Content blocks
+                - text: tab; double-click any text to edit it in place.
+              - generic [ref=e183]:
+                - generic [ref=e184]: Shortcuts
+                - generic [ref=e185]:
+                  - generic [ref=e186]: ⌘Z / ⌘⇧Z — undo, redo
+                  - generic [ref=e187]: ⌘D — duplicate selection
+                  - generic [ref=e188]: ⌫ — delete selection
+                  - generic [ref=e189]: ⌘E — export email
+                  - generic [ref=e190]: ESC — deselect, close
+        - generic [ref=e191]: Powered by SELISE Blocks © 2026
+    - generic [ref=e193]: Activate your account loaded

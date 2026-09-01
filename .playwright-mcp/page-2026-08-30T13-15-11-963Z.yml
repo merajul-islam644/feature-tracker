@@ -1,0 +1,160 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "MailCraft" [ref=e4] [cursor=pointer]:
+      - /url: ../
+    - generic [ref=e10]: Live demo
+    - navigation "Primary" [ref=e11]:
+      - link "Documentation" [ref=e12] [cursor=pointer]:
+        - /url: ../DOCS.html
+      - link "Overview" [ref=e13] [cursor=pointer]:
+        - /url: ../
+      - link "npm" [ref=e14] [cursor=pointer]:
+        - /url: https://www.npmjs.com/package/@seliseblocks/mailcraft
+    - button "Switch to light" [ref=e413] [cursor=pointer]
+  - generic [ref=e17]:
+    - generic [ref=e18]:
+      - generic [ref=e19]: Template
+      - combobox "Template" [ref=e20] [cursor=pointer]:
+        - option "Activate your account"
+        - option "Back in stock"
+        - option "Cart left behind"
+        - option "Community giveaway"
+        - option "Frontend Futures invite"
+        - option "Give 25 get 25"
+        - option "Invoice paid"
+        - option "Meet Nova launch"
+        - option "Mega weekend sale"
+        - option "Order confirmed" [selected]
+        - option "Rate your headphones"
+        - option "Reset your password"
+        - option "Thank-you promo code"
+        - option "The Sunday Brief"
+        - option "Welcome to your workspace"
+        - option "Your order shipped"
+        - option "Your password was changed"
+        - option "Your sign-in code"
+    - generic [ref=e21]:
+      - generic [ref=e22]: Language
+      - combobox "Language" [ref=e23] [cursor=pointer]:
+        - option "English"
+        - option "Arabic"
+        - option "Bangla" [selected]
+        - option "Dzongkha"
+        - option "Bulgarian"
+        - option "Catalan"
+        - option "Czech"
+        - option "Danish"
+        - option "German"
+        - option "Swiss German"
+        - option "Greek"
+        - option "Spanish"
+        - option "Estonian"
+        - option "Finnish"
+        - option "French"
+        - option "Croatian"
+        - option "Hungarian"
+        - option "Italian"
+        - option "Lithuanian"
+        - option "Latvian"
+        - option "Norwegian Bokmål"
+        - option "Dutch"
+        - option "Polish"
+        - option "Portuguese"
+        - option "Romanian"
+        - option "Russian"
+        - option "Slovak"
+        - option "Slovenian"
+        - option "Swedish"
+        - option "Turkish"
+        - option "Ukrainian"
+    - generic [ref=e24]:
+      - generic [ref=e25]: Font
+      - combobox "Font" [ref=e26] [cursor=pointer]:
+        - option "Default (Manrope)"
+        - option "Match host app"
+        - option "Serif" [selected]
+        - option "Verdana"
+    - generic [ref=e27]:
+      - generic [ref=e28]: Brand
+      - textbox "Brand" [ref=e29] [cursor=pointer]: "#ff5500"
+  - generic [ref=e33]:
+    - banner [ref=e34]:
+      - generic [ref=e35]: MailCraft
+      - generic [ref=e42]: সংরক্ষিত হয়েছে 07:08 PM
+      - generic [ref=e44]:
+        - button "ডেস্কটপ" [ref=e1578] [cursor=pointer]
+        - button "মোবাইল" [pressed] [ref=e1581] [cursor=pointer]
+      - generic [ref=e51]:
+        - button "Undo — ⌘Z" [ref=e52] [cursor=pointer]
+        - button "Redo — ⌘⇧Z" [disabled] [ref=e56]
+        - button "Light mode" [ref=e306] [cursor=pointer]: লাইট
+        - button "Draft email content with AI" [ref=e63] [cursor=pointer]: Draft
+        - button "Edit the raw HTML with a live preview" [ref=e67] [cursor=pointer]: কোড
+        - button "Preview the email" [ref=e72] [cursor=pointer]: প্রিভিউ
+        - button "Export your email" [ref=e76] [cursor=pointer]: রপ্তানি
+    - generic [ref=e79]:
+      - main [ref=e80]:
+        - generic [ref=e1584]:
+          - generic [ref=e1587]:
+            - paragraph [ref=e1591]: Order confirmed
+            - 'heading "Thanks, {{ first_name }} — it’s on its way" [level=1] [ref=e1594]'
+            - paragraph [ref=e1598]:
+              - text: Order
+              - strong [ref=e1599]: "#48213"
+              - text: ", placed today. We’ll email tracking as soon as the courier scans it — usually within one business day."
+          - generic [ref=e1600]: Field jacket — olive, M $148.00 Merino crew — charcoal, M $85.00 Shipping Free Total $233.00
+          - link "View your order" [ref=e1611]:
+            - /url: https://example.com/orders/48213
+          - generic [ref=e1623]:
+            - paragraph [ref=e1624]: Need a different size? Exchanges are free for 30 days — start one from the order page above.
+            - paragraph [ref=e1625]:
+              - text: "This receipt was sent to {{ email }}."
+              - link "Unsubscribe from marketing" [ref=e1626]:
+                - /url: "{{ unsubscribe_url }}"
+              - text: — you will still receive order emails.
+        - generic [ref=e137]:
+          - generic [ref=e138]: 5টি সারি · 7টি ব্লক · 375px
+          - generic [ref=e140]:
+            - button "75%" [pressed] [ref=e1627] [cursor=pointer]
+            - button "100%" [ref=e1628] [cursor=pointer]
+            - button "125%" [ref=e1629] [cursor=pointer]
+      - complementary [ref=e144]:
+        - tablist [ref=e145]:
+          - tab "স্টাইল" [ref=e1630] [cursor=pointer]
+          - tab "ব্লক" [selected] [ref=e1634] [cursor=pointer]
+          - tab "সেকশন" [ref=e1638] [cursor=pointer]
+          - tab "ফাইল" [ref=e1641] [cursor=pointer]
+          - tab "কাঠামো" [ref=e1646] [cursor=pointer]
+          - tab "Settings" [ref=e1648] [cursor=pointer]
+          - tab "ভেরিয়েবল" [ref=e1652] [cursor=pointer]
+        - generic [ref=e1657]:
+          - generic [ref=e1658]:
+            - generic [ref=e1659]: ক্যানভাসে টেনে আনুন
+            - generic [ref=e1660]: 25টি ব্লক
+          - generic [ref=e1662]:
+            - generic "Display heading — drag onto the canvas, or double-click to append" [ref=e1663]: Heading
+            - generic "Rich text — edit inline — drag onto the canvas, or double-click to append" [ref=e1667]: Text
+            - generic "Bulleted or numbered list — drag onto the canvas, or double-click to append" [ref=e1671]: List
+            - generic "Quote — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1675]: Quote
+            - generic "Image from the library — drag onto the canvas, or double-click to append" [ref=e1683]: Image
+            - generic "Gallery — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1690]: Gallery
+            - generic "Call to action — drag onto the canvas, or double-click to append" [ref=e1698]: Button
+            - generic "Data table — edit cells inline — drag onto the canvas, or double-click to append" [ref=e1703]: Table
+            - generic "Card — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1708]: Card
+            - generic "Product — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1713]: Product
+            - generic "Hero — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1718]: Hero
+            - generic "Stats — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1724]: Stats
+            - generic "Styled container with free content — drag onto the canvas, or double-click to append" [ref=e1728]: Section box
+            - generic "Horizontal rule — drag onto the canvas, or double-click to append" [ref=e1734]: Divider
+            - generic "Vertical space — drag onto the canvas, or double-click to append" [ref=e1738]: Spacer
+            - generic "Social icon row — drag onto the canvas, or double-click to append" [ref=e1744]: Social
+            - generic "Thumbnail + play badge — drag onto the canvas, or double-click to append" [ref=e1751]: Video
+            - generic "Iframe embed — map, form, player — drag onto the canvas, or double-click to append" [ref=e1757]: Embed
+            - generic "Navigation row — drag onto the canvas, or double-click to append" [ref=e1763]: Menu
+            - generic "Footer — drops a row of ordinary blocks you can edit and rearrange one by one" [ref=e1768]: Footer
+            - generic "Raw HTML block — drag onto the canvas, or double-click to append" [ref=e1773]: HTML
+            - generic "Inject a style block — drag onto the canvas, or double-click to append" [ref=e1779]: Raw CSS
+            - generic "Paste SVG markup — drag onto the canvas, or double-click to append" [ref=e1784]: Inline SVG
+            - generic "Preformatted code sample — drag onto the canvas, or double-click to append" [ref=e1790]: Code
+            - generic "Live countdown — drag onto the canvas, or double-click to append" [ref=e1797]: Countdown
+      - generic [ref=e191]: Powered by SELISE Blocks © 2026

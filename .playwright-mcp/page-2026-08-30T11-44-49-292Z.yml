@@ -1,0 +1,68 @@
+- generic [ref=f1e22]:
+  - banner [ref=f1e23]:
+    - link "Feature Tracker" [ref=f1e25] [cursor=pointer]:
+      - /url: /dashboard
+    - button "Open user menu" [ref=f1e32] [cursor=pointer]:
+      - img "Meraz Zoarder" [ref=f1e33]: MZ
+  - generic [ref=f1e36]:
+    - navigation "Primary" [ref=f1e37]:
+      - generic [ref=f1e38]: Menu
+      - list [ref=f1e40]:
+        - listitem [ref=f1e41]:
+          - link "Dashboard" [ref=f1e42] [cursor=pointer]:
+            - /url: /dashboard
+        - listitem [ref=f1e49]:
+          - link "Project" [ref=f1e50] [cursor=pointer]:
+            - /url: /projects
+      - button "Collapse sidebar" [ref=f1e55] [cursor=pointer]:
+        - generic [ref=f1e59]: Collapse
+    - main [ref=f1e60]:
+      - generic [ref=f1e62]:
+        - generic [ref=f1e63]:
+          - heading "Dashboard" [level=1] [ref=f1e64]
+          - paragraph [ref=f1e65]: Welcome back, Meraz Zoarder. Here's a snapshot of your workspace.
+        - region "Workspace statistics" [ref=f1e66]:
+          - generic [ref=f1e67]:
+            - paragraph [ref=f1e72]: Projects
+            - paragraph [ref=f1e74]: "2"
+          - generic [ref=f1e75]:
+            - paragraph [ref=f1e81]: Features
+            - paragraph [ref=f1e83]: "5"
+          - generic [ref=f1e84]:
+            - paragraph [ref=f1e91]: Flows
+            - paragraph [ref=f1e93]: "8"
+        - generic [ref=f1e94]:
+          - region [ref=f1e95]:
+            - generic [ref=f1e96]:
+              - heading "Recent Projects" [level=2] [ref=f1e97]
+              - link "View all" [ref=f1e98] [cursor=pointer]:
+                - /url: /projects
+            - list [ref=f1e101]:
+              - listitem [ref=f1e102]:
+                - link "Mobile App Aug 28, 2024" [ref=f1e103] [cursor=pointer]:
+                  - /url: /projects/proj-2
+                  - generic [ref=f1e104]: Mobile App
+                  - generic [ref=f1e105]: Aug 28, 2024
+              - listitem [ref=f1e106]:
+                - link "E-commerce Platform Aug 25, 2024" [ref=f1e107] [cursor=pointer]:
+                  - /url: /projects/proj-1
+                  - generic [ref=f1e108]: E-commerce Platform
+                  - generic [ref=f1e109]: Aug 25, 2024
+          - region [ref=f1e110]:
+            - heading "Recent Flows" [level=2] [ref=f1e112]
+            - list [ref=f1e113]:
+              - listitem [ref=f1e114]:
+                - generic [ref=f1e115]: Change Avatar Flow
+                - generic [ref=f1e116]: Aug 15, 2024
+              - listitem [ref=f1e117]:
+                - generic [ref=f1e118]: Edit Profile Flow
+                - generic [ref=f1e119]: Aug 14, 2024
+              - listitem [ref=f1e120]:
+                - generic [ref=f1e121]: Welcome Screen Flow
+                - generic [ref=f1e122]: Aug 13, 2024
+              - listitem [ref=f1e123]:
+                - generic [ref=f1e124]: Payment Flow
+                - generic [ref=f1e125]: Aug 9, 2024
+              - listitem [ref=f1e126]:
+                - generic [ref=f1e127]: Remove from Cart Flow
+                - generic [ref=f1e128]: Aug 7, 2024

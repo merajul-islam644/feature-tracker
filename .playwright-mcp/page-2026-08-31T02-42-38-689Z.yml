@@ -1,0 +1,130 @@
+- generic:
+  - generic:
+    - generic:
+      - generic:
+        - generic:
+          - generic:
+            - link:
+              - /url: /dashboard
+              - generic: Feature Tracker
+          - generic:
+            - generic:
+              - generic: Navigation
+              - list:
+                - listitem:
+                  - link:
+                    - /url: /dashboard
+                    - generic: Dashboard
+                - listitem:
+                  - link:
+                    - /url: /projects
+                    - generic: Project
+                - listitem:
+                  - link:
+                    - /url: /issue-tracker
+                    - generic: Issue Tracker
+          - generic:
+            - list:
+              - listitem:
+                - button:
+                  - generic:
+                    - generic: Meraz Zoarder
+                    - generic: meraz-zoarder@yopmail.com
+              - listitem:
+                - button:
+                  - generic: বাংলা
+                  - generic: ↻
+              - listitem:
+                - button:
+                  - generic: Sign out
+              - listitem:
+                - button:
+                  - generic: Collapse
+          - button
+      - main:
+        - generic:
+          - generic:
+            - button:
+              - generic: Toggle Sidebar
+            - link:
+              - /url: /dashboard
+              - generic: Feature Tracker
+          - generic:
+            - generic:
+              - button
+              - button:
+                - generic: "2"
+              - button
+            - button [expanded]:
+              - generic: MZ
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - heading [level=1]: Dashboard
+                - paragraph: Welcome back, Meraz Zoarder. Here's a snapshot of your workspace.
+              - region:
+                - generic:
+                  - generic:
+                    - paragraph: Projects
+                  - generic:
+                    - paragraph: "2"
+                - generic:
+                  - generic:
+                    - paragraph: Features
+                  - generic:
+                    - paragraph: "5"
+                - generic:
+                  - generic:
+                    - paragraph: Flows
+                  - generic:
+                    - paragraph: "8"
+              - generic:
+                - region:
+                  - generic:
+                    - generic:
+                      - heading [level=3]: Recent Projects
+                      - link:
+                        - /url: /projects
+                        - text: View all
+                    - generic:
+                      - list:
+                        - listitem:
+                          - link:
+                            - /url: /projects/proj-2
+                            - generic: Mobile App
+                            - generic: Aug 28, 2024
+                        - listitem:
+                          - link:
+                            - /url: /projects/proj-1
+                            - generic: E-commerce Platform
+                            - generic: Aug 25, 2024
+                - region:
+                  - generic:
+                    - generic:
+                      - heading [level=3]: Recent Flows
+                      - generic: "5"
+                    - generic:
+                      - list:
+                        - listitem:
+                          - generic: Change Avatar Flow
+                          - generic: Aug 15, 2024
+                        - listitem:
+                          - generic: Edit Profile Flow
+                          - generic: Aug 14, 2024
+                        - listitem:
+                          - generic: Welcome Screen Flow
+                          - generic: Aug 13, 2024
+                        - listitem:
+                          - generic: Payment Flow
+                          - generic: Aug 9, 2024
+                        - listitem:
+                          - generic: Remove from Cart Flow
+                          - generic: Aug 7, 2024
+      - region "Notifications alt+T"
+  - menu "Open user menu" [active] [ref=f1e172]:
+    - generic [ref=f1e173]: Meraz Zoarder
+    - separator [ref=f1e174]
+    - menuitem "Profile" [ref=f1e175]
+    - separator [ref=f1e180]
+    - menuitem "Logout" [ref=f1e181]

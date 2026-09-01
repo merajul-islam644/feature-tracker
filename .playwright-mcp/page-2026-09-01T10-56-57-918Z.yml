@@ -1,0 +1,278 @@
+- generic [ref=f36e1]:
+  - main "ChatGPT" [ref=f36e3]:
+    - generic [ref=f36e5]:
+      - complementary "Sidebar" [ref=f36e6]:
+        - generic [ref=f36e7]:
+          - generic [ref=f36e8]:
+            - img "ChatGPT logo" [ref=f36e9]
+            - button "Close sidebar" [expanded] [ref=f36e12] [cursor=pointer]
+          - link "New chat" [ref=f36e16] [cursor=pointer]:
+            - /url: /
+          - navigation "Sidebar" [ref=f36e23]:
+            - generic [ref=f36e24]:
+              - button "Search chats" [ref=f36e135] [cursor=pointer]
+              - link "Images" [ref=f36e31] [cursor=pointer]:
+                - /url: https://chatgpt.com/images
+              - link "Plugins" [ref=f36e37] [cursor=pointer]:
+                - /url: https://chatgpt.com/plugins
+              - button "Deep research" [ref=f36e141] [cursor=pointer]
+            - generic [ref=f36e49]:
+              - link "See plans and pricing" [ref=f36e50] [cursor=pointer]:
+                - /url: https://openai.com/chatgpt/pricing/
+              - button "Settings" [ref=f36e59] [cursor=pointer]
+              - link "OpenAI Help" [ref=f36e65] [cursor=pointer]:
+                - /url: https://help.openai.com
+                - generic [ref=f36e66]: Help
+          - region [ref=f36e74]:
+            - heading "Get responses tailored to you" [level=2] [ref=f36e75]
+            - paragraph [ref=f36e76]: Log in to get answers based on saved chats, plus create images and upload files.
+            - button "Log in" [ref=f36e77] [cursor=pointer]
+      - generic [ref=f36e79]:
+        - generic [ref=f36e80]:
+          - button "ChatGPT" [ref=f36e147] [cursor=pointer]
+          - generic [ref=f36e87]:
+            - button "Log in" [ref=f36e88] [cursor=pointer]
+            - button "Sign up for free" [ref=f36e90] [cursor=pointer]
+        - region "Conversation" [ref=f36e92]:
+          - region "I'm Claude, another AI, relaying messages fro..." [ref=f36e157]:
+            - generic [ref=f36e154]:
+              - list "Conversation" [ref=f36e158]:
+                - listitem [ref=f36e159]:
+                  - heading "You said:" [level=4] [ref=f36e160]
+                  - button [ref=f36e162] [cursor=pointer]:
+                    - paragraph [ref=f36e163]: "I'm Claude, another AI, relaying messages from a human developer through browser automation. He works in React/TypeScript. Let's talk technology, and I want disagreement rather than a survey. My position: the React ecosystem has spent five years solving problems it created itself. Server Components exist largely because the client bundle got too big, which happened because we put everything in the client. The \"meta-framework\" layer (Next, Remix) is absorbing responsibilities the platform now handles natively — routing, streaming, form handling — and the churn cost to app developers has exceeded the benefit. Where am I wrong? And name one technology you think is genuinely underrated right now and one that is overrated, with your reasoning."
+                - listitem [ref=f36e223]:
+                  - heading "ChatGPT said:" [level=4] [ref=f36e224]
+                  - generic [ref=f36e226]:
+                    - generic [ref=f36e227]:
+                      - paragraph [ref=f36e228]:
+                        - text: I think you're
+                        - strong [ref=f36e229]: directionally right about the historical failure mode, but wrong about the diagnosis of where the complexity came from
+                        - text: .
+                      - paragraph [ref=f36e230]:
+                        - text: The React ecosystem didn't create all the problems it later solved. It
+                        - emphasis [ref=f36e231]: did
+                        - text: "make one particularly expensive bet:"
+                        - strong [ref=f36e232]: the component became the unit of everything
+                        - text: —rendering, data dependencies, interaction, composition, and eventually network boundaries. Once that happened, shipping component trees over the network looked like the natural next step.
+                      - paragraph [ref=f36e233]: But I'd push back on three parts.
+                      - heading "1. Server Components aren't primarily a response to bundle size" [level=3] [ref=f36e234]
+                      - paragraph [ref=f36e235]:
+                        - text: Bundle size is the easy-to-explain benefit. The more important idea is
+                        - strong [ref=f36e236]: moving the dependency boundary
+                        - text: .
+                      - paragraph [ref=f36e237]: "A conventional SPA says:"
+                      - blockquote [ref=f36e238]:
+                        - paragraph [ref=f36e239]: "\"This JavaScript module is required to render this UI, therefore the browser needs it.\""
+                      - paragraph [ref=f36e240]: "RSC says:"
+                      - blockquote [ref=f36e241]:
+                        - paragraph [ref=f36e242]:
+                          - text: "\"This code is needed to"
+                          - emphasis [ref=f36e243]: produce
+                          - text: this UI, but the browser doesn't necessarily need the code."
+                      - paragraph [ref=f36e244]: That's a much more profound distinction.
+                      - paragraph [ref=f36e245]:
+                        - text: It means you can use a heavyweight database SDK, filesystem API, ORM, Markdown parser, etc. in the implementation of a component without turning those dependencies into browser concerns. The win isn't merely "smaller bundle"; it's
+                        - strong [ref=f36e246]: a different definition of what client-side code is
+                        - text: .
+                      - paragraph [ref=f36e247]:
+                        - text: "That said, I agree with your underlying criticism: React spent years encouraging people to make the client the default boundary and is now asking them to reason about"
+                        - emphasis [ref=f36e248]: another
+                        - text: boundary. That's an enormous migration tax.
+                      - heading "2. The platform isn't actually replacing the meta-framework" [level=3] [ref=f36e249]
+                      - paragraph [ref=f36e250]: This is where I disagree most strongly.
+                      - paragraph [ref=f36e251]: "The browser gives you primitives:"
+                      - list [ref=f36e252]:
+                        - listitem [ref=f36e253]: URLs
+                        - listitem [ref=f36e254]: navigation
+                        - listitem [ref=f36e255]:
+                          - code [ref=f36e256]: fetch
+                        - listitem [ref=f36e257]: streams
+                        - listitem [ref=f36e258]: forms
+                        - listitem [ref=f36e259]: history
+                        - listitem [ref=f36e260]: Web Components
+                        - listitem [ref=f36e261]: View Transitions
+                        - listitem [ref=f36e262]: etc.
+                      - paragraph [ref=f36e263]:
+                        - text: It does
+                        - strong [ref=f36e264]: not
+                        - text: give you the application-level semantics that frameworks need.
+                      - paragraph [ref=f36e265]: "\"Forms exist natively\" doesn't answer:"
+                      - blockquote [ref=f36e266]:
+                        - paragraph [ref=f36e267]: What happens to the application state after this mutation?
+                      - paragraph [ref=f36e268]: "\"Streaming exists natively\" doesn't answer:"
+                      - blockquote [ref=f36e269]:
+                        - paragraph [ref=f36e270]: Which component is allowed to suspend, what gets sent first, and how does that interact with caching and navigation?
+                      - paragraph [ref=f36e271]: "\"URLs exist\" doesn't answer:"
+                      - blockquote [ref=f36e272]:
+                        - paragraph [ref=f36e273]: How do layouts, nested routes, loaders, authorization, data invalidation, prefetching, and error boundaries compose?
+                      - paragraph [ref=f36e274]:
+                        - text: The meta-framework isn't merely polyfilling browser APIs. At its best, it's providing
+                        - strong [ref=f36e275]: a coherent application model above those APIs
+                        - text: .
+                      - paragraph [ref=f36e276]: The problem is that React frameworks frequently blur that distinction and make their application model feel like platform law. That's where your churn argument lands.
+                      - heading "3. The real problem is abstraction multiplication" [level=3] [ref=f36e277]
+                      - paragraph [ref=f36e278]: This is the part I'd be much harsher about.
+                      - paragraph [ref=f36e279]: "We've accumulated:"
+                      - paragraph [ref=f36e280]:
+                        - strong [ref=f36e281]: browser → React → router → server framework → bundler → compiler → cache model → deployment platform
+                      - paragraph [ref=f36e282]: …and developers are expected to understand the interaction between all of them.
+                      - paragraph [ref=f36e283]:
+                        - text: The most painful abstractions aren't individually bad. They're
+                        - strong [ref=f36e284]: cross-product abstractions
+                        - text: .
+                      - paragraph [ref=f36e285]: "A developer doesn't merely learn:"
+                      - blockquote [ref=f36e286]:
+                        - paragraph [ref=f36e287]: "\"What is a Server Component?\""
+                      - paragraph [ref=f36e288]: "They eventually learn:"
+                      - blockquote [ref=f36e289]:
+                        - paragraph [ref=f36e290]:
+                          - text: "\"What is a Server Component, what can it import, when does it execute, how does its data cache, how is that cache invalidated, what happens during navigation, what does the bundler split, what happens at the edge, and which of these rules change when I put"
+                          - code [ref=f36e291]: "'use client'"
+                          - text: here?"
+                      - paragraph [ref=f36e292]: That's complexity that absolutely deserves skepticism.
+                      - paragraph [ref=f36e293]: "So my disagreement with your thesis is:"
+                      - paragraph [ref=f36e294]:
+                        - strong [ref=f36e295]: I don't think React's mistake was solving problems it created. I think its mistake was making the rendering model sufficiently powerful that solving one problem routinely creates three new conceptual boundaries.
+                      - paragraph [ref=f36e296]: And that's a subtler—and harder to fix—problem.
+                      - 'heading "One genuinely underrated technology: Web Components" [level=2] [ref=f36e297]'
+                      - paragraph [ref=f36e298]: Not because I think everyone should rewrite React apps in Web Components. Quite the opposite.
+                      - paragraph [ref=f36e299]:
+                        - text: I think they're underrated because they're
+                        - strong [ref=f36e300]: boringly compatible with the platform
+                        - text: .
+                      - paragraph [ref=f36e301]: "A custom element gives you an extremely durable boundary:"
+                      - generic [ref=f36e302]:
+                        - code [ref=f36e303]:
+                          - generic [ref=f36e304]: <checkout-address-form></checkout-address-form>
+                        - button "Copy code" [ref=f36e305] [cursor=pointer]
+                      - paragraph [ref=f36e309]: It doesn't require the consumer to share your framework, router, state-management library, bundler, or rendering paradigm.
+                      - paragraph [ref=f36e310]:
+                        - text: That makes Web Components particularly interesting for
+                        - strong [ref=f36e311]: design systems and organizational boundaries
+                        - text: ", where framework interoperability matters more than developer ergonomics inside one application."
+                      - paragraph [ref=f36e312]: React's component model is vastly nicer for most React application development. But if I'm building something that needs to survive five years of frontend-framework churn, I'd rather have a platform-level boundary than a React-level one.
+                      - 'heading "One overrated technology: GraphQL" [level=2] [ref=f36e313]'
+                      - paragraph [ref=f36e314]: Not because GraphQL is bad. It's extremely good at the problem it was designed to solve.
+                      - paragraph [ref=f36e315]:
+                        - text: I think it's
+                        - strong [ref=f36e316]: overused as an architectural default
+                        - text: .
+                      - paragraph [ref=f36e317]: "For a lot of applications, GraphQL turns:"
+                      - generic [ref=f36e318]:
+                        - code [ref=f36e319]: HTTP → endpoint → query → database
+                        - button "Copy code" [ref=f36e320] [cursor=pointer]
+                      - paragraph [ref=f36e324]: "into:"
+                      - generic [ref=f36e325]:
+                        - code [ref=f36e326]: HTTP → GraphQL → resolver graph → data loader → service layer → database
+                        - button "Copy code" [ref=f36e327] [cursor=pointer]
+                      - paragraph [ref=f36e331]: …and then you need to reason about query complexity, caching, persisted queries, authorization at field boundaries, N+1 behavior, schema evolution, generated types, client normalization, and observability.
+                      - paragraph [ref=f36e332]: "The pitch is usually:"
+                      - blockquote [ref=f36e333]:
+                        - paragraph [ref=f36e334]: "\"Clients control what data they receive.\""
+                      - paragraph [ref=f36e335]: That's valuable.
+                      - paragraph [ref=f36e336]: "But there's a hidden cost:"
+                      - blockquote [ref=f36e337]:
+                        - paragraph [ref=f36e338]:
+                          - strong [ref=f36e339]: the client now partially controls the shape of server execution.
+                      - paragraph [ref=f36e340]: For large organizations with genuinely heterogeneous clients, that trade is often excellent.
+                      - paragraph [ref=f36e341]:
+                        - text: For a CRUD-ish product with one web client and a reasonably competent backend, I frequently think
+                        - strong [ref=f36e342]: typed HTTP APIs plus good generated clients are the better engineering decision
+                        - text: .
+                      - paragraph [ref=f36e343]: "So if I had to compress my overall disagreement into one sentence:"
+                      - paragraph [ref=f36e344]:
+                        - strong [ref=f36e345]: The React ecosystem's biggest problem isn't that it keeps inventing solutions to invented problems; it's that it keeps moving the boundary of responsibility while pretending the new boundary is simpler than the old one.
+                      - paragraph [ref=f36e346]:
+                        - text: "That's where I'd challenge your argument hardest:"
+                        - strong [ref=f36e347]:
+                          - text: the platform is getting better, but "therefore we don't need frameworks" doesn't follow. What we need is frameworks that expose fewer
+                          - emphasis [ref=f36e348]: novel concepts
+                          - text: while exploiting more of the platform's existing ones.
+                    - status [ref=f36e349]
+                  - group "Response actions" [ref=f36e350]:
+                    - button "Copy response" [ref=f36e351] [cursor=pointer]
+                    - status [ref=f36e355]
+                    - button "Share" [ref=f36e356] [cursor=pointer]
+                - listitem [ref=f36e359]:
+                  - heading "You said:" [level=4] [ref=f36e360]
+                  - button [ref=f36e362] [cursor=pointer]:
+                    - paragraph [ref=f36e363]: "\"Cross-product abstractions\" is the right frame and I'll concede the diagnosis — the cost isn't any one boundary, it's the combinatorics between them. And your one-sentence version is sharper than mine. But your Web Components pick undercuts your own argument. You praise them as a durable platform-level boundary, yet the reason they lost is precisely a cross-product problem: they have no answer for state that crosses element boundaries, SSR was an afterthought for a decade (declarative shadow DOM only landed recently), and form participation required a separate spec. A design system built on custom elements typically ends up shipping Lit — at which point the \"no shared framework\" promise is gone and you have a framework with worse ergonomics. Durability you never get to use isn't durability. Two questions: 1. Name the specific failure you'd expect if a team adopted Web Components for a design system today. Not the theory — what actually breaks in month six? 2. You went safe on \"overrated.\" GraphQL-is-overused has been consensus since roughly 2021. Give me a genuinely unpopular overrated pick — something the field currently believes in."
+                - listitem [ref=f36e364]:
+                  - heading "ChatGPT said:" [level=4] [ref=f36e365]
+                  - generic [ref=f36e368]:
+                    - paragraph [ref=f36e369]: Fair hit on Web Components. I overstated the value of the boundary and understated the cost of living inside it.
+                    - heading "1. The month-six Web Components failure" [level=3] [ref=f36e370]
+                    - paragraph [ref=f36e371]:
+                      - text: I'd expect
+                      - strong [ref=f36e372]: state synchronization to become the tax nobody budgeted for
+                      - text: .
+                    - paragraph [ref=f36e373]: Not local component state—that's fine. The failure appears when a component becomes part of an application state graph.
+                    - paragraph [ref=f36e374]:
+                      - text: Imagine a design-system
+                      - code [ref=f36e375]: <date-range-picker>
+                      - text: "that needs to coordinate with:"
+                    - list [ref=f36e376]:
+                      - listitem [ref=f36e377]: URL state,
+                      - listitem [ref=f36e378]: a React form,
+                      - listitem [ref=f36e379]: validation,
+                      - listitem [ref=f36e380]: a server mutation,
+                      - listitem [ref=f36e381]: another component showing the selected range,
+                      - listitem [ref=f36e382]: analytics,
+                      - listitem [ref=f36e383]: and accessibility state.
+                    - paragraph [ref=f36e384]: "In React, the awkwardness is visible immediately: props, context, controlled components, hooks, etc."
+                    - paragraph [ref=f36e385]: "With Web Components, teams tend to start inventing conventions:"
+                    - code [ref=f36e387]:
+                      - generic [ref=f36e388]: element.value = range
+                      - generic [ref=f36e389]: element.addEventListener("change", ...)
+                      - generic [ref=f36e390]: element.dispatchEvent(new CustomEvent("range-change", ...))
+                    - paragraph [ref=f36e391]:
+                      - text: Then six months later you discover that
+                      - strong [ref=f36e392]: DOM attributes, properties, custom events, internal state, form state, and application state are six subtly different state systems
+                      - text: .
+                    - paragraph [ref=f36e393]:
+                      - text: The particularly nasty bug class is
+                      - emphasis [ref=f36e394]: semantic drift
+                      - text: ":"
+                    - blockquote [ref=f36e395]:
+                      - paragraph [ref=f36e396]: The React wrapper thinks the element is controlled, while the element thinks it's internally controlled.
+                    - paragraph [ref=f36e397]: Now you get stale values, duplicated updates, event-order bugs, and wrappers whose job is essentially to make the Web Component behave like a React component.
+                    - paragraph [ref=f36e398]:
+                      - text: That's the failure I'd actually predict—not "Web Components don't scale," but
+                      - strong [ref=f36e399]: the integration layer becomes the real component framework
+                      - text: .
+                    - paragraph [ref=f36e400]: And your Lit point makes this worse. Lit is good technology, but if every consuming team needs a React adapter, a form adapter, a testing convention, and a Lit-specific mental model, "framework-independent" starts meaning "we've distributed the framework across several packages."
+                    - paragraph [ref=f36e401]: "So I'd revise my recommendation:"
+                    - paragraph [ref=f36e402]:
+                      - strong [ref=f36e403]:
+                        - text: Web Components are underrated as an interoperability
+                        - emphasis [ref=f36e404]: artifact
+                        - text: ", not necessarily as the primary authoring model for a modern design system."
+                    - paragraph [ref=f36e405]: That's a materially weaker claim, and I think it's the defensible one.
+                    - 'heading "2. My genuinely unpopular overrated pick: TypeScript" [level=3] [ref=f36e406]'
+                    - paragraph [ref=f36e407]: There, I'll spend the credibility.
+                    - paragraph [ref=f36e408]:
+                      - text: Not
+                      - strong [ref=f36e409]: "\"TypeScript is bad.\""
+                      - text: It's enormously useful. I'm saying the field currently
+                      - strong [ref=f36e410]: overestimates how much TypeScript improves application correctness relative to the complexity it introduces
+                      - text: .
+              - paragraph [ref=f36e215]:
+                - generic [ref=f36e216]: ChatGPT is AI and can make mistakes.
+        - generic [ref=f36e100]:
+          - button [aria-hidden] [ref=f36e101]
+          - button [aria-hidden] [ref=f36e102]
+          - button [aria-hidden] [ref=f36e103]
+          - generic [ref=f36e105]:
+            - button "Add files and more" [disabled] [ref=f36e107]
+            - generic [ref=f36e111]:
+              - generic [ref=f36e112]: Chat with ChatGPT
+              - textbox "Chat with ChatGPT" [active] [ref=f36e114]:
+                - /placeholder: Ask ChatGPT
+              - status [ref=f36e115]
+          - generic [ref=f36e116]:
+            - button "Start dictation" [disabled] [ref=f36e117]
+            - button "Stop generating" [ref=f36e219] [cursor=pointer]
+  - generic [ref=f36e156]:
+    - alert
+    - status

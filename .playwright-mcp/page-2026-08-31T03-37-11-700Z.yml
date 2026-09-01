@@ -1,0 +1,536 @@
+- generic:
+  - generic:
+    - generic:
+      - generic:
+        - generic:
+          - generic:
+            - generic:
+              - link:
+                - /url: /dashboard
+                - generic: Feature Tracker
+            - generic:
+              - generic:
+                - generic: Navigation
+                - list:
+                  - listitem:
+                    - link:
+                      - /url: /dashboard
+                      - generic: Dashboard
+                  - listitem:
+                    - link:
+                      - /url: /projects
+                      - generic: Project
+                  - listitem:
+                    - link:
+                      - /url: /issue-tracker
+                      - generic: Issue Tracker
+            - button
+      - main:
+        - generic:
+          - generic:
+            - generic:
+              - button
+              - button:
+                - generic: "2"
+              - button
+            - button:
+              - generic: MZ
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - heading [level=1]: Issue Tracker
+                  - paragraph: AI-powered application verification across your configured targets.
+                - generic:
+                  - button:
+                    - generic: Start Verification
+              - generic:
+                - complementary:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - heading [level=2]: AI Assistant
+                          - paragraph: Verify, configure, or review — using mock responses in this phase.
+                      - generic:
+                        - generic:
+                          - generic:
+                            - paragraph: Hello! I'm the AI verification assistant. Tell me what you'd like to verify, configure, or review.
+                        - generic:
+                          - paragraph: Suggested
+                          - list:
+                            - listitem: Verify all applications
+                            - listitem: Show critical issues
+                            - listitem: Check MailCraft login flow
+                            - listitem: Verify ISSUE-001 again
+                            - listitem: What changed since the last verification?
+                      - generic:
+                        - generic: Ask the AI verification assistant
+                        - textbox:
+                          - /placeholder: Ask anything about your application…
+                        - button [disabled]:
+                          - generic: Send message
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - heading [level=3]: Verification Targets
+                        - paragraph: Application URLs the AI will visit during verification.
+                      - generic: "3"
+                    - generic:
+                      - list:
+                        - listitem:
+                          - generic:
+                            - paragraph: MailCraft
+                            - paragraph: https://mailcraft.example.com
+                          - generic:
+                            - generic: Enabled
+                            - button
+                        - listitem:
+                          - generic:
+                            - paragraph: IAM
+                            - paragraph: https://iam.example.com
+                          - generic:
+                            - generic: Enabled
+                            - button
+                        - listitem:
+                          - generic:
+                            - paragraph: Data Gateway
+                            - paragraph: https://data.example.com
+                          - generic:
+                            - generic: Enabled
+                            - button
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic: Application URL
+                            - generic:
+                              - textbox:
+                                - /placeholder: https://example.com
+                          - button [disabled]
+                        - button [disabled]:
+                          - generic: Add URL
+                  - generic:
+                    - generic:
+                      - generic:
+                        - heading [level=3]: Secrets
+                        - paragraph: Credentials the AI uses to sign into applications during verification.
+                      - generic: "2"
+                    - generic:
+                      - list:
+                        - listitem:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - paragraph: QA Account
+                                  - paragraph: qa@example.com
+                                  - paragraph: ••••••••••
+                              - button
+                        - listitem:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - paragraph: Admin Account
+                                  - paragraph: admin@example.com
+                                  - paragraph: ••••••••••
+                              - button
+                      - button: + Add Secret
+                  - generic:
+                    - generic:
+                      - generic:
+                        - heading [level=3]: Verification Scope
+                        - paragraph: 8/10 checks selected
+                      - generic:
+                        - button:
+                          - generic: Select all
+                        - button:
+                          - generic: Clear
+                    - generic:
+                      - generic:
+                        - generic:
+                          - paragraph: Recommended
+                          - generic: "8"
+                        - paragraph: Enabled by default — the AI always runs these checks.
+                        - list:
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Page Load
+                              - generic: Pages respond and render without crashing.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Navigation
+                              - generic: Links and routes reach their destinations.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Buttons
+                              - generic: Clickable controls trigger their handlers.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Forms
+                              - generic: Inputs submit and validate correctly.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Broken Links
+                              - generic: No anchor or asset links return 404.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Console Errors
+                              - generic: No uncaught errors logged to the browser console.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Network Errors
+                              - generic: No failed XHR / fetch requests in critical paths.
+                          - listitem:
+                            - checkbox [checked]
+                            - generic:
+                              - generic: Authentication
+                              - generic: Login / logout flows succeed with valid credentials.
+                      - generic:
+                        - generic:
+                          - paragraph: Optional
+                          - generic: "2"
+                        - paragraph: Pick additional checks for this run.
+                        - list:
+                          - listitem:
+                            - checkbox
+                            - generic:
+                              - generic: Accessibility
+                              - generic: "Basic a11y: labels, contrast, keyboard reach."
+                          - listitem:
+                            - checkbox
+                            - generic:
+                              - generic: Performance
+                              - generic: Pages reach interactive under threshold.
+                  - generic:
+                    - generic:
+                      - heading [level=3]: Verification Panel
+                      - paragraph: Live status of the most recent verification run.
+                    - generic:
+                      - group:
+                        - generic:
+                          - generic:
+                            - paragraph: Targets
+                          - paragraph: "3"
+                        - generic:
+                          - generic:
+                            - paragraph: Completed
+                          - paragraph: 3/3
+                        - generic:
+                          - generic:
+                            - paragraph: Failed
+                          - paragraph: "0"
+                        - generic:
+                          - generic:
+                            - paragraph: Duration
+                          - paragraph: 3s
+                      - generic:
+                        - generic:
+                          - progressbar
+                          - paragraph: 100% — Completed
+                        - list:
+                          - listitem:
+                            - generic: MailCraft
+                            - generic: Healthy
+                          - listitem:
+                            - generic: IAM
+                            - generic: Healthy
+                          - listitem:
+                            - generic: Data Gateway
+                            - generic: Issues found
+                  - region:
+                    - heading [level=2]: Issues
+                    - group:
+                      - generic:
+                        - generic:
+                          - paragraph: Total
+                        - paragraph: "13"
+                      - generic:
+                        - generic:
+                          - paragraph: Critical
+                        - paragraph: "2"
+                      - generic:
+                        - generic:
+                          - paragraph: High
+                        - paragraph: "2"
+                      - generic:
+                        - generic:
+                          - paragraph: Medium
+                        - paragraph: "6"
+                      - generic:
+                        - generic:
+                          - paragraph: Low
+                        - paragraph: "3"
+                      - generic:
+                        - generic:
+                          - paragraph: Open
+                        - paragraph: "11"
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - searchbox
+                          - generic:
+                            - generic:
+                              - combobox
+                            - generic:
+                              - combobox
+                        - generic:
+                          - button: Critical
+                          - button: High
+                          - button: Medium
+                          - button: Low
+                    - generic:
+                      - generic:
+                        - button [expanded]:
+                          - generic: MailCraft
+                          - generic: "6"
+                        - list:
+                          - listitem:
+                            - button [pressed]:
+                              - generic:
+                                - generic:
+                                  - paragraph: "Newly discovered: console error on initial paint"
+                                  - generic: Open
+                                - paragraph: Detected during the most recent verification run.
+                                - generic:
+                                  - generic: ISSUE-4698
+                                  - generic: •
+                                  - generic: MailCraft
+                                  - generic: •
+                                  - generic: console errors
+                                  - generic: •
+                                  - generic: 8/31/2026
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Login button not working
+                                  - generic: Open
+                                - paragraph: Clicking the primary login button on /login does not submit the form.
+                                - generic:
+                                  - generic: ISSUE-001
+                                  - generic: •
+                                  - generic: MailCraft
+                                  - generic: •
+                                  - generic: authentication
+                                  - generic: •
+                                  - generic: 8/28/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Password reset link broken
+                                  - generic: Open
+                                - paragraph: Reset link in email results in 404 page.
+                                - generic:
+                                  - generic: ISSUE-004
+                                  - generic: •
+                                  - generic: MailCraft
+                                  - generic: •
+                                  - generic: authentication
+                                  - generic: •
+                                  - generic: 8/28/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: "Console error: undefined property 'theme'"
+                                  - generic: Investigating
+                                - paragraph: Settings page logs a TypeError when the dark mode toggle is interacted with rapidly.
+                                - generic:
+                                  - generic: ISSUE-005
+                                  - generic: •
+                                  - generic: MailCraft
+                                  - generic: •
+                                  - generic: ui
+                                  - generic: •
+                                  - generic: 8/27/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Back navigation skips a step
+                                  - generic: Open
+                                - paragraph: Pressing the browser back button from /inbox/compose jumps past the inbox list to /dashboard.
+                                - generic:
+                                  - generic: ISSUE-007
+                                  - generic: •
+                                  - generic: MailCraft
+                                  - generic: •
+                                  - generic: navigation
+                                  - generic: •
+                                  - generic: 8/27/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Avatar color contrast fails WCAG AA
+                                  - generic: Open
+                                - paragraph: Default avatar background vs text contrast ratio measured at 3.2:1, below the 4.5:1 WCAG AA threshold.
+                                - generic:
+                                  - generic: ISSUE-009
+                                  - generic: •
+                                  - generic: MailCraft
+                                  - generic: •
+                                  - generic: accessibility
+                                  - generic: •
+                                  - generic: 8/26/2024
+                      - generic:
+                        - button [expanded]:
+                          - generic: Data Gateway
+                          - generic: "2"
+                        - list:
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: API returns 500 on /projects
+                                  - generic: Open
+                                - paragraph: GET /api/projects returns a 500 error for authenticated users.
+                                - generic:
+                                  - generic: ISSUE-002
+                                  - generic: •
+                                  - generic: Data Gateway
+                                  - generic: •
+                                  - generic: api
+                                  - generic: •
+                                  - generic: 8/28/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Initial page load > 4s on slow network
+                                  - generic: Open
+                                - paragraph: Cold load on simulated 3G takes 4.3s before the dashboard is interactive.
+                                - generic:
+                                  - generic: ISSUE-010
+                                  - generic: •
+                                  - generic: Data Gateway
+                                  - generic: •
+                                  - generic: performance
+                                  - generic: •
+                                  - generic: 8/26/2024
+                      - generic:
+                        - button [expanded]:
+                          - generic: IAM
+                          - generic: "5"
+                        - list:
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Authentication failure on first attempt
+                                  - generic: Confirmed
+                                - paragraph: First sign-in attempt always fails; second attempt succeeds.
+                                - generic:
+                                  - generic: ISSUE-003
+                                  - generic: •
+                                  - generic: IAM
+                                  - generic: •
+                                  - generic: authentication
+                                  - generic: •
+                                  - generic: 8/28/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Sidebar collapses unexpectedly on resize
+                                  - generic: Open
+                                - paragraph: When the viewport is resized below 720px, the sidebar collapses and does not remember its expanded state.
+                                - generic:
+                                  - generic: ISSUE-006
+                                  - generic: •
+                                  - generic: IAM
+                                  - generic: •
+                                  - generic: ui
+                                  - generic: •
+                                  - generic: 8/27/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Form fields lose focus on validation error
+                                  - generic: Open
+                                - paragraph: When a validation error appears, focus jumps to the page header instead of staying on the offending input.
+                                - generic:
+                                  - generic: ISSUE-008
+                                  - generic: •
+                                  - generic: IAM
+                                  - generic: •
+                                  - generic: forms
+                                  - generic: •
+                                  - generic: 8/26/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Logout button missing aria-label
+                                  - generic: Fixed
+                                - paragraph: Icon-only logout button had no accessible name. Resolved in release 2024.08.25.
+                                - generic:
+                                  - generic: ISSUE-011
+                                  - generic: •
+                                  - generic: IAM
+                                  - generic: •
+                                  - generic: accessibility
+                                  - generic: •
+                                  - generic: 8/25/2024
+                          - listitem:
+                            - button:
+                              - generic:
+                                - generic:
+                                  - paragraph: Forbidden 403 on /admin for non-admin role
+                                  - generic: Open
+                                - paragraph: Standard users receive a raw 403 page on /admin instead of a friendly access-denied screen.
+                                - generic:
+                                  - generic: ISSUE-012
+                                  - generic: •
+                                  - generic: IAM
+                                  - generic: •
+                                  - generic: authorization
+                                  - generic: •
+                                  - generic: 8/25/2024
+      - region "Notifications alt+T"
+  - dialog [ref=e743]:
+    - generic [ref=e745]:
+      - generic [ref=e746]:
+        - 'heading "Newly discovered: console error on initial paint" [level=2] [ref=e747]'
+        - paragraph [ref=e748]: MailCraft — /dashboard
+      - button "Close details" [active] [ref=e749] [cursor=pointer]
+    - generic [ref=e754]:
+      - generic [ref=e755]: medium
+      - generic [ref=e756]: console errors
+      - generic [ref=e757]: ISSUE-4698
+      - generic [ref=e758]: Detected 8/31/2026, 9:36:45 AM
+    - generic [ref=e759]:
+      - generic [ref=e760]:
+        - heading "Description" [level=3] [ref=e761]
+        - paragraph [ref=e762]: Detected during the most recent verification run.
+      - generic [ref=e763]:
+        - heading "Evidence" [level=3] [ref=e765]
+        - paragraph [ref=e766]: No evidence captured for this issue.
+    - generic [ref=e767]:
+      - paragraph [ref=e768]: Update status
+      - generic [ref=e769]:
+        - button "open" [disabled]
+        - button "investigating" [ref=e770] [cursor=pointer]
+        - button "confirmed" [ref=e772] [cursor=pointer]
+        - button "fixed" [ref=e774] [cursor=pointer]
+        - button "resolved" [ref=e776] [cursor=pointer]
+        - button "wont fix" [ref=e778] [cursor=pointer]
+        - button "ignored" [ref=e780] [cursor=pointer]
+        - button "reopened" [ref=e782] [cursor=pointer]
+      - link "Open in app" [ref=e784] [cursor=pointer]:
+        - /url: /dashboard
+    - button "Close" [ref=e789] [cursor=pointer]

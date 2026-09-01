@@ -1,0 +1,80 @@
+- generic [ref=f4e3]:
+  - generic [ref=f4e7]:
+    - link "Feature Tracker" [ref=f4e9] [cursor=pointer]:
+      - /url: /dashboard
+    - generic [ref=f4e16]:
+      - generic [ref=f4e17]: Navigation
+      - list [ref=f4e18]:
+        - listitem [ref=f4e19]:
+          - link "Dashboard" [ref=f4e20] [cursor=pointer]:
+            - /url: /dashboard
+        - listitem [ref=f4e27]:
+          - link "Project" [ref=f4e28] [cursor=pointer]:
+            - /url: /projects
+        - listitem [ref=f4e32]:
+          - link "Issue Tracker" [ref=f4e33] [cursor=pointer]:
+            - /url: /issue-tracker
+    - button "Toggle Sidebar" [ref=f4e44]
+  - main [ref=f4e45]:
+    - generic [ref=f4e47]:
+      - generic [ref=f4e48]:
+        - button "Change language" [ref=f4e49] [cursor=pointer]
+        - button "Notifications (2 unread)" [ref=f4e54] [cursor=pointer]:
+          - generic [ref=f4e58]: "2"
+        - 'button "Theme: Light. Change theme." [ref=f4e59] [cursor=pointer]'
+      - button "Open user menu" [ref=f4e66] [cursor=pointer]:
+        - generic [ref=f4e67]: MZ
+    - generic [ref=f4e71]:
+      - generic [ref=f4e72]:
+        - heading "Dashboard" [level=1] [ref=f4e73]
+        - paragraph [ref=f4e74]: Welcome back, Meraz Zoarder. Here's a snapshot of your workspace.
+      - region "Workspace statistics" [ref=f4e75]:
+        - generic [ref=f4e76]:
+          - paragraph [ref=f4e81]: Projects
+          - paragraph [ref=f4e83]: "2"
+        - generic [ref=f4e84]:
+          - paragraph [ref=f4e90]: Features
+          - paragraph [ref=f4e92]: "5"
+        - generic [ref=f4e93]:
+          - paragraph [ref=f4e100]: Flows
+          - paragraph [ref=f4e102]: "8"
+      - generic [ref=f4e103]:
+        - region [ref=f4e104]:
+          - generic [ref=f4e105]:
+            - generic [ref=f4e106]:
+              - heading "Recent Projects" [level=3] [ref=f4e107]
+              - link "View all" [ref=f4e108] [cursor=pointer]:
+                - /url: /projects
+            - list [ref=f4e112]:
+              - listitem [ref=f4e113]:
+                - link "Mobile App Aug 28, 2024" [ref=f4e114] [cursor=pointer]:
+                  - /url: /projects/proj-2
+                  - generic [ref=f4e115]: Mobile App
+                  - generic [ref=f4e116]: Aug 28, 2024
+              - listitem [ref=f4e117]:
+                - link "E-commerce Platform Aug 25, 2024" [ref=f4e118] [cursor=pointer]:
+                  - /url: /projects/proj-1
+                  - generic [ref=f4e119]: E-commerce Platform
+                  - generic [ref=f4e120]: Aug 25, 2024
+        - region [ref=f4e121]:
+          - generic [ref=f4e122]:
+            - generic [ref=f4e123]:
+              - heading "Recent Flows" [level=3] [ref=f4e124]
+              - generic [ref=f4e125]: "5"
+            - list [ref=f4e127]:
+              - listitem [ref=f4e128]:
+                - generic [ref=f4e129]: Change Avatar Flow
+                - generic [ref=f4e130]: Aug 15, 2024
+              - listitem [ref=f4e131]:
+                - generic [ref=f4e132]: Edit Profile Flow
+                - generic [ref=f4e133]: Aug 14, 2024
+              - listitem [ref=f4e134]:
+                - generic [ref=f4e135]: Welcome Screen Flow
+                - generic [ref=f4e136]: Aug 13, 2024
+              - listitem [ref=f4e137]:
+                - generic [ref=f4e138]: Payment Flow
+                - generic [ref=f4e139]: Aug 9, 2024
+              - listitem [ref=f4e140]:
+                - generic [ref=f4e141]: Remove from Cart Flow
+                - generic [ref=f4e142]: Aug 7, 2024
+  - region "Notifications alt+T"

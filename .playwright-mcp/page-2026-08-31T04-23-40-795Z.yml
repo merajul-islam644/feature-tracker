@@ -1,0 +1,83 @@
+- generic [ref=e22]:
+  - generic [ref=e26]:
+    - link [ref=e175] [cursor=pointer]:
+      - /url: /dashboard
+    - generic [ref=e35]:
+      - button "Expand sidebar" [active] [ref=e176] [cursor=pointer]
+      - list [ref=e42]:
+        - listitem [ref=e43]:
+          - link "Dashboard" [ref=e44] [cursor=pointer]:
+            - /url: /dashboard
+        - listitem [ref=e51]:
+          - link "Project" [ref=e52] [cursor=pointer]:
+            - /url: /projects
+        - listitem [ref=e56]:
+          - link "Issue Tracker" [ref=e57] [cursor=pointer]:
+            - /url: /issue-tracker
+        - listitem [ref=e68]:
+          - link "Test Runner" [ref=e69] [cursor=pointer]:
+            - /url: /test-runner
+    - button "Toggle Sidebar" [ref=e74]
+  - main [ref=e75]:
+    - generic [ref=e77]:
+      - generic [ref=e78]:
+        - button "Change language" [ref=e79] [cursor=pointer]
+        - button "Notifications (2 unread)" [ref=e84] [cursor=pointer]:
+          - generic [ref=e88]: "2"
+        - 'button "Theme: System. Change theme." [ref=e89] [cursor=pointer]'
+      - button "Open user menu" [ref=e92] [cursor=pointer]:
+        - generic [ref=e93]: D
+    - generic [ref=e97]:
+      - generic [ref=e98]:
+        - heading "Dashboard" [level=1] [ref=e99]
+        - paragraph [ref=e100]: Welcome back, Demo. Here's a snapshot of your workspace.
+      - region "Workspace statistics" [ref=e101]:
+        - generic [ref=e102]:
+          - paragraph [ref=e107]: Projects
+          - paragraph [ref=e109]: "2"
+        - generic [ref=e110]:
+          - paragraph [ref=e116]: Features
+          - paragraph [ref=e118]: "5"
+        - generic [ref=e119]:
+          - paragraph [ref=e126]: Flows
+          - paragraph [ref=e128]: "8"
+      - generic [ref=e129]:
+        - region [ref=e130]:
+          - generic [ref=e131]:
+            - generic [ref=e132]:
+              - heading "Recent Projects" [level=3] [ref=e133]
+              - link "View all" [ref=e134] [cursor=pointer]:
+                - /url: /projects
+            - list [ref=e138]:
+              - listitem [ref=e139]:
+                - link "Mobile App Aug 28, 2024" [ref=e140] [cursor=pointer]:
+                  - /url: /projects/proj-2
+                  - generic [ref=e141]: Mobile App
+                  - generic [ref=e142]: Aug 28, 2024
+              - listitem [ref=e143]:
+                - link "E-commerce Platform Aug 25, 2024" [ref=e144] [cursor=pointer]:
+                  - /url: /projects/proj-1
+                  - generic [ref=e145]: E-commerce Platform
+                  - generic [ref=e146]: Aug 25, 2024
+        - region [ref=e147]:
+          - generic [ref=e148]:
+            - generic [ref=e149]:
+              - heading "Recent Flows" [level=3] [ref=e150]
+              - generic [ref=e151]: "5"
+            - list [ref=e153]:
+              - listitem [ref=e154]:
+                - generic [ref=e155]: Change Avatar Flow
+                - generic [ref=e156]: Aug 15, 2024
+              - listitem [ref=e157]:
+                - generic [ref=e158]: Edit Profile Flow
+                - generic [ref=e159]: Aug 14, 2024
+              - listitem [ref=e160]:
+                - generic [ref=e161]: Welcome Screen Flow
+                - generic [ref=e162]: Aug 13, 2024
+              - listitem [ref=e163]:
+                - generic [ref=e164]: Payment Flow
+                - generic [ref=e165]: Aug 9, 2024
+              - listitem [ref=e166]:
+                - generic [ref=e167]: Remove from Cart Flow
+                - generic [ref=e168]: Aug 7, 2024
+  - region "Notifications alt+T"

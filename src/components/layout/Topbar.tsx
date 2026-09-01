@@ -1,0 +1,98 @@
+import { Link, useNavigate } from "react-router-dom";
+import { LogOut, User as UserIcon } from "lucide-react";
+import { Avatar } from "@/components/ui/avatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { Separator } from "@/components/ui/separator";
+import { useAuth } from "@/hooks/useAuth";
+import { LanguageSwitcher } from "./LanguageSwitcher";
+import { NotificationBell } from "./NotificationBell";
+import { ThemeToggler } from "./ThemeToggler";
+
+export function Topbar() {
+  const { currentUser, logout } = useAuth();
+  const navigate = useNavigate();
+
+  if (!currentUser) return null;
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login", { replace: true });
+  };
+
+  return (
+    <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-border bg-background/80 px-4 backdrop-blur md:px-6">
+      {/* Left: hamburger toggle + brand */}
+      <div className="flex items-center gap-2">
+        {/* <SidebarTrigger
+          aria-label="Toggle sidebar"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+        />
+        <Separator
+          orientation="vertical"
+          className="mx-1 hidden h-5 md:block"
+        />
+        <Link
+          to="/dashboard"
+          className="hidden items-center gap-2 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+        >
+          <span className="text-sm font-semibold text-foreground">
+            Feature Tracker
+          </span>
+        </Link> */}
+      </div>
+
+      {/* Right: utility icons + profile avatar */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-0.5">
+          <LanguageSwitcher />
+          <NotificationBell />
+          <ThemeToggler />
+        </div>
+        <Separator
+          orientation="vertical"
+          className="mx-1 hidden h-5 sm:block"
+        />
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Open user menu"
+              className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              <Avatar name={currentUser.name} size="md" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuLabel className="capitalize">
+              {currentUser.name}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => navigate("/profile")}
+              className="flex items-center gap-2"
+            >
+              <UserIcon className="h-4 w-4" aria-hidden="true" />
+              <span>Profile</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={handleLogout}
+              className="text-destructive focus:text-destructive"
+            >
+              <LogOut className="h-4 w-4" aria-hidden="true" />
+              Logout
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </header>
+  );
+}

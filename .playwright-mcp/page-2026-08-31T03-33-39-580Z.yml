@@ -1,0 +1,469 @@
+- generic [ref=f12e22]:
+  - generic [ref=f12e26]:
+    - link "Feature Tracker" [ref=f12e28] [cursor=pointer]:
+      - /url: /dashboard
+    - generic [ref=f12e35]:
+      - generic [ref=f12e36]: Navigation
+      - list [ref=f12e37]:
+        - listitem [ref=f12e38]:
+          - link "Dashboard" [ref=f12e39] [cursor=pointer]:
+            - /url: /dashboard
+        - listitem [ref=f12e46]:
+          - link "Project" [ref=f12e47] [cursor=pointer]:
+            - /url: /projects
+        - listitem [ref=f12e51]:
+          - link "Issue Tracker" [ref=f12e52] [cursor=pointer]:
+            - /url: /issue-tracker
+    - button "Toggle Sidebar" [ref=f12e63]
+  - main [ref=f12e64]:
+    - generic [ref=f12e66]:
+      - generic [ref=f12e67]:
+        - button "Change language" [ref=f12e68] [cursor=pointer]
+        - button "Notifications (2 unread)" [ref=f12e73] [cursor=pointer]:
+          - generic [ref=f12e77]: "2"
+        - 'button "Theme: System. Change theme." [ref=f12e78] [cursor=pointer]'
+      - button "Open user menu" [ref=f12e81] [cursor=pointer]:
+        - generic [ref=f12e82]: D
+    - generic [ref=f12e86]:
+      - generic [ref=f12e87]:
+        - generic [ref=f12e88]:
+          - heading "Issue Tracker" [level=1] [ref=f12e89]
+          - paragraph [ref=f12e90]: AI-powered application verification across your configured targets.
+        - button "Start Verification" [ref=f12e810] [cursor=pointer]
+      - generic [ref=f12e96]:
+        - complementary [ref=f12e97]:
+          - generic [ref=f12e99]:
+            - generic [ref=f12e105]:
+              - heading "AI Assistant" [level=2] [ref=f12e106]
+              - paragraph [ref=f12e107]: Verify, configure, or review — using mock responses in this phase.
+            - generic [ref=f12e108]:
+              - paragraph [ref=f12e115]: Hello! I'm the AI verification assistant. Tell me what you'd like to verify, configure, or review.
+              - generic [ref=f12e116]:
+                - paragraph [ref=f12e117]: Suggested
+                - list [ref=f12e118]:
+                  - listitem [ref=f12e119] [cursor=pointer]: Verify all applications
+                  - listitem [ref=f12e122] [cursor=pointer]: Show critical issues
+                  - listitem [ref=f12e125] [cursor=pointer]: Check MailCraft login flow
+                  - listitem [ref=f12e128] [cursor=pointer]: Verify ISSUE-001 again
+                  - listitem [ref=f12e131] [cursor=pointer]: What changed since the last verification?
+            - generic [ref=f12e134]:
+              - generic [ref=f12e135]: Ask the AI verification assistant
+              - textbox "Ask the AI verification assistant" [ref=f12e136]:
+                - /placeholder: Ask anything about your application…
+              - button "Send message" [disabled]
+        - generic [ref=f12e137]:
+          - generic [ref=f12e138]:
+            - generic [ref=f12e139]:
+              - generic [ref=f12e140]:
+                - heading "Verification Targets" [level=3] [ref=f12e141]
+                - paragraph [ref=f12e145]: Application URLs the AI will visit during verification.
+              - generic [ref=f12e146]: "3"
+            - generic [ref=f12e147]:
+              - list [ref=f12e349]:
+                - listitem [ref=f12e350]:
+                  - generic [ref=f12e351]:
+                    - paragraph [ref=f12e352]: MailCraft
+                    - paragraph [ref=f12e353]: https://mailcraft.example.com
+                  - generic [ref=f12e354]:
+                    - generic [ref=f12e355]: Enabled
+                    - button "Remove MailCraft" [ref=f12e356] [cursor=pointer]
+                - listitem [ref=f12e361]:
+                  - generic [ref=f12e362]:
+                    - paragraph [ref=f12e363]: IAM
+                    - paragraph [ref=f12e364]: https://iam.example.com
+                  - generic [ref=f12e365]:
+                    - generic [ref=f12e366]: Enabled
+                    - button "Remove IAM" [ref=f12e367] [cursor=pointer]
+                - listitem [ref=f12e372]:
+                  - generic [ref=f12e373]:
+                    - paragraph [ref=f12e374]: Data Gateway
+                    - paragraph [ref=f12e375]: https://data.example.com
+                  - generic [ref=f12e376]:
+                    - generic [ref=f12e377]: Enabled
+                    - button "Remove Data Gateway" [ref=f12e378] [cursor=pointer]
+              - generic [ref=f12e149]:
+                - generic [ref=f12e150]:
+                  - generic [ref=f12e151]:
+                    - generic [ref=f12e152]: Application URL
+                    - textbox "Application URL" [ref=f12e154]:
+                      - /placeholder: https://example.com
+                  - button "Remove URL" [disabled]
+                - button "Add URL" [disabled]
+          - generic [ref=f12e155]:
+            - generic [ref=f12e156]:
+              - generic [ref=f12e157]:
+                - heading "Secrets" [level=3] [ref=f12e158]
+                - paragraph [ref=f12e162]: Credentials the AI uses to sign into applications during verification.
+              - generic [ref=f12e163]: "2"
+            - generic [ref=f12e164]:
+              - list [ref=f12e383]:
+                - listitem [ref=f12e384]:
+                  - generic [ref=f12e386]:
+                    - generic [ref=f12e392]:
+                      - paragraph [ref=f12e393]: QA Account
+                      - paragraph [ref=f12e394]: qa@example.com
+                      - paragraph [ref=f12e395]: ••••••••••
+                    - button "Delete QA Account" [ref=f12e396] [cursor=pointer]
+                - listitem [ref=f12e401]:
+                  - generic [ref=f12e403]:
+                    - generic [ref=f12e409]:
+                      - paragraph [ref=f12e410]: Admin Account
+                      - paragraph [ref=f12e411]: admin@example.com
+                      - paragraph [ref=f12e412]: ••••••••••
+                    - button "Delete Admin Account" [ref=f12e413] [cursor=pointer]
+              - button "+ Add Secret" [ref=f12e168] [cursor=pointer]
+          - generic [ref=f12e169]:
+            - generic [ref=f12e170]:
+              - generic [ref=f12e171]:
+                - heading "Verification Scope" [level=3] [ref=f12e172]
+                - paragraph [ref=f12e176]: 8/10 checks selected
+              - generic [ref=f12e177]:
+                - button "Select all" [ref=f12e178] [cursor=pointer]
+                - button "Clear" [ref=f12e180] [cursor=pointer]
+            - generic [ref=f12e182]:
+              - generic [ref=f12e183]:
+                - generic [ref=f12e184]:
+                  - paragraph [ref=f12e185]: Recommended
+                  - generic [ref=f12e186]: "8"
+                - paragraph [ref=f12e187]: Enabled by default — the AI always runs these checks.
+                - list [ref=f12e188]:
+                  - listitem [ref=f12e189]:
+                    - checkbox "Page Load Pages respond and render without crashing." [checked] [ref=f12e190] [cursor=pointer]
+                    - generic [ref=f12e191] [cursor=pointer]:
+                      - generic [ref=f12e192]: Page Load
+                      - generic [ref=f12e193]: Pages respond and render without crashing.
+                  - listitem [ref=f12e194]:
+                    - checkbox "Navigation Links and routes reach their destinations." [checked] [ref=f12e195] [cursor=pointer]
+                    - generic [ref=f12e196] [cursor=pointer]:
+                      - generic [ref=f12e197]: Navigation
+                      - generic [ref=f12e198]: Links and routes reach their destinations.
+                  - listitem [ref=f12e199]:
+                    - checkbox "Buttons Clickable controls trigger their handlers." [checked] [ref=f12e200] [cursor=pointer]
+                    - generic [ref=f12e201] [cursor=pointer]:
+                      - generic [ref=f12e202]: Buttons
+                      - generic [ref=f12e203]: Clickable controls trigger their handlers.
+                  - listitem [ref=f12e204]:
+                    - checkbox "Forms Inputs submit and validate correctly." [checked] [ref=f12e205] [cursor=pointer]
+                    - generic [ref=f12e206] [cursor=pointer]:
+                      - generic [ref=f12e207]: Forms
+                      - generic [ref=f12e208]: Inputs submit and validate correctly.
+                  - listitem [ref=f12e209]:
+                    - checkbox "Broken Links No anchor or asset links return 404." [checked] [ref=f12e210] [cursor=pointer]
+                    - generic [ref=f12e211] [cursor=pointer]:
+                      - generic [ref=f12e212]: Broken Links
+                      - generic [ref=f12e213]: No anchor or asset links return 404.
+                  - listitem [ref=f12e214]:
+                    - checkbox "Console Errors No uncaught errors logged to the browser console." [checked] [ref=f12e215] [cursor=pointer]
+                    - generic [ref=f12e216] [cursor=pointer]:
+                      - generic [ref=f12e217]: Console Errors
+                      - generic [ref=f12e218]: No uncaught errors logged to the browser console.
+                  - listitem [ref=f12e219]:
+                    - checkbox "Network Errors No failed XHR / fetch requests in critical paths." [checked] [ref=f12e220] [cursor=pointer]
+                    - generic [ref=f12e221] [cursor=pointer]:
+                      - generic [ref=f12e222]: Network Errors
+                      - generic [ref=f12e223]: No failed XHR / fetch requests in critical paths.
+                  - listitem [ref=f12e224]:
+                    - checkbox "Authentication Login / logout flows succeed with valid credentials." [checked] [ref=f12e225] [cursor=pointer]
+                    - generic [ref=f12e226] [cursor=pointer]:
+                      - generic [ref=f12e227]: Authentication
+                      - generic [ref=f12e228]: Login / logout flows succeed with valid credentials.
+              - generic [ref=f12e229]:
+                - generic [ref=f12e230]:
+                  - paragraph [ref=f12e231]: Optional
+                  - generic [ref=f12e232]: "2"
+                - paragraph [ref=f12e233]: Pick additional checks for this run.
+                - list [ref=f12e234]:
+                  - listitem [ref=f12e235]:
+                    - 'checkbox "Accessibility Basic a11y: labels, contrast, keyboard reach." [ref=f12e236] [cursor=pointer]'
+                    - generic [ref=f12e237] [cursor=pointer]:
+                      - generic [ref=f12e238]: Accessibility
+                      - generic [ref=f12e239]: "Basic a11y: labels, contrast, keyboard reach."
+                  - listitem [ref=f12e240]:
+                    - checkbox "Performance Pages reach interactive under threshold." [ref=f12e241] [cursor=pointer]
+                    - generic [ref=f12e242] [cursor=pointer]:
+                      - generic [ref=f12e243]: Performance
+                      - generic [ref=f12e244]: Pages reach interactive under threshold.
+          - generic [ref=f12e245]:
+            - generic [ref=f12e246]:
+              - heading "Verification Panel" [level=3] [ref=f12e247]
+              - paragraph [ref=f12e250]: Live status of the most recent verification run.
+            - generic [ref=f12e251]:
+              - group "Verification run summary" [ref=f12e252]:
+                - generic [ref=f12e253]:
+                  - paragraph [ref=f12e258]: Targets
+                  - paragraph [ref=f12e259]: "3"
+                - generic [ref=f12e260]:
+                  - paragraph [ref=f12e265]: Completed
+                  - paragraph [ref=f12e266]: 3/3
+                - generic [ref=f12e267]:
+                  - paragraph [ref=f12e271]: Failed
+                  - paragraph [ref=f12e272]: "0"
+                - generic [ref=f12e273]:
+                  - paragraph [ref=f12e278]: Duration
+                  - paragraph [ref=f12e279]: 3s
+              - generic [ref=f12e280]:
+                - generic [ref=f12e281]:
+                  - progressbar "Verification progress" [ref=f12e282]
+                  - paragraph [ref=f12e283]: 100% — Completed
+                - list [ref=f12e761]:
+                  - listitem [ref=f12e762]:
+                    - generic [ref=f12e765]: MailCraft
+                    - generic [ref=f12e766]: Healthy
+                  - listitem [ref=f12e767]:
+                    - generic [ref=f12e770]: IAM
+                    - generic [ref=f12e771]: Healthy
+                  - listitem [ref=f12e772]:
+                    - generic [ref=f12e775]: Data Gateway
+                    - generic [ref=f12e776]: Issues found
+          - region [ref=f12e284]:
+            - heading "Issues" [level=2] [ref=f12e285]
+            - group "Issue summary" [ref=f12e286]:
+              - generic [ref=f12e287]:
+                - paragraph [ref=f12e292]: Total
+                - paragraph [ref=f12e293]: "13"
+              - generic [ref=f12e294]:
+                - paragraph [ref=f12e298]: Critical
+                - paragraph [ref=f12e299]: "2"
+              - generic [ref=f12e300]:
+                - paragraph [ref=f12e304]: High
+                - paragraph [ref=f12e305]: "2"
+              - generic [ref=f12e306]:
+                - paragraph [ref=f12e310]: Medium
+                - paragraph [ref=f12e311]: "6"
+              - generic [ref=f12e312]:
+                - paragraph [ref=f12e316]: Low
+                - paragraph [ref=f12e317]: "3"
+              - generic [ref=f12e318]:
+                - paragraph [ref=f12e322]: Open
+                - paragraph [ref=f12e323]: "11"
+            - generic [ref=f12e325]:
+              - generic [ref=f12e326]:
+                - searchbox "Search issues" [ref=f12e329]
+                - generic [ref=f12e330]:
+                  - combobox "Application filter" [ref=f12e332]:
+                    - option "All applications" [selected]
+                    - option "MailCraft"
+                    - option "Data Gateway"
+                    - option "IAM"
+                  - combobox "Sort" [ref=f12e334]:
+                    - option "Newest" [selected]
+                    - option "Oldest"
+                    - option "Severity"
+                    - option "Application"
+              - generic [ref=f12e335]:
+                - button "Critical" [ref=f12e336] [cursor=pointer]
+                - button "High" [ref=f12e337] [cursor=pointer]
+                - button "Medium" [ref=f12e338] [cursor=pointer]
+                - button "Low" [ref=f12e339] [cursor=pointer]
+            - generic [ref=f12e418]:
+              - generic [ref=f12e466]:
+                - button "MailCraft 6" [expanded] [ref=f12e825] [cursor=pointer]:
+                  - generic [ref=f12e468]: MailCraft
+                  - generic [ref=f12e471]: "6"
+                - list [ref=f12e472]:
+                  - listitem [ref=f12e826]:
+                    - 'button "Newly discovered: console error on initial paint Open Detected during the most recent verification run. ISSUE-8228 MailCraft console errors 8/31/2026" [ref=f12e827] [cursor=pointer]':
+                      - generic [ref=f12e831]:
+                        - generic [ref=f12e832]:
+                          - paragraph [ref=f12e833]: "Newly discovered: console error on initial paint"
+                          - generic [ref=f12e834]: Open
+                        - paragraph [ref=f12e835]: Detected during the most recent verification run.
+                        - generic [ref=f12e836]:
+                          - generic [ref=f12e837]: ISSUE-8228
+                          - generic [ref=f12e838]: •
+                          - generic [ref=f12e839]: MailCraft
+                          - generic [ref=f12e840]: •
+                          - generic [ref=f12e841]: console errors
+                          - generic [ref=f12e842]: •
+                          - generic [ref=f12e843]: 8/31/2026
+                  - listitem [ref=f12e473]:
+                    - button "Login button not working Open Clicking the primary login button on /login does not submit the form. ISSUE-001 MailCraft authentication 8/28/2024" [ref=f12e474] [cursor=pointer]:
+                      - generic [ref=f12e478]:
+                        - generic [ref=f12e479]:
+                          - paragraph [ref=f12e480]: Login button not working
+                          - generic [ref=f12e481]: Open
+                        - paragraph [ref=f12e482]: Clicking the primary login button on /login does not submit the form.
+                        - generic [ref=f12e483]:
+                          - generic [ref=f12e484]: ISSUE-001
+                          - generic [ref=f12e485]: •
+                          - generic [ref=f12e486]: MailCraft
+                          - generic [ref=f12e487]: •
+                          - generic [ref=f12e488]: authentication
+                          - generic [ref=f12e489]: •
+                          - generic [ref=f12e490]: 8/28/2024
+                  - listitem [ref=f12e493]:
+                    - button "Password reset link broken Open Reset link in email results in 404 page. ISSUE-004 MailCraft authentication 8/28/2024" [ref=f12e494] [cursor=pointer]:
+                      - generic [ref=f12e498]:
+                        - generic [ref=f12e499]:
+                          - paragraph [ref=f12e500]: Password reset link broken
+                          - generic [ref=f12e501]: Open
+                        - paragraph [ref=f12e502]: Reset link in email results in 404 page.
+                        - generic [ref=f12e503]:
+                          - generic [ref=f12e504]: ISSUE-004
+                          - generic [ref=f12e505]: •
+                          - generic [ref=f12e506]: MailCraft
+                          - generic [ref=f12e507]: •
+                          - generic [ref=f12e508]: authentication
+                          - generic [ref=f12e509]: •
+                          - generic [ref=f12e510]: 8/28/2024
+                  - listitem [ref=f12e513]:
+                    - 'button "Console error: undefined property ''theme'' Investigating Settings page logs a TypeError when the dark mode toggle is interacted with rapidly. ISSUE-005 MailCraft ui 8/27/2024" [ref=f12e514] [cursor=pointer]':
+                      - generic [ref=f12e518]:
+                        - generic [ref=f12e519]:
+                          - paragraph [ref=f12e520]: "Console error: undefined property 'theme'"
+                          - generic [ref=f12e521]: Investigating
+                        - paragraph [ref=f12e522]: Settings page logs a TypeError when the dark mode toggle is interacted with rapidly.
+                        - generic [ref=f12e523]:
+                          - generic [ref=f12e524]: ISSUE-005
+                          - generic [ref=f12e525]: •
+                          - generic [ref=f12e526]: MailCraft
+                          - generic [ref=f12e527]: •
+                          - generic [ref=f12e528]: ui
+                          - generic [ref=f12e529]: •
+                          - generic [ref=f12e530]: 8/27/2024
+                  - listitem [ref=f12e533]:
+                    - button "Back navigation skips a step Open Pressing the browser back button from /inbox/compose jumps past the inbox list to /dashboard. ISSUE-007 MailCraft navigation 8/27/2024" [ref=f12e534] [cursor=pointer]:
+                      - generic [ref=f12e538]:
+                        - generic [ref=f12e539]:
+                          - paragraph [ref=f12e540]: Back navigation skips a step
+                          - generic [ref=f12e541]: Open
+                        - paragraph [ref=f12e542]: Pressing the browser back button from /inbox/compose jumps past the inbox list to /dashboard.
+                        - generic [ref=f12e543]:
+                          - generic [ref=f12e544]: ISSUE-007
+                          - generic [ref=f12e545]: •
+                          - generic [ref=f12e546]: MailCraft
+                          - generic [ref=f12e547]: •
+                          - generic [ref=f12e548]: navigation
+                          - generic [ref=f12e549]: •
+                          - generic [ref=f12e550]: 8/27/2024
+                  - listitem [ref=f12e553]:
+                    - button "Avatar color contrast fails WCAG AA Open Default avatar background vs text contrast ratio measured at 3.2:1, below the 4.5:1 WCAG AA threshold. ISSUE-009 MailCraft accessibility 8/26/2024" [ref=f12e554] [cursor=pointer]:
+                      - generic [ref=f12e558]:
+                        - generic [ref=f12e559]:
+                          - paragraph [ref=f12e560]: Avatar color contrast fails WCAG AA
+                          - generic [ref=f12e561]: Open
+                        - paragraph [ref=f12e562]: Default avatar background vs text contrast ratio measured at 3.2:1, below the 4.5:1 WCAG AA threshold.
+                        - generic [ref=f12e563]:
+                          - generic [ref=f12e564]: ISSUE-009
+                          - generic [ref=f12e565]: •
+                          - generic [ref=f12e566]: MailCraft
+                          - generic [ref=f12e567]: •
+                          - generic [ref=f12e568]: accessibility
+                          - generic [ref=f12e569]: •
+                          - generic [ref=f12e570]: 8/26/2024
+              - generic [ref=f12e419]:
+                - button "Data Gateway 2" [expanded] [ref=f12e420] [cursor=pointer]:
+                  - generic [ref=f12e421]: Data Gateway
+                  - generic [ref=f12e424]: "2"
+                - list [ref=f12e425]:
+                  - listitem [ref=f12e426]:
+                    - button "API returns 500 on /projects Open GET /api/projects returns a 500 error for authenticated users. ISSUE-002 Data Gateway api 8/28/2024" [ref=f12e427] [cursor=pointer]:
+                      - generic [ref=f12e431]:
+                        - generic [ref=f12e432]:
+                          - paragraph [ref=f12e433]: API returns 500 on /projects
+                          - generic [ref=f12e434]: Open
+                        - paragraph [ref=f12e435]: GET /api/projects returns a 500 error for authenticated users.
+                        - generic [ref=f12e436]:
+                          - generic [ref=f12e437]: ISSUE-002
+                          - generic [ref=f12e438]: •
+                          - generic [ref=f12e439]: Data Gateway
+                          - generic [ref=f12e440]: •
+                          - generic [ref=f12e441]: api
+                          - generic [ref=f12e442]: •
+                          - generic [ref=f12e443]: 8/28/2024
+                  - listitem [ref=f12e446]:
+                    - button "Initial page load > 4s on slow network Open Cold load on simulated 3G takes 4.3s before the dashboard is interactive. ISSUE-010 Data Gateway performance 8/26/2024" [ref=f12e447] [cursor=pointer]:
+                      - generic [ref=f12e451]:
+                        - generic [ref=f12e452]:
+                          - paragraph [ref=f12e453]: Initial page load > 4s on slow network
+                          - generic [ref=f12e454]: Open
+                        - paragraph [ref=f12e455]: Cold load on simulated 3G takes 4.3s before the dashboard is interactive.
+                        - generic [ref=f12e456]:
+                          - generic [ref=f12e457]: ISSUE-010
+                          - generic [ref=f12e458]: •
+                          - generic [ref=f12e459]: Data Gateway
+                          - generic [ref=f12e460]: •
+                          - generic [ref=f12e461]: performance
+                          - generic [ref=f12e462]: •
+                          - generic [ref=f12e463]: 8/26/2024
+              - generic [ref=f12e573]:
+                - button "IAM 5" [expanded] [ref=f12e574] [cursor=pointer]:
+                  - generic [ref=f12e575]: IAM
+                  - generic [ref=f12e578]: "5"
+                - list [ref=f12e579]:
+                  - listitem [ref=f12e580]:
+                    - button "Authentication failure on first attempt Confirmed First sign-in attempt always fails; second attempt succeeds. ISSUE-003 IAM authentication 8/28/2024" [ref=f12e581] [cursor=pointer]:
+                      - generic [ref=f12e585]:
+                        - generic [ref=f12e586]:
+                          - paragraph [ref=f12e587]: Authentication failure on first attempt
+                          - generic [ref=f12e588]: Confirmed
+                        - paragraph [ref=f12e589]: First sign-in attempt always fails; second attempt succeeds.
+                        - generic [ref=f12e590]:
+                          - generic [ref=f12e591]: ISSUE-003
+                          - generic [ref=f12e592]: •
+                          - generic [ref=f12e593]: IAM
+                          - generic [ref=f12e594]: •
+                          - generic [ref=f12e595]: authentication
+                          - generic [ref=f12e596]: •
+                          - generic [ref=f12e597]: 8/28/2024
+                  - listitem [ref=f12e600]:
+                    - button "Sidebar collapses unexpectedly on resize Open When the viewport is resized below 720px, the sidebar collapses and does not remember its expanded state. ISSUE-006 IAM ui 8/27/2024" [ref=f12e601] [cursor=pointer]:
+                      - generic [ref=f12e605]:
+                        - generic [ref=f12e606]:
+                          - paragraph [ref=f12e607]: Sidebar collapses unexpectedly on resize
+                          - generic [ref=f12e608]: Open
+                        - paragraph [ref=f12e609]: When the viewport is resized below 720px, the sidebar collapses and does not remember its expanded state.
+                        - generic [ref=f12e610]:
+                          - generic [ref=f12e611]: ISSUE-006
+                          - generic [ref=f12e612]: •
+                          - generic [ref=f12e613]: IAM
+                          - generic [ref=f12e614]: •
+                          - generic [ref=f12e615]: ui
+                          - generic [ref=f12e616]: •
+                          - generic [ref=f12e617]: 8/27/2024
+                  - listitem [ref=f12e620]:
+                    - button "Form fields lose focus on validation error Open When a validation error appears, focus jumps to the page header instead of staying on the offending input. ISSUE-008 IAM forms 8/26/2024" [ref=f12e621] [cursor=pointer]:
+                      - generic [ref=f12e625]:
+                        - generic [ref=f12e626]:
+                          - paragraph [ref=f12e627]: Form fields lose focus on validation error
+                          - generic [ref=f12e628]: Open
+                        - paragraph [ref=f12e629]: When a validation error appears, focus jumps to the page header instead of staying on the offending input.
+                        - generic [ref=f12e630]:
+                          - generic [ref=f12e631]: ISSUE-008
+                          - generic [ref=f12e632]: •
+                          - generic [ref=f12e633]: IAM
+                          - generic [ref=f12e634]: •
+                          - generic [ref=f12e635]: forms
+                          - generic [ref=f12e636]: •
+                          - generic [ref=f12e637]: 8/26/2024
+                  - listitem [ref=f12e640]:
+                    - button "Logout button missing aria-label Fixed Icon-only logout button had no accessible name. Resolved in release 2024.08.25. ISSUE-011 IAM accessibility 8/25/2024" [ref=f12e641] [cursor=pointer]:
+                      - generic [ref=f12e645]:
+                        - generic [ref=f12e646]:
+                          - paragraph [ref=f12e647]: Logout button missing aria-label
+                          - generic [ref=f12e648]: Fixed
+                        - paragraph [ref=f12e649]: Icon-only logout button had no accessible name. Resolved in release 2024.08.25.
+                        - generic [ref=f12e650]:
+                          - generic [ref=f12e651]: ISSUE-011
+                          - generic [ref=f12e652]: •
+                          - generic [ref=f12e653]: IAM
+                          - generic [ref=f12e654]: •
+                          - generic [ref=f12e655]: accessibility
+                          - generic [ref=f12e656]: •
+                          - generic [ref=f12e657]: 8/25/2024
+                  - listitem [ref=f12e660]:
+                    - button "Forbidden 403 on /admin for non-admin role Open Standard users receive a raw 403 page on /admin instead of a friendly access-denied screen. ISSUE-012 IAM authorization 8/25/2024" [ref=f12e661] [cursor=pointer]:
+                      - generic [ref=f12e665]:
+                        - generic [ref=f12e666]:
+                          - paragraph [ref=f12e667]: Forbidden 403 on /admin for non-admin role
+                          - generic [ref=f12e668]: Open
+                        - paragraph [ref=f12e669]: Standard users receive a raw 403 page on /admin instead of a friendly access-denied screen.
+                        - generic [ref=f12e670]:
+                          - generic [ref=f12e671]: ISSUE-012
+                          - generic [ref=f12e672]: •
+                          - generic [ref=f12e673]: IAM
+                          - generic [ref=f12e674]: •
+                          - generic [ref=f12e675]: authorization
+                          - generic [ref=f12e676]: •
+                          - generic [ref=f12e677]: 8/25/2024
+  - region "Notifications alt+T"

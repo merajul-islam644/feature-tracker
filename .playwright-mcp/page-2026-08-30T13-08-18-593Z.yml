@@ -1,0 +1,152 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "MailCraft" [ref=e4] [cursor=pointer]:
+      - /url: ../
+    - generic [ref=e10]: Live demo
+    - navigation "Primary" [ref=e11]:
+      - link "Documentation" [ref=e12] [cursor=pointer]:
+        - /url: ../DOCS.html
+      - link "Overview" [ref=e13] [cursor=pointer]:
+        - /url: ../
+      - link "npm" [ref=e14] [cursor=pointer]:
+        - /url: https://www.npmjs.com/package/@seliseblocks/mailcraft
+    - button "Switch to light" [ref=e413] [cursor=pointer]
+  - generic [ref=e17]:
+    - generic [ref=e18]:
+      - generic [ref=e19]: Template
+      - combobox "Template" [active] [ref=e20] [cursor=pointer]:
+        - option "Activate your account" [selected]
+        - option "Back in stock"
+        - option "Cart left behind"
+        - option "Community giveaway"
+        - option "Frontend Futures invite"
+        - option "Give 25 get 25"
+        - option "Invoice paid"
+        - option "Meet Nova launch"
+        - option "Mega weekend sale"
+        - option "Order confirmed"
+        - option "Rate your headphones"
+        - option "Reset your password"
+        - option "Thank-you promo code"
+        - option "The Sunday Brief"
+        - option "Welcome to your workspace"
+        - option "Your order shipped"
+        - option "Your password was changed"
+        - option "Your sign-in code"
+    - generic [ref=e21]:
+      - generic [ref=e22]: Language
+      - combobox "Language" [ref=e23] [cursor=pointer]:
+        - option "English"
+        - option "Arabic"
+        - option "Bangla" [selected]
+        - option "Dzongkha"
+        - option "Bulgarian"
+        - option "Catalan"
+        - option "Czech"
+        - option "Danish"
+        - option "German"
+        - option "Swiss German"
+        - option "Greek"
+        - option "Spanish"
+        - option "Estonian"
+        - option "Finnish"
+        - option "French"
+        - option "Croatian"
+        - option "Hungarian"
+        - option "Italian"
+        - option "Lithuanian"
+        - option "Latvian"
+        - option "Norwegian Bokmål"
+        - option "Dutch"
+        - option "Polish"
+        - option "Portuguese"
+        - option "Romanian"
+        - option "Russian"
+        - option "Slovak"
+        - option "Slovenian"
+        - option "Swedish"
+        - option "Turkish"
+        - option "Ukrainian"
+    - generic [ref=e24]:
+      - generic [ref=e25]: Font
+      - combobox "Font" [ref=e26] [cursor=pointer]:
+        - option "Default (Manrope)" [selected]
+        - option "Match host app"
+        - option "Serif"
+        - option "Verdana"
+    - generic [ref=e27]:
+      - generic [ref=e28]: Brand
+      - textbox "Brand" [ref=e29] [cursor=pointer]: "#0065b3"
+  - generic [ref=e33]:
+    - banner [ref=e34]:
+      - generic [ref=e35]: MailCraft
+      - generic [ref=e42]: সংরক্ষিত হয়েছে 07:07 PM
+      - generic [ref=e44]:
+        - button "ডেস্কটপ" [pressed] [ref=e414] [cursor=pointer]
+        - button "মোবাইল" [ref=e417] [cursor=pointer]
+      - generic [ref=e51]:
+        - button "Undo — ⌘Z" [ref=e52] [cursor=pointer]
+        - button "Redo — ⌘⇧Z" [disabled] [ref=e56]
+        - button "Light mode" [ref=e306] [cursor=pointer]: লাইট
+        - button "Draft email content with AI" [ref=e63] [cursor=pointer]: Draft
+        - button "Edit the raw HTML with a live preview" [ref=e67] [cursor=pointer]: কোড
+        - button "Preview the email" [ref=e72] [cursor=pointer]: প্রিভিউ
+        - button "Export your email" [ref=e76] [cursor=pointer]: রপ্তানি
+    - generic [ref=e79]:
+      - main [ref=e80]:
+        - generic [ref=e420]:
+          - paragraph [ref=e427]: "{{ company }}"
+          - generic [ref=e430]:
+            - paragraph [ref=e434]: Account activation
+            - 'heading "One last step, {{ first_name }}" [level=1] [ref=e437]'
+            - paragraph [ref=e441]: "Welcome to {{ company }}. Tap the button below to activate your account — it takes less than ten seconds."
+          - link "Activate my account" [ref=e447]:
+            - /url: https://example.com/activate
+          - generic [ref=e453]:
+            - paragraph [ref=e454]: "Button not working? Paste this into your browser:"
+            - paragraph [ref=e455]:
+              - link "https://example.com/activate" [ref=e456]:
+                - /url: https://example.com/activate
+          - generic [ref=e462]:
+            - text: This link is personal to
+            - strong [ref=e463]: "{{ email }}"
+            - text: "and expires in 24 hours. If you didn’t create an account with {{ company }}, you can safely ignore this email."
+          - paragraph [ref=e470]:
+            - link "Unsubscribe" [ref=e471]:
+              - /url: "{{ unsubscribe_url }}"
+            - text: ·
+            - link "Notification settings" [ref=e472]:
+              - /url: https://example.com/preferences
+        - generic [ref=e137]:
+          - generic [ref=e138]: 6টি সারি · 8টি ব্লক · 600px
+          - generic [ref=e140]:
+            - button "75%" [ref=e473] [cursor=pointer]
+            - button "100%" [pressed] [ref=e474] [cursor=pointer]
+            - button "125%" [ref=e475] [cursor=pointer]
+      - complementary [ref=e144]:
+        - tablist [ref=e145]:
+          - tab "স্টাইল" [selected] [ref=e476] [cursor=pointer]
+          - tab "ব্লক" [ref=e480] [cursor=pointer]
+          - tab "সেকশন" [ref=e484] [cursor=pointer]
+          - tab "ফাইল" [ref=e487] [cursor=pointer]
+          - tab "কাঠামো" [ref=e492] [cursor=pointer]
+          - tab "Settings" [ref=e494] [cursor=pointer]
+          - tab "ভেরিয়েবল" [ref=e498] [cursor=pointer]
+        - generic [ref=e503]:
+          - generic [ref=e505]:
+            - generic [ref=e506]: কিছু নির্বাচিত নয়
+            - generic [ref=e507]: ইন্সপেক্টর
+          - generic [ref=e509]:
+            - paragraph [ref=e510]:
+              - text: ক্যানভাসে একটি সারি বা ব্লক নির্বাচন করে এখানে স্টাইল করুন।
+              - strong [ref=e511]: ব্লক
+              - text: ট্যাব থেকে ব্লক টেনে আনুন; সরাসরি সম্পাদনার জন্য যেকোনো লেখায় ডাবল-ক্লিক করুন।
+            - generic [ref=e512]:
+              - generic [ref=e513]: শর্টকাট
+              - generic [ref=e514]:
+                - generic [ref=e515]: ⌘Z / ⌘⇧Z — পূর্বাবস্থা, পুনরায়
+                - generic [ref=e516]: ⌘D — নির্বাচন নকল করুন
+                - generic [ref=e517]: ⌫ — নির্বাচন মুছুন
+                - generic [ref=e518]: ⌘E — HTML রপ্তানি করুন
+                - generic [ref=e519]: ESC — নির্বাচন বাতিল, বন্ধ করুন
+      - generic [ref=e191]: Powered by SELISE Blocks © 2026
