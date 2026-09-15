@@ -7,7 +7,6 @@ import {
   ArrowRight,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { useDataStore } from "@/store/dataStore";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Card,
@@ -18,23 +17,22 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { formatRelativeDate } from "@/lib/utils";
+import {
+  useProjects,
+  useRecentFlows,
+  useWorkspaceTotals,
+} from "@/lib/blocks/hooks";
+import { useLocale, useT } from "@/lib/blocks/i18n";
 
 export function DashboardPage() {
   const { currentUser } = useAuth();
-  const projects = useDataStore((s) => s.projects);
-  const features = useDataStore((s) => s.features);
-  const flows = useDataStore((s) => s.flows);
-  const isHydrated = useDataStore((s) => s.isHydrated);
+  const projectsQuery = useProjects();
+  const totalsQuery = useWorkspaceTotals();
+  const recentFlowsQuery = useRecentFlows(5);
+  const t = useT();
+  const { formatRelativeTime } = useLocale();
 
-  const stats = useMemo(
-    () => ({
-      projectCount: projects.length,
-      featureCount: features.length,
-      flowCount: flows.length,
-    }),
-    [projects, features, flows]
-  );
+  const projects = projectsQuery.data ?? [];
 
   const recentProjects = useMemo(
     () =>
@@ -44,56 +42,50 @@ export function DashboardPage() {
             new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
         )
         .slice(0, 5),
-    [projects]
+    [projects],
   );
 
-  const recentFlows = useMemo(
-    () =>
-      [...flows]
-        .sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        )
-        .slice(0, 5),
-    [flows]
-  );
+  const recentFlows = recentFlowsQuery.data ?? [];
 
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-semibold text-foreground">Dashboard</h1>
+        <h1 className="text-2xl font-semibold text-foreground">
+          {t("dashboard.title", "Dashboard")}
+        </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Welcome back, {currentUser?.name ?? "there"}. Here's a snapshot of
-          your workspace.
+          {currentUser
+            ? t("dashboard.welcome", "Welcome back, {name}.", {
+                name: currentUser.name,
+              })
+            : t("dashboard.welcomeFallback", "Welcome back.")}
         </p>
       </header>
 
-      {/* Stat cards */}
       <section
         className="grid gap-4 sm:grid-cols-3"
-        aria-label="Workspace statistics"
+        aria-label={t("dashboard.statsLabel", "Workspace statistics")}
       >
         <StatCard
-          label="Projects"
-          value={stats.projectCount}
+          label={t("dashboard.projects", "Projects")}
+          value={projects.length}
           icon={<FolderKanban className="h-5 w-5" aria-hidden="true" />}
-          loading={!isHydrated}
+          loading={projectsQuery.isLoading}
         />
         <StatCard
-          label="Features"
-          value={stats.featureCount}
+          label={t("dashboard.features", "Features")}
+          value={totalsQuery.data?.features ?? 0}
           icon={<ListChecks className="h-5 w-5" aria-hidden="true" />}
-          loading={!isHydrated}
+          loading={totalsQuery.isLoading}
         />
         <StatCard
-          label="Flows"
-          value={stats.flowCount}
+          label={t("dashboard.flows", "Flows")}
+          value={totalsQuery.data?.flows ?? 0}
           icon={<GitBranch className="h-5 w-5" aria-hidden="true" />}
-          loading={!isHydrated}
+          loading={totalsQuery.isLoading}
         />
       </section>
 
-      {/* Recent projects & flows */}
       <div className="grid gap-4 lg:grid-cols-2">
         <section aria-labelledby="recent-projects-heading">
           <Card>
@@ -102,20 +94,26 @@ export function DashboardPage() {
                 id="recent-projects-heading"
                 className="text-base font-semibold"
               >
-                Recent Projects
+                {t("dashboard.recentProjects", "Recent Projects")}
               </CardTitle>
               <Button asChild variant="link" size="sm" className="h-auto px-0">
                 <Link to="/projects" className="inline-flex items-center gap-1">
-                  View all
+                  {t("dashboard.viewAll", "View all")}
                   <ArrowRight className="h-3 w-3" aria-hidden="true" />
                 </Link>
               </Button>
             </CardHeader>
             <Separator />
             <CardContent className="p-0">
-              {recentProjects.length === 0 ? (
+              {projectsQuery.isLoading ? (
+                <div className="space-y-2 p-5">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <Skeleton key={i} className="h-5 w-full" />
+                  ))}
+                </div>
+              ) : recentProjects.length === 0 ? (
                 <p className="px-5 py-6 text-center text-sm text-muted-foreground">
-                  No projects yet.
+                  {t("dashboard.noProjects", "No projects yet.")}
                 </p>
               ) : (
                 <ul className="divide-y divide-border">
@@ -129,7 +127,7 @@ export function DashboardPage() {
                           {project.name}
                         </span>
                         <span className="text-xs text-muted-foreground">
-                          {formatRelativeDate(project.updatedAt)}
+                          {formatRelativeTime(project.updatedAt)}
                         </span>
                       </Link>
                     </li>
@@ -147,15 +145,21 @@ export function DashboardPage() {
                 id="recent-flows-heading"
                 className="text-base font-semibold"
               >
-                Recent Flows
+                {t("dashboard.recentFlows", "Recent Flows")}
               </CardTitle>
               <Badge variant="muted">{recentFlows.length}</Badge>
             </CardHeader>
             <Separator />
             <CardContent className="p-0">
-              {recentFlows.length === 0 ? (
+              {recentFlowsQuery.isLoading ? (
+                <div className="space-y-2 p-5">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <Skeleton key={i} className="h-5 w-full" />
+                  ))}
+                </div>
+              ) : recentFlows.length === 0 ? (
                 <p className="px-5 py-6 text-center text-sm text-muted-foreground">
-                  No flows yet.
+                  {t("dashboard.noFlows", "No flows yet.")}
                 </p>
               ) : (
                 <ul className="divide-y divide-border">
@@ -168,7 +172,7 @@ export function DashboardPage() {
                         {flow.name}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {formatRelativeDate(flow.createdAt)}
+                        {formatRelativeTime(flow.createdAt)}
                       </span>
                     </li>
                   ))}

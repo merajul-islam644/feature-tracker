@@ -1,14 +1,5 @@
 import { FeatureItem } from "./FeatureItem";
-
-// Local shape — the canonical schema lives in
-// src/types/Shemastructure/Feature.ts and is intentionally not imported.
-interface Feature {
-  id: string;
-  projectId: string;
-  name: string;
-  createdAt: string;
-  updatedAt: string;
-}
+import type { Feature } from "@/lib/blocks/data";
 
 interface FeatureListProps {
   features: Feature[];

@@ -12,9 +12,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { flowNameSchema } from "@/lib/validation";
-import { useDataStore } from "@/store/dataStore";
 import { useToast } from "@/hooks/useToast";
-import { delay } from "@/lib/utils";
+import { useCreateFlow, useProjectFeatures } from "@/lib/blocks/hooks";
+import { useT } from "@/lib/blocks/i18n";
 
 interface AddFlowModalProps {
   open: boolean;
@@ -29,24 +29,17 @@ export function AddFlowModal({
   projectId,
   defaultFeatureId,
 }: AddFlowModalProps) {
-  // Subscribe to the raw features array (stable reference) and derive the
-  // project-scoped list with useMemo. The previous selector returned a fresh
-  // .filter() array on every call, which useSyncExternalStore saw as a new
-  // snapshot and re-rendered forever.
-  const allFeatures = useDataStore((s) => s.features);
-  const addFlow = useDataStore((s) => s.addFlow);
+  const createFlow = useCreateFlow();
+  const featuresQuery = useProjectFeatures(projectId);
   const toast = useToast();
+  const t = useT();
 
-  const features = useMemo(
-    () => allFeatures.filter((f) => f.projectId === projectId),
-    [allFeatures, projectId]
-  );
+  const features = featuresQuery.data ?? [];
 
   const [name, setName] = useState("");
   const [featureId, setFeatureId] = useState(defaultFeatureId ?? "");
   const [nameError, setNameError] = useState<string | null>(null);
   const [featureError, setFeatureError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -54,18 +47,17 @@ export function AddFlowModal({
       setFeatureId(defaultFeatureId ?? (features[0]?.id ?? ""));
       setNameError(null);
       setFeatureError(null);
-      setSubmitting(false);
     }
   }, [open, defaultFeatureId, features]);
 
   const featureOptions = useMemo(
     () => features.map((f) => ({ value: f.id, label: f.name })),
-    [features]
+    [features],
   );
 
   const handleOpenChange = (next: boolean) => {
     if (next) return;
-    if (submitting) return;
+    if (createFlow.isPending) return;
     onClose();
   };
 
@@ -82,7 +74,7 @@ export function AddFlowModal({
     }
 
     if (!featureId) {
-      setFeatureError("Please select a feature");
+      setFeatureError(t("addFlow.featureRequired", "Please select a feature"));
       valid = false;
     } else {
       setFeatureError(null);
@@ -90,27 +82,39 @@ export function AddFlowModal({
 
     if (!valid) return;
 
-    setSubmitting(true);
-    await delay(400);
-
-    const flow = addFlow(projectId, featureId, name);
-    if (!flow) {
-      setFeatureError("Selected feature is no longer available.");
-      setSubmitting(false);
-      return;
+    try {
+      const flow = await createFlow.mutateAsync({
+        projectId,
+        featureId,
+        name: name.trim(),
+      });
+      toast.success(
+        t("toast.flowCreated", 'Flow "{name}" created successfully.', {
+          name: flow.name,
+        }),
+      );
+      onClose();
+    } catch (err) {
+      setFeatureError(
+        err instanceof Error
+          ? err.message
+          : t("addFlow.error", "Could not create flow."),
+      );
     }
-
-    toast.success(`Flow "${flow.name}" created successfully.`);
-    onClose();
   };
+
+  const pending = createFlow.isPending;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent size="md">
         <DialogHeader>
-          <DialogTitle>Add Flow</DialogTitle>
+          <DialogTitle>{t("addFlow.title", "Add Flow")}</DialogTitle>
           <DialogDescription>
-            Map a user journey to one of this project's features.
+            {t(
+              "addFlow.description",
+              "Map a user journey to one of this project's features.",
+            )}
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
@@ -121,9 +125,9 @@ export function AddFlowModal({
             noValidate
           >
             <Input
-              label="Flow Name"
+              label={t("addFlow.nameLabel", "Flow Name")}
               required
-              placeholder="e.g. User Login Flow"
+              placeholder={t("addFlow.namePlaceholder", "e.g. User Login Flow")}
               value={name}
               onChange={(e) => {
                 setName(e.target.value);
@@ -134,13 +138,16 @@ export function AddFlowModal({
               maxLength={100}
             />
             <Select
-              label="Feature"
+              label={t("addFlow.featureLabel", "Feature")}
               required
               options={featureOptions}
               placeholder={
                 features.length === 0
-                  ? "No features available — add one first"
-                  : "Select a feature"
+                  ? t(
+                      "addFlow.featurePlaceholderEmpty",
+                      "No features available — add one first",
+                    )
+                  : t("addFlow.featurePlaceholder", "Select a feature")
               }
               value={featureId}
               onChange={(e) => {
@@ -152,7 +159,10 @@ export function AddFlowModal({
             />
             {features.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                Create at least one feature in this project before adding flows.
+                {t(
+                  "addFlow.noFeaturesHint",
+                  "Create at least one feature in this project before adding flows.",
+                )}
               </p>
             )}
           </form>
@@ -161,17 +171,17 @@ export function AddFlowModal({
           <Button
             variant="outline"
             onClick={() => handleOpenChange(false)}
-            disabled={submitting}
+            disabled={pending}
           >
-            Cancel
+            {t("cancel", "Cancel")}
           </Button>
           <Button
             type="submit"
             form="add-flow-form"
-            loading={submitting}
+            loading={pending}
             disabled={features.length === 0}
           >
-            {submitting ? "Creating…" : "Create"}
+            {pending ? t("addFlow.creating", "Creating…") : t("create", "Create")}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -1,0 +1,12 @@
+{
+  "schemaName": "Project",
+  "collectionName": "blx_Projects",
+  "schemaType": 1,
+  "description": "A workspace that groups related features and flows for one user.",
+  "fields": [
+    { "name": "name", "type": "String", "isRequired": true, "description": "Display name of the project." },
+    { "name": "description", "type": "String", "description": "Free-form notes about the project." },
+    { "name": "status", "type": "String", "isRequired": true, "description": "Lifecycle status (active/archived)." },
+    { "name": "color", "type": "String", "description": "Hex color used in the UI." }
+  ]
+}

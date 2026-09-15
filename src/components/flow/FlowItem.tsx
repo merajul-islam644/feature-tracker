@@ -1,22 +1,13 @@
 import { GitBranch } from "lucide-react";
-import { formatRelativeDate } from "@/lib/utils";
-
-// Local shape — the canonical schema lives in
-// src/types/Shemastructure/Flow.ts and is intentionally not imported.
-interface Flow {
-  id: string;
-  projectId: string;
-  featureId: string;
-  name: string;
-  createdAt: string;
-  updatedAt: string;
-}
+import { useLocale } from "@/lib/blocks/i18n";
+import type { Flow } from "@/lib/blocks/data";
 
 interface FlowItemProps {
   flow: Flow;
 }
 
 export function FlowItem({ flow }: FlowItemProps) {
+  const { formatRelativeTime } = useLocale();
   return (
     <div className="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent">
       <GitBranch
@@ -27,7 +18,7 @@ export function FlowItem({ flow }: FlowItemProps) {
         {flow.name}
       </span>
       <span className="hidden text-xs text-muted-foreground sm:inline">
-        {formatRelativeDate(flow.createdAt)}
+        {formatRelativeTime(flow.createdAt)}
       </span>
     </div>
   );

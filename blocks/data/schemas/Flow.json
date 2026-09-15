@@ -1,0 +1,13 @@
+{
+  "schemaName": "Flow",
+  "collectionName": "blx_Flows",
+  "schemaType": 1,
+  "description": "User journey within a feature.",
+  "fields": [
+    { "name": "title", "type": "String", "isRequired": true, "description": "Short title of the flow." },
+    { "name": "description", "type": "String", "description": "Long-form description." },
+    { "name": "steps", "type": "String", "isArray": true, "description": "Ordered steps in the flow." },
+    { "name": "status", "type": "String", "isRequired": true, "description": "draft/active/done." },
+    { "name": "featureId", "type": "String", "isRequired": true, "isIndexed": true, "description": "Owning Feature.ItemId." }
+  ]
+}

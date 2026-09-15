@@ -1,23 +1,15 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, ChevronRight, GitBranch } from "lucide-react";
-import { useDataStore } from "@/store/dataStore";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { FlowItem } from "@/components/flow/FlowItem";
 import { FlowEmptyState } from "./FlowEmptyState";
 import { AddFlowModal } from "@/components/flow/AddFlowModal";
+import { useFeatureFlows } from "@/lib/blocks/hooks";
+import { useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
-
-// Local shape — the canonical schema lives in
-// src/types/Shemastructure/Feature.ts and is intentionally not imported.
-interface Feature {
-  id: string;
-  projectId: string;
-  name: string;
-  createdAt: string;
-  updatedAt: string;
-}
+import type { Feature } from "@/lib/blocks/data";
 
 interface FeatureItemProps {
   feature: Feature;
@@ -26,15 +18,9 @@ interface FeatureItemProps {
 export function FeatureItem({ feature }: FeatureItemProps) {
   const [expanded, setExpanded] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
-  // Subscribe to the raw flows array (stable reference) and derive the
-  // feature-scoped list with useMemo. Same fix as ProjectDetailPage /
-  // AddFlowModal — getFeatureFlows returns a fresh .filter() on every call,
-  // which useSyncExternalStore sees as a snapshot change and loops.
-  const allFlows = useDataStore((s) => s.flows);
-  const flows = useMemo(
-    () => allFlows.filter((f) => f.featureId === feature.id),
-    [allFlows, feature.id]
-  );
+  const { data: flows } = useFeatureFlows(expanded ? feature.id : undefined);
+  const t = useT();
+  const flowList = flows ?? [];
 
   const handleKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -68,9 +54,9 @@ export function FeatureItem({ feature }: FeatureItemProps) {
         <span className="flex-1 text-sm font-semibold text-foreground">
           {feature.name}
         </span>
-        <Badge variant={flows.length > 0 ? "default" : "muted"}>
+        <Badge variant={flowList.length > 0 ? "default" : "muted"}>
           <GitBranch className="h-3 w-3" aria-hidden="true" />
-          {flows.length}
+          {flowList.length}
         </Badge>
       </div>
 
@@ -80,11 +66,11 @@ export function FeatureItem({ feature }: FeatureItemProps) {
           className="bg-muted/30 px-4 py-3"
         >
           <Separator className="mb-3" />
-          {flows.length === 0 ? (
+          {flowList.length === 0 ? (
             <FlowEmptyState onAdd={() => setAddFlowOpen(true)} />
           ) : (
             <ul className="space-y-1.5">
-              {flows.map((flow) => (
+              {flowList.map((flow) => (
                 <li key={flow.id}>
                   <FlowItem flow={flow} />
                 </li>
@@ -96,7 +82,7 @@ export function FeatureItem({ feature }: FeatureItemProps) {
                   onClick={() => setAddFlowOpen(true)}
                   className={cn("text-primary")}
                 >
-                  + Add another flow
+                  {t("featureItem.addAnotherFlow", "+ Add another flow")}
                 </Button>
               </li>
             </ul>

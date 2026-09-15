@@ -11,9 +11,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { featureNameSchema } from "@/lib/validation";
-import { useDataStore } from "@/store/dataStore";
 import { useToast } from "@/hooks/useToast";
-import { delay } from "@/lib/utils";
+import { useCreateFeature } from "@/lib/blocks/hooks";
+import { useT } from "@/lib/blocks/i18n";
 
 interface AddFeatureModalProps {
   open: boolean;
@@ -26,23 +26,22 @@ export function AddFeatureModal({
   onClose,
   projectId,
 }: AddFeatureModalProps) {
-  const addFeature = useDataStore((s) => s.addFeature);
+  const createFeature = useCreateFeature();
   const toast = useToast();
+  const t = useT();
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setName("");
       setError(null);
-      setSubmitting(false);
     }
   }, [open]);
 
   const handleOpenChange = (next: boolean) => {
     if (next) return;
-    if (submitting) return;
+    if (createFeature.isPending) return;
     onClose();
   };
 
@@ -54,25 +53,29 @@ export function AddFeatureModal({
       return;
     }
 
-    setSubmitting(true);
-    await delay(400);
-
-    const feature = addFeature(projectId, name);
-    if (!feature) {
-      setError("A feature with this name already exists in this project.");
-      setSubmitting(false);
-      return;
+    try {
+      const feature = await createFeature.mutateAsync({
+        projectId,
+        name: name.trim(),
+      });
+      toast.success(
+        t("toast.featureCreated", 'Feature "{name}" added successfully.', {
+          name: feature.name,
+        }),
+      );
+      onClose();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : t("addFeature.error", "Could not add feature."),
+      );
     }
-
-    toast.success(`Feature "${feature.name}" added successfully.`);
-    onClose();
   };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent size="md">
         <DialogHeader>
-          <DialogTitle>Add Feature</DialogTitle>
+          <DialogTitle>{t("addFeature.title", "Add Feature")}</DialogTitle>
         </DialogHeader>
         <DialogBody>
           <form
@@ -82,9 +85,12 @@ export function AddFeatureModal({
             className="space-y-4"
           >
             <Input
-              label="Feature Name"
+              label={t("addFeature.nameLabel", "Feature Name")}
               required
-              placeholder="e.g. Authentication"
+              placeholder={t(
+                "addFeature.namePlaceholder",
+                "e.g. Authentication",
+              )}
               value={name}
               onChange={(e) => {
                 setName(e.target.value);
@@ -100,16 +106,18 @@ export function AddFeatureModal({
           <Button
             variant="outline"
             onClick={() => handleOpenChange(false)}
-            disabled={submitting}
+            disabled={createFeature.isPending}
           >
-            Cancel
+            {t("cancel", "Cancel")}
           </Button>
           <Button
             type="submit"
             form="add-feature-form"
-            loading={submitting}
+            loading={createFeature.isPending}
           >
-            {submitting ? "Adding…" : "Add"}
+            {createFeature.isPending
+              ? t("addFeature.adding", "Adding…")
+              : t("add", "Add")}
           </Button>
         </DialogFooter>
       </DialogContent>

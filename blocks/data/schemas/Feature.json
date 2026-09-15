@@ -1,0 +1,14 @@
+{
+  "schemaName": "Feature",
+  "collectionName": "blx_Features",
+  "schemaType": 1,
+  "description": "Capability within a project.",
+  "fields": [
+    { "name": "title", "type": "String", "isRequired": true, "description": "Short title of the feature." },
+    { "name": "description", "type": "String", "description": "Long-form description." },
+    { "name": "status", "type": "String", "isRequired": true, "description": "backlog/in_progress/done." },
+    { "name": "priority", "type": "String", "description": "low/medium/high." },
+    { "name": "projectId", "type": "String", "isRequired": true, "isIndexed": true, "description": "Owning Project.ItemId." },
+    { "name": "tags", "type": "String", "isArray": true, "description": "Free-form labels." }
+  ]
+}

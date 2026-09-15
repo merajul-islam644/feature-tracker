@@ -2,17 +2,8 @@ import { Link } from "react-router-dom";
 import { FolderKanban, ListChecks, GitBranch } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { formatRelativeDate } from "@/lib/utils";
-
-// Local shape — the canonical schema lives in
-// src/types/Shemastructure/Project.ts and is intentionally not imported.
-interface Project {
-  id: string;
-  userId: string;
-  name: string;
-  createdAt: string;
-  updatedAt: string;
-}
+import { useLocale } from "@/lib/blocks/i18n";
+import type { Project } from "@/lib/blocks/data";
 
 interface ProjectCardProps {
   project: Project;
@@ -25,6 +16,7 @@ export function ProjectCard({
   featureCount,
   flowCount,
 }: ProjectCardProps) {
+  const { t, formatRelativeTime } = useLocale();
   return (
     <Link
       to={`/projects/${project.id}`}
@@ -40,7 +32,9 @@ export function ProjectCard({
               {project.name}
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Updated {formatRelativeDate(project.updatedAt)}
+              {t("projects.updated", "Updated {relative}", {
+                relative: formatRelativeTime(project.updatedAt),
+              })}
             </p>
           </div>
         </div>
@@ -52,14 +46,14 @@ export function ProjectCard({
               <span className="font-semibold text-foreground">
                 {featureCount}
               </span>{" "}
-              Features
+              {t("dashboard.features", "Features")}
             </span>
           </span>
           <span className="flex items-center gap-1.5">
             <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
             <span>
               <span className="font-semibold text-foreground">{flowCount}</span>{" "}
-              Flows
+              {t("dashboard.flows", "Flows")}
             </span>
           </span>
         </div>

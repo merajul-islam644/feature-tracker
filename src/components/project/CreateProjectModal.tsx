@@ -13,10 +13,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { projectNameSchema, validateFeatureName } from "@/lib/validation";
-import { useDataStore } from "@/store/dataStore";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/useToast";
-import { delay } from "@/lib/utils";
+import { useCreateFeature, useCreateProject } from "@/lib/blocks/hooks";
+import { useT } from "@/lib/blocks/i18n";
 
 interface CreateProjectModalProps {
   open: boolean;
@@ -30,9 +30,11 @@ interface FeatureInputRow {
 }
 
 export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
-  const addProject = useDataStore((s) => s.addProject);
+  const createProject = useCreateProject();
+  const createFeature = useCreateFeature();
   const { currentUser } = useAuth();
   const toast = useToast();
+  const t = useT();
 
   const [projectName, setProjectName] = useState("");
   const [projectError, setProjectError] = useState<string | null>(null);
@@ -101,25 +103,58 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     if (!validateAll() || !currentUser) return;
 
     setSubmitting(true);
-    await delay(500);
 
-    const featureNames = features
-      .map((r) => r.value.trim())
-      .filter((n) => n.length > 0);
+    try {
+      const project = await createProject.mutateAsync({
+        name: projectName.trim(),
+        status: "active",
+      });
 
-    const project = addProject(projectName, currentUser.id, featureNames);
-    toast.success(`Project "${project.name}" created successfully.`);
-    reset();
-    onClose();
+      const featureNames = features
+        .map((r) => r.value.trim())
+        .filter((n) => n.length > 0);
+      const seen = new Set<string>();
+      const uniqueNames = featureNames.filter((n) => {
+        const key = n.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      for (const name of uniqueNames) {
+        await createFeature.mutateAsync({
+          projectId: project.id,
+          name,
+        });
+      }
+
+      toast.success(
+        t("toast.projectCreated", 'Project "{name}" created successfully.', {
+          name: project.name,
+        }),
+      );
+      reset();
+      onClose();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : t("createProject.createError", "Could not create project.");
+      toast.error(message);
+      setSubmitting(false);
+    }
   };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent size="lg">
         <DialogHeader>
-          <DialogTitle>Create Project</DialogTitle>
+          <DialogTitle>
+            {t("createProject.title", "Create Project")}
+          </DialogTitle>
           <DialogDescription>
-            Add a project name and optional initial features.
+            {t(
+              "createProject.description",
+              "Add a project name and optional initial features.",
+            )}
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
@@ -130,9 +165,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             noValidate
           >
             <Input
-              label="Project Name"
+              label={t("createProject.nameLabel", "Project Name")}
               required
-              placeholder="e.g. Marketing Website"
+              placeholder={t(
+                "createProject.namePlaceholder",
+                "e.g. Marketing Website",
+              )}
               value={projectName}
               onChange={(e) => {
                 setProjectName(e.target.value);
@@ -145,15 +183,22 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label>Features</Label>
-                <span className="text-xs text-muted-foreground">Optional</span>
+                <Label>
+                  {t("createProject.featuresLabel", "Features")}
+                </Label>
+                <span className="text-xs text-muted-foreground">
+                  {t("createProject.featuresOptional", "Optional")}
+                </span>
               </div>
               <div className="space-y-2">
                 {features.map((row) => (
                   <div key={row.id} className="flex items-start gap-2">
                     <div className="flex-1">
                       <Input
-                        placeholder="Feature name"
+                        placeholder={t(
+                          "createProject.featureNamePlaceholder",
+                          "Feature name",
+                        )}
                         value={row.value}
                         onChange={(e) =>
                           handleFeatureChange(row.id, e.target.value)
@@ -166,7 +211,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                       type="button"
                       onClick={() => handleRemoveFeature(row.id)}
                       disabled={features.length === 1}
-                      aria-label="Remove feature input"
+                      aria-label={t(
+                        "createProject.removeFeature",
+                        "Remove feature input",
+                      )}
                       className="mt-1.5 rounded-md p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
                     >
                       <X className="h-4 w-4" aria-hidden="true" />
@@ -180,7 +228,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-primary/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                Add Feature
+                {t("createProject.addFeature", "Add Feature")}
               </button>
             </div>
           </form>
@@ -191,14 +239,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             onClick={() => handleOpenChange(false)}
             disabled={submitting}
           >
-            Cancel
+            {t("cancel", "Cancel")}
           </Button>
           <Button
             type="submit"
             form="create-project-form"
             loading={submitting}
           >
-            {submitting ? "Creating…" : "Create"}
+            {submitting
+              ? t("createProject.creating", "Creating…")
+              : t("create", "Create")}
           </Button>
         </DialogFooter>
       </DialogContent>

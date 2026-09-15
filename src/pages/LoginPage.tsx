@@ -1,56 +1,50 @@
+// Hosted-login button. Replaces the previous email/password mock. The
+// SDK's `redirectToProvider` triggers the Blocks IAM hosted flow; IAM
+// redirects back to `${origin}/login/callback`, which `CallbackPage` handles.
+
 import { useEffect, useState } from "react";
-import { useNavigate, useLocation, Navigate } from "react-router-dom";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { loginSchema, type LoginInput } from "@/lib/validation";
+import { Navigate, useLocation, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { useAuthContext } from "@/components/blocks/AuthProvider";
+import { isLoginConfigured, blocksConfig } from "@/lib/blocks/config";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useToast } from "@/hooks/useToast";
+import { useT } from "@/lib/blocks/i18n";
 
 export function LoginPage() {
-  const navigate = useNavigate();
+  const { isAuthenticated, isHydrated } = useAuth();
+  const { login } = useAuthContext();
   const location = useLocation();
-  const { login, isAuthenticated, isHydrated } = useAuth();
-  const toast = useToast();
-
-  const [serverError, setServerError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-  } = useForm<LoginInput>({
-    resolver: zodResolver(loginSchema),
-    defaultValues: { email: "", password: "" },
-  });
+  const [searchParams] = useSearchParams();
+  const [pending, setPending] = useState(false);
+  const t = useT();
 
   useEffect(() => {
-    document.title = "Sign in — Feature Tracker";
-  }, []);
+    document.title = `${t("auth.loginTitle", "Sign in to Feature Tracker")} — Feature Tracker`;
+  }, [t]);
 
-  // If already authenticated, redirect to dashboard
   if (isHydrated && isAuthenticated) {
-    const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname;
-    return <Navigate to={from ?? "/dashboard"} replace />;
+    const fromState = (location.state as { from?: { pathname: string } } | null)
+      ?.from?.pathname;
+    const fromQuery = searchParams.get("returnTo");
+    const target = fromState ?? fromQuery ?? "/dashboard";
+    return <Navigate to={target} replace />;
   }
 
-  const onSubmit = async (data: LoginInput) => {
-    setServerError(null);
-    setSubmitting(true);
-    const result = await login(data.email, data.password);
-    setSubmitting(false);
-
-    if (!result.ok) {
-      setServerError(result.error ?? "Unable to sign in. Try again.");
-      return;
+  const handleLogin = async () => {
+    const fromState = (location.state as { from?: { pathname: string } } | null)
+      ?.from?.pathname;
+    const fromQuery = searchParams.get("returnTo");
+    const returnTo = fromState ?? fromQuery ?? "/dashboard";
+    setPending(true);
+    try {
+      await login(returnTo);
+    } finally {
+      setPending(false);
     }
-
-    toast.success("Signed in successfully.");
-    const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname;
-    navigate(from ?? "/dashboard", { replace: true });
   };
+
+  const configured = isLoginConfigured();
+  const callbackUrl = `${window.location.origin}/login/callback`;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
@@ -70,59 +64,50 @@ export function LoginPage() {
               aria-hidden="true"
             >
               <path d="M9 11l3 3L22 4" />
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1-2-2h11" />
             </svg>
           </div>
           <h1 className="mt-3 text-lg font-semibold text-slate-900">
-            Welcome back
+            {t("auth.loginTitle", "Sign in to Feature Tracker")}
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            Sign in to your Feature Tracker account.
+            {t("auth.loginSubtitle", "Use the hosted identity provider to sign in.")}
           </p>
         </div>
 
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
-          <Input
-            label="Email"
-            type="email"
-            autoComplete="email"
-            placeholder="you@example.com"
-            required
-            error={errors.email?.message}
-            {...register("email")}
-          />
-          <Input
-            label="Password"
-            type="password"
-            autoComplete="current-password"
-            placeholder="••••••••"
-            required
-            error={errors.password?.message}
-            {...register("password")}
-          />
-
-          {serverError && (
-            <p
-              role="alert"
-              className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
-            >
-              {serverError}
+        {!configured ? (
+          <div
+            role="alert"
+            className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+          >
+            <p className="font-medium">Login is not configured.</p>
+            <p className="mt-1 text-xs leading-relaxed">
+              Set <code>VITE_BLOCKS_OIDC_CLIENT_ID</code>,{" "}
+              <code>VITE_BLOCKS_OIDC_URL</code>, <code>VITE_BLOCKS_API_URL</code>,
+              and <code>VITE_BLOCKS_KEY</code> in your <code>.env</code> file.
             </p>
-          )}
-
+            <p className="mt-2 text-xs">
+              Register the callback URL{" "}
+              <code className="break-all">{callbackUrl}</code> against your OIDC
+              client.
+            </p>
+          </div>
+        ) : (
           <Button
-            type="submit"
+            type="button"
+            onClick={handleLogin}
             fullWidth
-            loading={submitting}
+            loading={pending}
             className="mt-2"
           >
-            {submitting ? "Signing in…" : "Sign in"}
+            {pending ? "Redirecting…" : t("auth.loginButton", "Continue with hosted login")}
           </Button>
+        )}
 
-          <p className="pt-1 text-center text-xs text-slate-500">
-            Demo mode — any non-empty credentials work.
-          </p>
-        </form>
+        <p className="pt-3 text-center text-xs text-slate-500">
+          Hosted by Blocks IAM at{" "}
+          <span className="break-all">{blocksConfig.oidcUrl}</span>.
+        </p>
       </div>
     </div>
   );
