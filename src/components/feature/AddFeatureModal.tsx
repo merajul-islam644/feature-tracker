@@ -14,17 +14,24 @@ import { featureNameSchema } from "@/lib/validation";
 import { useToast } from "@/hooks/useToast";
 import { useCreateFeature } from "@/lib/blocks/hooks";
 import { useT } from "@/lib/blocks/i18n";
+import { envLabelFromSlug } from "@/pages/ProjectDetailPage";
 
 interface AddFeatureModalProps {
   open: boolean;
   onClose: () => void;
   projectId: string;
+  // Env the new feature belongs to. When set (env-scoped page), a
+  // read-only "Environment: <label>" row is shown above the name input.
+  // When unset (env-less page), the feature is created without envSlug
+  // — legacy-compatible.
+  envSlug?: string;
 }
 
 export function AddFeatureModal({
   open,
   onClose,
   projectId,
+  envSlug,
 }: AddFeatureModalProps) {
   const createFeature = useCreateFeature();
   const toast = useToast();
@@ -57,6 +64,9 @@ export function AddFeatureModal({
       const feature = await createFeature.mutateAsync({
         projectId,
         name: name.trim(),
+        // envSlug is forwarded verbatim — the mutation skips the field
+        // entirely when undefined (see useCreateFeature).
+        envSlug,
       });
       toast.success(
         t("toast.featureCreated", 'Feature "{name}" added successfully.', {
@@ -71,6 +81,8 @@ export function AddFeatureModal({
     }
   };
 
+  const envLabel = envLabelFromSlug(envSlug);
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent size="md">
@@ -84,6 +96,15 @@ export function AddFeatureModal({
             noValidate
             className="space-y-4"
           >
+            {envLabel && (
+              <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-sm">
+                <span className="text-muted-foreground">
+                  {t("addFeature.envLabel", "Environment")}
+                  {": "}
+                </span>
+                <span className="font-medium text-foreground">{envLabel}</span>
+              </div>
+            )}
             <Input
               label={t("addFeature.nameLabel", "Feature Name")}
               required

@@ -1,14 +1,18 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { Avatar } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/useToast";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { blocksClient } from "@/lib/blocks/client";
 import { formatRelativeDate } from "@/lib/utils";
 
 export function ProfilePage() {
@@ -19,6 +23,40 @@ export function ProfilePage() {
     toast.info("Profile loaded successfully.");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // One-time self-grant of the `manager` role. The Blocks CLI command
+  // `blocks iam users access grant` 500s in this tenant (server-side bug
+  // we can't fix from here), so we run the equivalent SDK call from the
+  // browser. We need to read the user's existing roles first so we don't
+  // clobber anything (e.g. someone promoted to admin elsewhere).
+  const [granting, setGranting] = useState(false);
+
+  const grantManagerRole = async () => {
+    if (!currentUser) return;
+    setGranting(true);
+    try {
+      const lookup = await blocksClient.iam.users.get(currentUser.id);
+      const existing =
+        (lookup as { data?: { roles?: string[] } }).data?.roles ?? [];
+      if (existing.includes("manager")) {
+        toast.info("You already hold the manager role.");
+        return;
+      }
+      await blocksClient.iam.users.updateAccess({
+        userId: currentUser.id,
+        roles: Array.from(new Set([...existing, "manager"])),
+      });
+      toast.success("Manager role granted. Notifications will reach you.");
+    } catch (err) {
+      toast.error(
+        `Could not grant role: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      setGranting(false);
+    }
+  };
 
   if (!currentUser) return null;
 
@@ -78,6 +116,34 @@ export function ProfilePage() {
                 </dd>
               </div>
             </dl>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section aria-labelledby="role-tools-heading">
+        <Card>
+          <CardHeader>
+            <CardTitle id="role-tools-heading" className="text-base">
+              Role tools
+            </CardTitle>
+            <CardDescription>
+              Demo aid for the notification system. Grants the{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                manager
+              </code>{" "}
+              Blocks IAM role to your account so project/feature creates
+              land in your inbox. Run once.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              variant="default"
+              onClick={() => void grantManagerRole()}
+              disabled={granting}
+            >
+              <ShieldCheck className="mr-2 h-4 w-4" aria-hidden="true" />
+              {granting ? "Granting…" : "Grant me the manager role"}
+            </Button>
           </CardContent>
         </Card>
       </section>

@@ -4,9 +4,11 @@
   "schemaType": 1,
   "description": "A workspace that groups related features and flows for one user.",
   "fields": [
-    { "name": "name", "type": "String", "isRequired": true, "description": "Display name of the project." },
-    { "name": "description", "type": "String", "description": "Free-form notes about the project." },
-    { "name": "status", "type": "String", "isRequired": true, "description": "Lifecycle status (active/archived)." },
-    { "name": "color", "type": "String", "description": "Hex color used in the UI." }
+    { "name": "name", "type": "String", "requiredOn": 3, "description": "Display name of the project." },
+    { "name": "description", "type": "String", "requiredOn": 0, "description": "Free-form notes about the project." },
+    { "name": "status", "type": "String", "requiredOn": 3, "description": "Lifecycle status (active/archived)." },
+    { "name": "color", "type": "String", "requiredOn": 0, "description": "Hex color used in the UI." },
+    { "name": "customEnvs", "type": "String", "requiredOn": 0, "description": "JSON-encoded list of {slug, label, color} added per-project beyond the canonical dev/stg/prod/uat envs." },
+    { "name": "envLabelOverrides", "type": "String", "requiredOn": 0, "description": "JSON-encoded map of per-project label overrides for canonical envs (key = canonical slug like \"dev\", value = display label). Custom-env labels are stored in `customEnvs`; canonical-env overrides live here so the slug stays reserved but the visible label can be tailored per project." }
   ]
 }

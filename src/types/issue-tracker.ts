@@ -120,6 +120,10 @@ export interface Evidence {
   label: string;
   value: string; // text content or a data URI / placeholder
   timestamp?: string;
+  // MCP step 7: when set, the backend stored the actual artifact under
+  // this id; the viewer resolves it via `/api/evidence/:ref`. Used for
+  // real MCP runs. Inline (data: URI) content still goes through `value`.
+  storageRef?: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -198,6 +202,58 @@ export interface ChatAction {
     | "filter_severity"
     | "dismiss";
   payload?: Record<string, unknown>;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+//  RunEvent — wire contract for the SSE stream the verification backend
+//  pushes while a run is in flight. See prompt/Issue-Tracker-MCP-Design.md
+//  §3.1 for the full design. Only the fields the frontend reads are typed;
+//  anything else the backend sends is preserved under `extra` so we don't
+//  have to update this union every time the agent gains a tool.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type RunEvent =
+  | { kind: "target_started"; runId: string; targetId: string; applicationName: string }
+  | { kind: "target_progress"; runId: string; targetId: string; step: string; done: boolean }
+  | {
+      kind: "target_completed";
+      runId: string;
+      targetId: string;
+      status: "passed" | "failed" | "issues_found";
+    }
+  | { kind: "issue_detected"; runId: string; targetId: string; payload: Issue }
+  | {
+      kind: "evidence";
+      runId: string;
+      targetId: string;
+      storageRef: string;
+      evidenceKind: "screenshot" | "log" | "network";
+      // Most evidence is attached to a specific issue. When the backend
+      // captures run-level evidence (e.g. the home page screenshot), it
+      // omits this field.
+      issueId?: string;
+    }
+  | {
+      kind: "run_completed";
+      runId: string;
+      completedAt: string;
+      failedTargets: number;
+    }
+  | { kind: "run_failed"; runId: string; reason: string };
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Chat session summary — derived from the persisted ChatMessage store. One
+//  row per `sessionId` with at least one saved message.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface ChatSessionSummary {
+  sessionId: string;
+  // First user message in the session, truncated for display. Falls back to
+  // the first assistant turn if the session somehow has no user input.
+  title: string;
+  // ISO timestamp of the most recent message in the session.
+  lastActivity: string;
+  messageCount: number;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

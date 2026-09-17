@@ -8,6 +8,7 @@ import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectDetailPage } from "@/pages/ProjectDetailPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { IssueTrackerPage } from "@/pages/IssueTrackerPage";
+import { ProjectInfoPage } from "@/pages/ProjectInfoPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { RequireAuth } from "@/hooks/useAuth";
 import { PlaywrightPage } from "./playwright/PlaywrightPage";
@@ -35,6 +36,18 @@ export default function App() {
             <Route path="/projects" element={<ProjectsPage />} />
             <Route
               path="/projects/:projectId"
+              element={<ProjectDetailPage />}
+            />
+            {/* `/info` is matched BEFORE the `:envSlug` catch-all so the
+                literal `info` segment isn't accidentally bound to the env
+                parameter. Catch-all then handles both the canonical env
+                routes (dev/stg/prod/uat) and user-added custom envs. */}
+            <Route
+              path="/projects/:projectId/info"
+              element={<ProjectInfoPage />}
+            />
+            <Route
+              path="/projects/:projectId/:envSlug"
               element={<ProjectDetailPage />}
             />
             <Route path="/profile" element={<ProfilePage />} />

@@ -17,8 +17,14 @@ export function ProjectList({ projects }: ProjectListProps) {
 }
 
 function ProjectCardWithCounts({ project }: { project: Project }) {
-  const { data: features } = useProjectFeatures(project.id);
-  const { data: flows } = useProjectFlows(project.id);
+  // Card counts are scoped to the dev env — counting across every env
+  // would inflate the totals because cloning to stg/uat/prod produces
+  // duplicates of the same dev feature/flow (each clone keeps the dev
+  // source's identity via `clonedFromXxxId`). Showing the dev-only count
+  // matches what the user sees on /projects/:id (the default page), so
+  // the card and the entry page agree.
+  const { data: features } = useProjectFeatures(project.id, "dev");
+  const { data: flows } = useProjectFlows(project.id, "dev");
   const featureCount = features?.length ?? 0;
   const flowCount = flows?.length ?? 0;
   return (

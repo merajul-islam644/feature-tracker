@@ -16,14 +16,12 @@ export const blocksClient = createBlocksClient({
     url: blocksConfig.oidcUrl,
   },
   xBlocksKey: blocksConfig.xBlocksKey,
-  // `accessToken` resolves a caller-owned bearer token (or `undefined` if
-  // the session is cookie-only). The SDK reads it before every protected
-  // call; we never store or refresh the token ourselves. In the OIDC
-  // hosted-IdP flow with httpOnly session cookies there is no body token
-  // to forward, so this returns `undefined` and the SDK sends the cookie.
-  accessToken: () =>
-    blocksClient.auth
-      .accessToken()
-      .then((token) => (typeof token === "string" ? token : undefined))
-      .catch(() => undefined),
+  // The cookie-only hosted-login flow has no caller-owned bearer token to
+  // forward — IAM stores the session as a Secure, httpOnly cookie on
+  // /login/callback and the SDK sends it via `credentials: "include"` on
+  // every call. Returning `undefined` keeps the SDK off the accessToken
+  // path entirely; calling `blocksClient.auth.accessToken()` from inside
+  // this callback recurses and stack-overflows (the SDK calls this back
+  // to resolve outgoing tokens).
+  accessToken: () => Promise.resolve(undefined),
 });

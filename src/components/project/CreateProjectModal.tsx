@@ -17,6 +17,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/useToast";
 import { useCreateFeature, useCreateProject } from "@/lib/blocks/hooks";
 import { useT } from "@/lib/blocks/i18n";
+import { PROJECT_ENVS } from "@/pages/ProjectDetailPage";
 
 interface CreateProjectModalProps {
   open: boolean;
@@ -85,11 +86,31 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     setProjectError(null);
 
     let valid = true;
-    const trimmedValues = features.map((r) => r.value.trim());
+    // Build the "other rows" list once, keyed by row id, so each row is
+    // checked against every OTHER row's value (not against itself). The
+    // earlier version passed the full trimmedValues array straight to
+    // `validateFeatureName`, which meant every non-empty row matched its
+    // own value and spuriously reported "Duplicate feature name" — and
+    // because the row's error was set at the same moment, the user saw
+    // the error AND the submission was blocked. Now each row sees only
+    // the values from the other rows, so a single non-empty row stays
+    // valid and only true cross-row duplicates fail validation.
+    const otherValuesByRow = new Map<number, string[]>();
+    features.forEach((r) => {
+      otherValuesByRow.set(
+        r.id,
+        features
+          .filter((other) => other.id !== r.id)
+          .map((other) => other.value.trim()),
+      );
+    });
 
     setFeatures((rows) =>
       rows.map((row) => {
-        const error = validateFeatureName(row.value, trimmedValues);
+        const error = validateFeatureName(
+          row.value,
+          otherValuesByRow.get(row.id) ?? [],
+        );
         if (error) valid = false;
         return { ...row, error };
       })
@@ -125,6 +146,17 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         await createFeature.mutateAsync({
           projectId: project.id,
           name,
+          // Stamp initial features with the project's default env
+          // (canonical "dev"). `EnvironmentChips` routes to
+          // `/projects/:id/<slug>` and dev is the first chip, so this is
+          // the env users land on after creating a project — features
+          // authored without an envSlug would be filtered out by
+          // `useProjectFeatures(projectId, "dev")` and silently vanish
+          // from that view. Features added later via the dev page keep
+          // using the same path (the page passes envSlug through), so
+          // the initial set and the follow-up set end up on the same
+          // env and behave identically on env-scoped reads.
+          envSlug: PROJECT_ENVS[0],
         });
       }
 

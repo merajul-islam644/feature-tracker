@@ -44,11 +44,12 @@ export function AppSidebar() {
       label: t("nav.projects", "Projects"),
       icon: FolderKanban,
     },
-    // {
-    //   to: "/issue-tracker",
-    //   label: t("nav.issueTracker", "Issue Tracker"),
-    //   icon: Bug,
-    // },
+    {
+      to: "/issue-tracker",
+      // label: t("nav.issueTracker", "Issue Tracker"),
+      label: t("nav.issueTracker", "Issues"),
+      icon: Bug,
+    },
     // {
     //   to: "/repo-browser",
     //   label: t("nav.repoBrowser", "Repo Browser"),
@@ -144,8 +145,7 @@ function BrandHeader() {
         </svg>
       </div>
       <span className="truncate text-sm font-semibold text-sidebar-foreground group-data-[collapsible=icon]:hidden">
-        {/* Feature Tracker */}
-        Todo App
+        Feature Tracker
       </span>
     </NavLink>
   );

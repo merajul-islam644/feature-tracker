@@ -1,12 +1,18 @@
-// Verification Targets card (spec section 9).
-// One row per configured target, plus a single empty input row for adding a new URL.
+// Verification Targets card (spec section 9, 14).
+// One row per configured target. Each row exposes:
+//   - enabled toggle (skipped rows are excluded from verification runs)
+//   - last-verified timestamp + status pill
+//   - inline "Test Connection" button (spec 14)
+//   - remove action
+// Plus a single empty input row for adding a new URL.
 
-import { Plus, Globe } from "lucide-react";
+import { Plus, Globe, Plug, Trash2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import { UrlInput, validateUrl } from "./UrlInput";
-import type { VerificationTarget } from "@/types/issue-tracker";
+import type { VerificationTarget, TargetStatus } from "@/types/issue-tracker";
 
 interface Props {
   targets: VerificationTarget[];
@@ -15,6 +21,11 @@ interface Props {
   onDraftChange: (value: string) => void;
   onAddDraft: () => void;
   onRemoveTarget: (id: string) => void;
+  onToggleEnabled: (id: string, enabled: boolean) => void;
+  onTestConnection: (target: VerificationTarget) => void;
+  // While a row's Test Connection is in flight, the spinner replaces the
+  // button. The parent owns the "currently-testing" id (one at a time).
+  testingTargetId?: string | null;
   canAdd: boolean;
 }
 
@@ -25,6 +36,9 @@ export function VerificationTargets({
   onDraftChange,
   onAddDraft,
   onRemoveTarget,
+  onToggleEnabled,
+  onTestConnection,
+  testingTargetId,
   canAdd,
 }: Props) {
   // Validate draft inline as the user types.
@@ -54,31 +68,14 @@ export function VerificationTargets({
         ) : (
           <ul className="space-y-2">
             {targets.map((t) => (
-              <li
-                key={t.id}
-                className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-foreground">
-                    {t.applicationName}
-                  </p>
-                  <p className="truncate text-xs text-muted-foreground">{t.url}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Badge variant={t.enabled ? "default" : "muted"}>
-                    {t.enabled ? "Enabled" : "Disabled"}
-                  </Badge>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => onRemoveTarget(t.id)}
-                    aria-label={`Remove ${t.applicationName}`}
-                    className="text-muted-foreground hover:text-destructive"
-                  >
-                    <TrashIcon />
-                  </Button>
-                </div>
+              <li key={t.id}>
+                <TargetRow
+                  target={t}
+                  isTesting={testingTargetId === t.id}
+                  onToggleEnabled={onToggleEnabled}
+                  onRemove={onRemoveTarget}
+                  onTestConnection={onTestConnection}
+                />
               </li>
             ))}
           </ul>
@@ -109,23 +106,130 @@ export function VerificationTargets({
   );
 }
 
-function TrashIcon() {
+interface RowProps {
+  target: VerificationTarget;
+  isTesting: boolean;
+  onToggleEnabled: (id: string, enabled: boolean) => void;
+  onRemove: (id: string) => void;
+  onTestConnection: (target: VerificationTarget) => void;
+}
+
+function TargetRow({
+  target,
+  isTesting,
+  onToggleEnabled,
+  onRemove,
+  onTestConnection,
+}: RowProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
+    <div
+      className={`flex flex-wrap items-center gap-3 rounded-md border border-border bg-card px-3 py-2 ${
+        target.enabled ? "" : "opacity-60"
+      }`}
     >
-      <path d="M3 6h18" />
-      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-    </svg>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="truncate text-sm font-medium text-foreground">
+            {target.applicationName}
+          </p>
+          <Badge variant={target.enabled ? "default" : "muted"}>
+            {target.enabled ? "Enabled" : "Disabled"}
+          </Badge>
+          {target.lastStatus && (
+            <StatusPill status={target.lastStatus} />
+          )}
+        </div>
+        <p className="truncate text-xs text-muted-foreground">{target.url}</p>
+        {target.lastVerifiedAt && (
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
+            Last verified {formatRelativeTime(target.lastVerifiedAt)}
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => onToggleEnabled(target.id, !target.enabled)}
+          aria-pressed={target.enabled}
+          aria-label={`${target.enabled ? "Disable" : "Enable"} ${target.applicationName}`}
+          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+        >
+          {target.enabled ? "Disable" : "Enable"}
+        </Button>
+
+        {isTesting ? (
+          <span
+            className="inline-flex h-8 items-center gap-1 px-2 text-xs text-muted-foreground"
+            aria-live="polite"
+          >
+            <Spinner className="h-3.5 w-3.5" aria-hidden="true" />
+            Testing…
+          </span>
+        ) : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onTestConnection(target)}
+            aria-label={`Test connection for ${target.applicationName}`}
+            className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <Plug className="h-3.5 w-3.5" aria-hidden="true" />
+            Test
+          </Button>
+        )}
+
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => onRemove(target.id)}
+          aria-label={`Remove ${target.applicationName}`}
+          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+        >
+          <Trash2 className="h-4 w-4" aria-hidden="true" />
+        </Button>
+      </div>
+    </div>
   );
+}
+
+function StatusPill({ status }: { status: TargetStatus }) {
+  const tone: string =
+    status === "healthy" || status === "completed"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+      : status === "issues_found" ||
+          status === "verification_failed" ||
+          status === "authentication_failed" ||
+          status === "unreachable"
+        ? "border-destructive/40 bg-destructive/10 text-destructive"
+        : "border-border text-muted-foreground";
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}
+    >
+      {status.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+function formatRelativeTime(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(diffMs)) return "";
+  const minutes = Math.round(diffMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }

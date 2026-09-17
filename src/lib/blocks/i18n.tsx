@@ -200,42 +200,172 @@ function extractLanguages(raw: unknown): LanguageOption[] {
 // Tiny ICU MessageFormat-lite: handles `{var}` and
 // `{var, plural, =0 {…} one {…} other {…}}`. Anything we don't recognise
 // is left untouched so the lookup still produces a readable string.
+//
+// The previous regex-based implementation used `\{([^}]+)\}` for the
+// outer token, which matched greedily up to the first `}` — so for a
+// nested plural like `{count, plural, =1 {1 minute ago} other {# minutes ago}}`
+// it stopped at the inner `}` and left the trailing `other {# minutes ago}`
+// as literal text. This implementation walks the template character by
+// character so nested braces are matched as a single token.
 function formatIcu(
   template: string,
   options: Record<string, unknown>,
   language: string,
 ): string {
   const pluralRules = new Intl.PluralRules(language);
-  return template.replace(/\{([^}]+)\}/g, (match, body: string) => {
-    const trimmed = body.trim();
-    if (trimmed.includes(",")) {
-      const [head, ...rest] = trimmed.split(",").map((s) => s.trim());
-      if (rest[0] === "plural") {
-        const varName = head;
-        const value = Number(options[varName]);
-        const branches: Record<string, string> = {};
-        const branchText = rest.slice(1).join(",");
-        const branchRe = /(=\d+|zero|one|two|few|many|other)\s*\{([^}]*)\}/g;
-        let m: RegExpExecArray | null;
-        while ((m = branchRe.exec(branchText)) !== null) {
-          branches[m[1]] = m[2];
+  let out = "";
+  let i = 0;
+  while (i < template.length) {
+    const ch = template[i];
+    if (ch !== "{") {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    // Walk forward to find the matching closing brace, accounting for
+    // nested `{` / `}` inside ICU plural branches.
+    let depth = 1;
+    let j = i + 1;
+    while (j < template.length && depth > 0) {
+      const cj = template[j];
+      if (cj === "{") depth += 1;
+      else if (cj === "}") depth -= 1;
+      if (depth === 0) break;
+      j += 1;
+    }
+    if (depth !== 0) {
+      // Unbalanced — emit the rest as literal and stop.
+      out += template.slice(i);
+      break;
+    }
+    const body = template.slice(i + 1, j);
+    out += resolveIcuToken(body, options, language, pluralRules);
+    i = j + 1;
+  }
+  return out;
+}
+
+function resolveIcuToken(
+  body: string,
+  options: Record<string, unknown>,
+  language: string,
+  pluralRules: Intl.PluralRules,
+): string {
+  const trimmed = body.trim();
+  if (trimmed.includes(",")) {
+    // Peel off `var, plural,` (or any other leading `key, type,`) by
+    // splitting the first two top-level commas. Anything left after the
+    // second comma is the "rest" we hand to a type-specific parser.
+    const splitIdx1 = indexOfTopLevelComma(trimmed, 0);
+    if (splitIdx1 !== -1) {
+      const varName = trimmed.slice(0, splitIdx1).trim();
+      const splitIdx2 = indexOfTopLevelComma(trimmed, splitIdx1 + 1);
+      if (splitIdx2 !== -1) {
+        const type = trimmed.slice(splitIdx1 + 1, splitIdx2).trim();
+        const rest = trimmed.slice(splitIdx2 + 1);
+        if (type === "plural") {
+          const branches = parsePluralBranches(rest);
+          const value = Number(options[varName]);
+          const pluralCategory = Number.isFinite(value)
+            ? pluralRules.select(value)
+            : "other";
+          const exactMatch = branches[`=${value}`];
+          const categoryMatch = branches[pluralCategory];
+          const fallback = branches.other ?? "";
+          const chosenRaw =
+            exactMatch ?? categoryMatch ?? fallback;
+          // Replace `#` (ICU's self-placeholder for the count) with
+          // `{varName}` so the recursive formatIcu pass substitutes it
+          // like any other variable.
+          const chosen = expandPluralHash(chosenRaw, varName);
+          return formatIcu(chosen, options, language);
         }
-        const pluralCategory = Number.isFinite(value)
-          ? pluralRules.select(value)
-          : "other";
-        const exactMatch = branches[`=${value}`];
-        const categoryMatch = branches[pluralCategory];
-        const fallback = branches.other ?? "";
-        const chosen = exactMatch ?? categoryMatch ?? fallback;
-        return formatIcu(chosen, options, language);
       }
     }
-    const value = options[trimmed];
-    return value === undefined || value === null
-      ? match
-      : String(value);
-  });
+  }
+  const value = options[trimmed];
+  return value === undefined || value === null ? `{${body}}` : String(value);
 }
+
+// Walk `s` from `fromIdx` and return the index of the first top-level
+// `,` (depth 0), or -1 if none.
+function indexOfTopLevelComma(s: string, fromIdx: number): number {
+  let depth = 0;
+  for (let i = fromIdx; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "{") depth += 1;
+    else if (c === "}") depth -= 1;
+    else if (c === "," && depth === 0) return i;
+  }
+  return -1;
+}
+
+// Parse the branch list of a plural: a sequence of `<selector> {<text>}`
+// glued together without separators. ICU format example:
+//
+//   `=1 {1 minute ago} other {# minutes ago}`
+//
+// Walks `s`, peeling off each branch by finding the next top-level `{`,
+// using that as the separator between selector and branch text.
+function parsePluralBranches(s: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let cursor = 0;
+  while (cursor < s.length) {
+    // Skip whitespace.
+    while (cursor < s.length && /\s/.test(s[cursor])) cursor += 1;
+    if (cursor >= s.length) break;
+    // Selector: a run of non-`{` characters at depth 0.
+    const start = cursor;
+    while (cursor < s.length && s[cursor] !== "{") cursor += 1;
+    const selector = s.slice(start, cursor).trim();
+    if (cursor >= s.length) break;
+    // Branch text: balanced `{ ... }`.
+    const openIdx = cursor;
+    const closeIdx = findMatchingBraceClose(s, openIdx);
+    if (closeIdx === -1) break;
+    out[selector] = s.slice(openIdx + 1, closeIdx);
+    cursor = closeIdx + 1;
+  }
+  return out;
+}
+
+// ICU's `#` placeholder inside a plural branch represents the count
+// itself. Convert it into a `{count}` token so the recursive formatIcu
+// pass substitutes it like any other variable.
+function expandPluralHash(text: string, varName: string): string {
+  return text.replace(/#/g, `{${varName}}`);
+}
+
+// Index of the first top-level `{` in `s`, or -1 if none.
+function findTopLevelBraceOpen(s: string): number {
+  let depth = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "{") {
+      if (depth === 0) return i;
+      depth += 1;
+    } else if (c === "}") {
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+// Index of the matching `}` for the `{` at `openIdx`, walking forward.
+function findMatchingBraceClose(s: string, openIdx: number): number {
+  let depth = 1;
+  for (let i = openIdx + 1; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "{") depth += 1;
+    else if (c === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+// (legacy split-on-top-level helper removed — plural parsing now walks
+// the template char-by-char via `parsePluralBranches`.)
 
 function formatRelative(
   iso: string,

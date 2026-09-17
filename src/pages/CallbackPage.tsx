@@ -31,9 +31,9 @@ export function CallbackPage() {
 
   if (error) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
-        <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-soft">
-          <h1 className="text-lg font-semibold text-slate-900">
+      <div className="flex min-h-screen items-center justify-center bg-background px-4 py-12">
+        <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6 shadow-soft">
+          <h1 className="text-lg font-semibold text-foreground">
             Sign-in failed
           </h1>
           <p
@@ -53,7 +53,7 @@ export function CallbackPage() {
   // Mid-flight render — don't strand the user on a blank screen.
   return (
     <div
-      className="flex min-h-screen items-center justify-center bg-slate-50"
+      className="flex min-h-screen items-center justify-center bg-background"
       role="status"
       aria-live="polite"
       aria-label="Completing sign-in"

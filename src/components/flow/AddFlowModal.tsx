@@ -14,13 +14,20 @@ import { Select } from "@/components/ui/select";
 import { flowNameSchema } from "@/lib/validation";
 import { useToast } from "@/hooks/useToast";
 import { useCreateFlow, useProjectFeatures } from "@/lib/blocks/hooks";
+import type { Feature } from "@/lib/blocks/data";
 import { useT } from "@/lib/blocks/i18n";
+import { envLabelFromSlug } from "@/pages/ProjectDetailPage";
 
 interface AddFlowModalProps {
   open: boolean;
   onClose: () => void;
   projectId: string;
   defaultFeatureId?: string;
+  // Env the new flow belongs to. When set, the dropdown is restricted to
+  // features whose env matches, the locked Environment row is rendered,
+  // and the flow record is stamped with this envSlug (defense in depth —
+  // we don't trust the picked feature's envSlug to match the page's).
+  envSlug?: string;
 }
 
 export function AddFlowModal({
@@ -28,13 +35,35 @@ export function AddFlowModal({
   onClose,
   projectId,
   defaultFeatureId,
+  envSlug,
 }: AddFlowModalProps) {
   const createFlow = useCreateFlow();
+  // Fetch every feature for the project (env-less), then filter to envSlug
+  // client-side. This keeps every AddFlowModal — page-level + one per
+  // FeatureItem — on a single shared cache key, so we don't trigger a
+  // separate network call per unique envSlug when the modal mounts across
+  // many feature rows on /projects/:id. The page-level hook keeps its own
+  // env-scoped fetch for the feature list display.
   const featuresQuery = useProjectFeatures(projectId);
+  // Module-level empty fallback so the reference is stable across renders
+  // — otherwise `data ?? []` would create a fresh array each render and
+  // defeat the useMemo below, re-tripping the reset-name useEffect.
+  const EMPTY_FEATURES: Feature[] = [];
+  const featuresAll = featuresQuery.data ?? EMPTY_FEATURES;
   const toast = useToast();
   const t = useT();
 
-  const features = featuresQuery.data ?? [];
+  // useMemo so the filtered list keeps a stable identity when neither
+  // input changed — otherwise the .filter() call would create a new array
+  // every render and trip the reset-name useEffect on every keystroke,
+  // making the input unwriteable.
+  const features = useMemo(
+    () =>
+      envSlug
+        ? featuresAll.filter((f) => f.envSlug === envSlug)
+        : featuresAll,
+    [featuresAll, envSlug],
+  );
 
   const [name, setName] = useState("");
   const [featureId, setFeatureId] = useState(defaultFeatureId ?? "");
@@ -54,6 +83,8 @@ export function AddFlowModal({
     () => features.map((f) => ({ value: f.id, label: f.name })),
     [features],
   );
+
+  const envLabel = envLabelFromSlug(envSlug);
 
   const handleOpenChange = (next: boolean) => {
     if (next) return;
@@ -87,6 +118,10 @@ export function AddFlowModal({
         projectId,
         featureId,
         name: name.trim(),
+        // Modal's env wins over the picked feature's — keeps the flow
+        // tied to the page's env even if the dropdown somehow shows a
+        // cross-env feature in a future regression.
+        envSlug,
       });
       toast.success(
         t("toast.flowCreated", 'Flow "{name}" created successfully.', {
@@ -124,6 +159,15 @@ export function AddFlowModal({
             className="space-y-4"
             noValidate
           >
+            {envLabel && (
+              <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-sm">
+                <span className="text-muted-foreground">
+                  {t("addFlow.envLabel", "Environment")}
+                  {": "}
+                </span>
+                <span className="font-medium text-foreground">{envLabel}</span>
+              </div>
+            )}
             <Input
               label={t("addFlow.nameLabel", "Flow Name")}
               required
@@ -143,10 +187,15 @@ export function AddFlowModal({
               options={featureOptions}
               placeholder={
                 features.length === 0
-                  ? t(
-                      "addFlow.featurePlaceholderEmpty",
-                      "No features available — add one first",
-                    )
+                  ? envLabel
+                    ? t(
+                        "addFlow.featurePlaceholderEmpty",
+                        "No features in this environment — add one first",
+                      )
+                    : t(
+                        "addFlow.featurePlaceholderEmpty",
+                        "No features available — add one first",
+                      )
                   : t("addFlow.featurePlaceholder", "Select a feature")
               }
               value={featureId}
@@ -159,10 +208,15 @@ export function AddFlowModal({
             />
             {features.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                {t(
-                  "addFlow.noFeaturesHint",
-                  "Create at least one feature in this project before adding flows.",
-                )}
+                {envLabel
+                  ? t(
+                      "addFlow.noFeaturesHint",
+                      "Create at least one feature in this environment before adding flows.",
+                    )
+                  : t(
+                      "addFlow.noFeaturesHint",
+                      "Create at least one feature in this project before adding flows.",
+                    )}
               </p>
             )}
           </form>

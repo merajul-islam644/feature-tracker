@@ -4,7 +4,10 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { useT } from "@/lib/blocks/i18n";
 
 interface FeatureEmptyStateProps {
-  onAdd: () => void;
+  /** When provided, renders an Add Feature CTA. Omit for read-only
+   *  empty states (e.g. non-dev envs where features are authored
+   *  under dev and other envs may legitimately be empty). */
+  onAdd?: () => void;
 }
 
 export function FeatureEmptyState({ onAdd }: FeatureEmptyStateProps) {
@@ -18,7 +21,11 @@ export function FeatureEmptyState({ onAdd }: FeatureEmptyStateProps) {
         "Start by adding a feature to this project.",
       )}
       action={
-        <Button onClick={onAdd}>{t("featureEmptyState.cta", "Add Feature")}</Button>
+        onAdd ? (
+          <Button onClick={onAdd}>
+            {t("featureEmptyState.cta", "Add Feature")}
+          </Button>
+        ) : undefined
       }
     />
   );

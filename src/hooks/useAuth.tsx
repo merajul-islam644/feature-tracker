@@ -54,7 +54,7 @@ export function RequireAuth({ children }: RequireAuthProps) {
   if (!isHydrated) {
     return (
       <div
-        className="flex min-h-screen items-center justify-center bg-slate-50"
+        className="flex min-h-screen items-center justify-center bg-background"
         role="status"
         aria-live="polite"
         aria-label="Loading application"

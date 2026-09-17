@@ -47,8 +47,8 @@ export function LoginPage() {
   const callbackUrl = `${window.location.origin}/login/callback`;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-soft">
+    <div className="flex min-h-screen items-center justify-center bg-background px-4 py-12">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6 shadow-soft">
         <div className="mb-6 flex flex-col items-center text-center">
           <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary-600 text-white">
             <svg
@@ -67,10 +67,10 @@ export function LoginPage() {
               <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1-2-2h11" />
             </svg>
           </div>
-          <h1 className="mt-3 text-lg font-semibold text-slate-900">
+          <h1 className="mt-3 text-lg font-semibold text-foreground">
             {t("auth.loginTitle", "Sign in to Feature Tracker")}
           </h1>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-muted-foreground">
             {t("auth.loginSubtitle", "Use the hosted identity provider to sign in.")}
           </p>
         </div>
@@ -104,7 +104,7 @@ export function LoginPage() {
           </Button>
         )}
 
-        <p className="pt-3 text-center text-xs text-slate-500">
+        <p className="pt-3 text-center text-xs text-muted-foreground">
           Hosted by Blocks IAM at{" "}
           <span className="break-all">{blocksConfig.oidcUrl}</span>.
         </p>
