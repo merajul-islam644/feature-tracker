@@ -33,40 +33,48 @@ export function EvidenceViewer({ evidence }: Props) {
 
 function renderBody(evidence: Evidence) {
   switch (evidence.type) {
-    case "screenshot":
-      if (evidence.value.startsWith("data:image")) {
+    case "screenshot": {
+      // MCP step 7: prefer `storageRef` (resolved via /api/evidence/:ref)
+      // when present, otherwise fall back to an inline data URI. The two
+      // paths are visually identical — only the source differs.
+      const src =
+        evidence.storageRef
+          ? `/api/evidence/${encodeURIComponent(evidence.storageRef)}`
+          : evidence.value;
+      if (src && (src.startsWith("data:image") || src.startsWith("/api/"))) {
         return (
           <img
-            src={evidence.value}
+            src={src}
             alt={evidence.label}
             className="max-h-64 w-full rounded border border-border object-contain"
           />
         );
       }
-      return <Placeholder label="Screenshot unavailable" sublabel={evidence.value} />;
+      return <Placeholder label="Screenshot unavailable" sublabel={evidence.storageRef ?? evidence.value} />;
+    }
     case "video":
-      return <Placeholder label="Video playback unavailable in mock" sublabel={evidence.value} />;
+      return <Placeholder label="Video playback unavailable in mock" sublabel={evidence.storageRef ?? evidence.value} />;
     case "console":
       return (
         <pre className="max-h-40 overflow-auto rounded bg-zinc-950 px-2 py-1 font-mono text-xs leading-relaxed text-zinc-100">
-          {evidence.value}
+          {evidence.value || <span className="text-zinc-400">[content stored at /api/evidence/{evidence.storageRef}]</span>}
         </pre>
       );
     case "network":
       return (
         <pre className="max-h-40 overflow-auto rounded bg-zinc-950 px-2 py-1 font-mono text-xs leading-relaxed text-zinc-100">
-          {evidence.value}
+          {evidence.value || <span className="text-zinc-400">[content stored at /api/evidence/{evidence.storageRef}]</span>}
         </pre>
       );
     case "url":
       return (
         <a
-          href={evidence.value}
+          href={evidence.storageRef ? `/api/evidence/${encodeURIComponent(evidence.storageRef)}` : evidence.value}
           target="_blank"
           rel="noreferrer"
           className="break-all text-xs text-primary hover:underline"
         >
-          {evidence.value}
+          {evidence.storageRef ? `Open ${evidence.storageRef}` : evidence.value}
         </a>
       );
     case "observation":

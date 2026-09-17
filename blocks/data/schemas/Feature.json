@@ -1,0 +1,16 @@
+{
+  "schemaName": "Feature",
+  "collectionName": "blx_Features",
+  "schemaType": 1,
+  "description": "Capability within a project. Belongs to exactly one environment (canonical dev/stg/prod/uat, or a per-project custom env). The dev page lands by default; env-scoped reads filter on `envSlug`.",
+  "fields": [
+    { "name": "title", "type": "String", "requiredOn": 3, "description": "Short title of the feature." },
+    { "name": "description", "type": "String", "requiredOn": 0, "description": "Long-form description." },
+    { "name": "status", "type": "String", "requiredOn": 3, "description": "backlog/in_progress/done." },
+    { "name": "priority", "type": "String", "requiredOn": 0, "description": "low/medium/high." },
+    { "name": "projectId", "type": "String", "requiredOn": 3, "description": "Owning Project.ItemId." },
+    { "name": "tags", "type": "String", "isArray": true, "requiredOn": 0, "description": "Free-form labels." },
+    { "name": "envSlug", "type": "String", "requiredOn": 0, "description": "Owning environment slug — canonical (dev/stg/prod/uat) or per-project custom env slug. Required for new records (the app layer stamps it on every create); legacy records predating the env-scoped refactor may be empty." },
+    { "name": "clonedFromFeatureId", "type": "String", "requiredOn": 0, "description": "ItemId of the dev feature this record was cloned from. Stamped on insert by useCloneFlow when it auto-creates the destination feature. The cross-env sync feature (delete + rename) looks up sibling features via this field — records with no value are pre-existing clones that don't participate in cascade sync." }
+  ]
+}

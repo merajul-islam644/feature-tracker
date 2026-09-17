@@ -1,6 +1,6 @@
 // Issue detail drawer (spec section 25). Slides in from the right.
 
-import { X, ExternalLink } from "lucide-react";
+import { X, ExternalLink, RefreshCcw } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -18,6 +18,10 @@ interface Props {
   issue: Issue | null;
   onClose: () => void;
   onChangeStatus: (id: string, status: IssueStatus) => void;
+  // Optional: when provided, render a "Verify Again" button next to the
+  // status chips. Same call the chat layer uses; the mock assistant
+  // replays "Targeted verification started for ISSUE-XXX".
+  onVerifyAgain?: (id: string) => void;
 }
 
 const statusOptions: IssueStatus[] = [
@@ -38,7 +42,7 @@ const severityTone: Record<Issue["severity"], string> = {
   low: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
 };
 
-export function IssueDetailsDrawer({ issue, onClose, onChangeStatus }: Props) {
+export function IssueDetailsDrawer({ issue, onClose, onChangeStatus, onVerifyAgain }: Props) {
   const open = !!issue;
 
   return (
@@ -170,14 +174,27 @@ export function IssueDetailsDrawer({ issue, onClose, onChangeStatus }: Props) {
                   );
                 })}
               </div>
-              <a
-                href={issue.url}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline"
-              >
-                Open in app <ExternalLink className="h-3 w-3" aria-hidden="true" />
-              </a>
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                {onVerifyAgain && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onVerifyAgain(issue.id)}
+                  >
+                    <RefreshCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                    Verify Again
+                  </Button>
+                )}
+                <a
+                  href={issue.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  Open in app <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                </a>
+              </div>
             </div>
           </>
         )}

@@ -10,15 +10,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import {
-  useNotificationStore,
+  useNotificationInbox,
   unreadCount,
   formatRelative,
-} from "@/store/notificationStore";
+} from "@/lib/blocks/notifier";
 
 export function NotificationBell() {
-  const items = useNotificationStore((s) => s.items);
-  const markAllRead = useNotificationStore((s) => s.markAllRead);
-  const markRead = useNotificationStore((s) => s.markRead);
+  const { items, isLoading, markRead, markAllRead } = useNotificationInbox();
   const unread = unreadCount(items);
 
   return (
@@ -55,7 +53,11 @@ export function NotificationBell() {
           )}
         </div>
         <DropdownMenuSeparator />
-        {items.length === 0 ? (
+        {isLoading ? (
+          <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+            Loading…
+          </p>
+        ) : items.length === 0 ? (
           <p className="px-3 py-6 text-center text-sm text-muted-foreground">
             No notifications yet.
           </p>

@@ -35,9 +35,10 @@ export function IssueTrackerPage() {
     loading,
     sendingMessage,
     testingTargetId,
-    urlErrors,
     addTarget,
     removeTarget,
+    setTargetEnabled,
+    testConnection,
     addSecret,
     deleteSecret,
     setFilters,
@@ -51,9 +52,16 @@ export function IssueTrackerPage() {
     toggleScope,
     sendMessage,
     applyChatAction,
+    sessions,
+    sessionsLoading,
+    currentSessionId,
+    startNewSession,
+    switchSession,
+    lastRunAgo,
   } = tracker;
 
   const [draftUrl, setDraftUrl] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const draftError =
     draftUrl.trim() && validateUrl(draftUrl, [draftUrl]) ? validateUrl(draftUrl, [draftUrl]) : null;
@@ -69,17 +77,28 @@ export function IssueTrackerPage() {
         onPause={pauseVerification}
         onResume={resumeVerification}
         onStop={stopVerification}
+        lastRunAgo={lastRunAgo}
       />
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
         {/* Left column: AI Assistant */}
         <aside className="order-2 lg:order-1">
-          <div className="lg:sticky lg:top-20">
+          <div className="lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]">
             <ChatPanel
               messages={chat}
               sending={sendingMessage}
               onSend={sendMessage}
               onAction={applyChatAction}
+              sessions={sessions}
+              sessionsLoading={sessionsLoading}
+              currentSessionId={currentSessionId}
+              onNewSession={startNewSession}
+              onSelectSession={(id) => {
+                switchSession(id);
+                setHistoryOpen(false);
+              }}
+              historyOpen={historyOpen}
+              onHistoryOpenChange={setHistoryOpen}
             />
           </div>
         </aside>
@@ -98,6 +117,9 @@ export function IssueTrackerPage() {
               setDraftUrl("");
             }}
             onRemoveTarget={removeTarget}
+            onToggleEnabled={setTargetEnabled}
+            onTestConnection={(target) => void testConnection(target)}
+            testingTargetId={testingTargetId}
             canAdd={!loading.targets}
           />
 
@@ -151,17 +173,15 @@ export function IssueTrackerPage() {
         issue={selectedIssue}
         onClose={() => setSelectedIssueId(null)}
         onChangeStatus={updateIssueStatus}
+        onVerifyAgain={(id) =>
+          void applyChatAction({
+            id: `verify-again-${id}`,
+            label: "Verify Again",
+            kind: "verify_again",
+            payload: { issueId: id },
+          })
+        }
       />
-
-      {/* testConnection / testingTargetId / urlErrors are exposed but currently
-          unused by the visible UI — kept available for the future inline
-          "Test connection" button on each target row (spec section 14). */}
-      <span hidden data-testid="testing-target-id">
-        {testingTargetId ?? ""}
-      </span>
-      <span hidden data-testid="url-errors">
-        {Object.keys(urlErrors).length}
-      </span>
     </div>
   );
 }

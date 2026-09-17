@@ -1,0 +1,16 @@
+{
+  "schemaName": "Flow",
+  "collectionName": "blx_Flows",
+  "schemaType": 1,
+  "description": "User journey within a feature. Inherits the parent feature's envSlug at creation time so env-scoped queries can filter without joining tables.",
+  "fields": [
+    { "name": "title", "type": "String", "requiredOn": 3, "description": "Short title of the flow." },
+    { "name": "description", "type": "String", "requiredOn": 0, "description": "Long-form description." },
+    { "name": "steps", "type": "String", "isArray": true, "requiredOn": 0, "description": "Ordered steps in the flow." },
+    { "name": "status", "type": "String", "requiredOn": 3, "description": "draft/active/done/passed/failed/pending/investigating/pause." },
+    { "name": "stack", "type": "String", "requiredOn": 0, "description": "frontend/backend/investigating — which slice of the app this flow exercises." },
+    { "name": "featureId", "type": "String", "requiredOn": 3, "description": "Owning Feature.ItemId." },
+    { "name": "envSlug", "type": "String", "requiredOn": 0, "description": "Owning environment slug — inherited from the parent Feature at creation time." },
+    { "name": "clonedFromFlowId", "type": "String", "requiredOn": 0, "description": "ItemId of the dev flow this record was cloned from. Stamped on insert by useCloneFlow. The cross-env sync feature (delete + rename) looks up sibling clones via this field — records with no value are pre-existing clones that don't participate in cascade sync." }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "schemaName": "ChatMessage",
+  "collectionName": "blx_ChatMessages",
+  "schemaType": 1,
+  "description": "One persisted turn of the Issue Tracker AI Assistant conversation. A user + assistant pair is grouped by `sessionId`; the page loads every message for the current session on mount and appends on each send.",
+  "fields": [
+    { "name": "sessionId", "type": "String", "requiredOn": 3, "description": "Conversation thread id. One session per user for now; reserved for future multi-thread history." },
+    { "name": "role", "type": "String", "requiredOn": 3, "description": "user | assistant | system" },
+    { "name": "content", "type": "String", "requiredOn": 3, "description": "Message text." },
+    { "name": "actionsJson", "type": "String", "requiredOn": 0, "description": "JSON-encoded ChatAction[] for assistant messages (kept as a string to satisfy the schema's primitive field types)." }
+  ]
+}

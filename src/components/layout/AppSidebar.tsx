@@ -5,7 +5,9 @@ import {
   Bug,
   ChevronsLeft,
   ChevronsRight,
+  FolderTree,
   PlayCircle,
+  LogOut,
 } from "lucide-react";
 import {
   Sidebar,
@@ -20,41 +22,45 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { useDataStore } from "@/store/dataStore";
-import { useLocaleStore } from "@/store/localeStore";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/useToast";
+import { useWorkspaceTotals } from "@/lib/blocks/hooks";
+import { useLocale, useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 
-const navItems = [
-  {
-    to: "/dashboard",
-    label: "Dashboard",
-    icon: LayoutDashboard,
-    tooltip: "Dashboard",
-  },
-  {
-    to: "/projects",
-    label: "Project",
-    icon: FolderKanban,
-    tooltip: "Projects",
-  },
-  // {
-  //   to: "/issue-tracker",
-  //   label: "Issue Tracker",
-  //   icon: Bug,
-  //   tooltip: "Issue Tracker",
-  // },
-  // {
-  //   to: "/test-runner",
-  //   label: "Test Runner",
-  //   icon: PlayCircle,
-  //   tooltip: "Test Runner",
-  // },
-];
-
+// `useT` looks up against the loaded `common` module. Nav items map onto
+// the `nav.*` namespace.
 export function AppSidebar() {
+  const t = useT();
   const location = useLocation();
+  const navItems = [
+    {
+      to: "/dashboard",
+      label: t("nav.dashboard", "Dashboard"),
+      icon: LayoutDashboard,
+    },
+    {
+      to: "/projects",
+      label: t("nav.projects", "Projects"),
+      icon: FolderKanban,
+    },
+    {
+      to: "/issue-tracker",
+      // label: t("nav.issueTracker", "Issue Tracker"),
+      label: t("nav.issueTracker", "Issues"),
+      icon: Bug,
+    },
+    // {
+    //   to: "/repo-browser",
+    //   label: t("nav.repoBrowser", "Repo Browser"),
+    //   icon: FolderTree,
+    // },
+    // {
+    //   to: "/test-runner",
+    //   label: t("nav.testRunner", "Test Runner"),
+    //   icon: PlayCircle,
+    // },
+  ];
   return (
     <Sidebar collapsible="icon" variant="sidebar">
       <SidebarHeader className="h-14 justify-center border-b border-sidebar-border">
@@ -72,7 +78,7 @@ export function AppSidebar() {
             )}
           >
             <span className="group-data-[collapsible=icon]:hidden">
-              Navigation
+              {t("nav.navigation", "Navigation")}
             </span>
             <NavToggle />
           </SidebarGroupLabel>
@@ -89,7 +95,7 @@ export function AppSidebar() {
                 <SidebarMenuItem key={item.to}>
                   <SidebarMenuButton
                     asChild
-                    tooltip={item.tooltip}
+                    tooltip={item.label}
                     isActive={isActive}
                   >
                     <NavLink to={item.to}>
@@ -104,9 +110,9 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-      {/* <SidebarFooter>
+      <SidebarFooter>
         <FooterUser />
-      </SidebarFooter> */}
+      </SidebarFooter>
 
       <SidebarRail />
     </Sidebar>
@@ -150,9 +156,12 @@ function BrandHeader() {
 // so the user can always toggle the sidebar from inside it.
 function NavToggle() {
   const { state, toggleSidebar } = useSidebar();
+  const t = useT();
   const collapsed = state === "collapsed";
   const Icon = collapsed ? ChevronsRight : ChevronsLeft;
-  const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+  const label = collapsed
+    ? t("nav.expandSidebar", "Expand sidebar")
+    : t("nav.collapseSidebar", "Collapse sidebar");
   return (
     <button
       type="button"
@@ -161,7 +170,7 @@ function NavToggle() {
       title={label}
       className={cn(
         "flex h-6 w-6 items-center justify-center rounded-md text-sidebar-foreground/70",
-        "transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        "transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
       )}
     >
@@ -170,90 +179,123 @@ function NavToggle() {
   );
 }
 
-// function FooterUser() {
-//   const { currentUser, logout } = useAuth();
-//   const setLocale = useLocaleStore((s) => s.setLocale);
-//   const locale = useLocaleStore((s) => s.locale);
-//   const projects = useDataStore((s) => s.projects);
-//   const flows = useDataStore((s) => s.flows);
-//   const navigate = useNavigate();
-//   const toast = useToast();
-//   const { state } = useSidebar();
+function FooterUser() {
+  const { currentUser, logout } = useAuth();
+  const t = useT();
+  const totals = useWorkspaceTotals();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { state } = useSidebar();
+  const { language, setLanguage, availableLanguages } = useLocale();
 
-//   if (!currentUser) return null;
+  if (!currentUser) return null;
 
-//   return (
-//     <SidebarMenu>
-//       <SidebarMenuItem>
-//         <SidebarMenuButton
-//           tooltip={`${projects.length} projects • ${flows.length} flows`}
-//         >
-//           <span className="flex flex-col items-start truncate leading-tight">
-//             <span className="truncate font-medium text-sidebar-foreground">
-//               {currentUser.name}
-//             </span>
-//             {state !== "collapsed" && (
-//               <span className="truncate text-xs text-sidebar-foreground/70">
-//                 {currentUser.email}
-//               </span>
-//             )}
-//           </span>
-//         </SidebarMenuButton>
-//       </SidebarMenuItem>
+  const handleSignOut = async () => {
+    await logout();
+    navigate("/login", { replace: true });
+  };
 
-//       <SidebarMenuItem>
-//         <SidebarMenuButton
-//           tooltip={
-//             state === "collapsed" ? "Toggle workspace language" : undefined
-//           }
-//           onClick={() => {
-//             const next = locale === "en" ? "bn" : "en";
-//             setLocale(next);
-//             toast.info(
-//               `Language switched to ${next === "en" ? "English" : "বাংলা"}.`,
-//             );
-//           }}
-//         >
-//           <span className="text-xs uppercase tracking-wider text-sidebar-foreground/60">
-//             {locale === "en" ? "English" : "বাংলা"}
-//           </span>
-//           {state !== "collapsed" && <span className="ml-auto text-xs">↻</span>}
-//         </SidebarMenuButton>
-//       </SidebarMenuItem>
+  // Tenant languages, in stable order: current language first, then the
+  // rest alphabetically by code. Falls back to a single entry that just
+  // shows the current code so the toggle never collapses entirely.
+  const allLanguages =
+    availableLanguages.length > 0
+      ? availableLanguages
+      : [{ languageCode: language, languageName: language, isDefault: true }];
 
-//       <SidebarMenuItem>
-//         <SidebarMenuButton
-//           tooltip="Sign out"
-//           onClick={() => {
-//             logout();
-//             navigate("/login", { replace: true });
-//           }}
-//         >
-//           <ChevronsRight className="rotate-180" aria-hidden="true" />
-//           <span>Sign out</span>
-//         </SidebarMenuButton>
-//       </SidebarMenuItem>
+  const handleCycleLanguage = () => {
+    if (allLanguages.length < 2) return;
+    const idx = allLanguages.findIndex((l) => l.languageCode === language);
+    const next =
+      allLanguages[(idx + 1) % allLanguages.length] ?? allLanguages[0];
+    if (!next) return;
+    setLanguage(next.languageCode);
+    toast.info(
+      t("auth.switchLanguageToast", "Language switched to {language}.", {
+        language: next.languageName,
+      }),
+    );
+  };
 
-//       <SidebarMenuItem>
-//         <CollapseToggleInline />
-//       </SidebarMenuItem>
-//     </SidebarMenu>
-//   );
-// }
+  const currentLanguageLabel =
+    allLanguages.find((l) => l.languageCode === language)?.languageName ??
+    language;
 
-// function CollapseToggleInline() {
-//   const { state, toggleSidebar } = useSidebar();
-//   const collapsed = state === "collapsed";
-//   const Icon = collapsed ? ChevronsRight : ChevronsLeft;
-//   const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
-//   return (
-//     <SidebarMenuButton
-//       tooltip={label}
-//       onClick={toggleSidebar}
-//       aria-label={label}
-//     >
-//       <Icon aria-hidden="true" />
-//       <span>{collapsed ? "Expand" : "Collapse"}</span>
-//     </SidebarMenuButton>
-//   );
-// }
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          tooltip={`${totals.data?.flows ?? 0} flows across ${totals.data?.features ?? 0} features`}
+        >
+          <span className="flex flex-col items-start truncate leading-tight">
+            <span className="truncate font-medium text-sidebar-foreground">
+              {currentUser.name}
+            </span>
+            {state !== "collapsed" && (
+              <span className="truncate text-xs text-sidebar-foreground/70">
+                {currentUser.email}
+              </span>
+            )}
+          </span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          tooltip={
+            state === "collapsed"
+              ? t("languageSwitcher", "Language")
+              : undefined
+          }
+          onClick={handleCycleLanguage}
+          disabled={allLanguages.length < 2}
+        >
+          <span className="text-xs uppercase tracking-wider text-sidebar-foreground/60">
+            {currentLanguageLabel}
+          </span>
+          {state !== "collapsed" && allLanguages.length > 1 && (
+            <span className="ml-auto text-xs">↻</span>
+          )}
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          tooltip={t("signOut", "Sign out")}
+          onClick={handleSignOut}
+        >
+          <LogOut className="h-4 w-4" aria-hidden="true" />
+          <span>{t("signOut", "Sign out")}</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+
+      <SidebarMenuItem>
+        <CollapseToggleInline />
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}
+
+function CollapseToggleInline() {
+  const { state, toggleSidebar } = useSidebar();
+  const t = useT();
+  const collapsed = state === "collapsed";
+  const Icon = collapsed ? ChevronsRight : ChevronsLeft;
+  const label = collapsed
+    ? t("nav.expandSidebar", "Expand sidebar")
+    : t("nav.collapseSidebar", "Collapse sidebar");
+  return (
+    <SidebarMenuButton
+      tooltip={label}
+      onClick={toggleSidebar}
+      aria-label={label}
+    >
+      <Icon aria-hidden="true" />
+      <span>
+        {collapsed
+          ? t("nav.expandSidebar", "Expand")
+          : t("nav.collapseSidebar", "Collapse")}
+      </span>
+    </SidebarMenuButton>
+  );
+}

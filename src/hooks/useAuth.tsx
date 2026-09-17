@@ -1,28 +1,31 @@
-import { Navigate, useLocation } from "react-router-dom";
-import { useAuthStore } from "@/store/authStore";
-import type { ReactElement } from "react";
+// Backwards-compatible `useAuth` hook for the existing app code. Backs onto
+// `AuthProvider` (which owns the real session cookie); preserves the original
+// return shape so pages like ProfilePage, DashboardPage, Topbar, and
+// CreateProjectModal keep working without per-callsite rewrites.
 
-// Local shape — the canonical User schema lives in
-// src/types/Shemastructure/User.ts and is intentionally not imported here.
-interface User {
-  id: string;
-  name: string;
-  email: string;
-  avatarUrl?: string;
-  createdAt: string;
-  updatedAt: string;
+import { useEffect, type ReactElement } from "react";
+import { Navigate, useLocation } from "react-router-dom";
+import {
+  useAuthContext,
+  type CurrentUser,
+} from "@/components/blocks/AuthProvider";
+
+interface UseAuthReturn {
+  currentUser: CurrentUser | null;
+  isHydrated: boolean;
+  isAuthenticated: boolean;
+  // Real login is a redirect, not a function call. Returns `void` so callers
+  // that `await` it (e.g. `LoginPage.onSubmit`) keep type-checking.
+  login: (returnTo?: string) => Promise<void>;
+  logout: () => Promise<void>;
 }
 
-export function useAuth() {
-  const currentUser = useAuthStore((s) => s.currentUser);
-  const isHydrated = useAuthStore((s) => s.isHydrated);
-  const login = useAuthStore((s) => s.login);
-  const logout = useAuthStore((s) => s.logout);
-
+export function useAuth(): UseAuthReturn {
+  const { status, user, login, logout } = useAuthContext();
   return {
-    currentUser,
-    isHydrated,
-    isAuthenticated: !!currentUser,
+    currentUser: user,
+    isHydrated: status !== "loading",
+    isAuthenticated: status === "authenticated",
     login,
     logout,
   };
@@ -32,14 +35,26 @@ interface RequireAuthProps {
   children: ReactElement;
 }
 
+// `RequireAuth` keeps the protected route table working. While auth is still
+// loading it shows a spinner; once it resolves to `unauthenticated` it
+// navigates to `/login?returnTo=<currentPath>` from a `useEffect` (not
+// render-time, so Strict Mode's double-invoke can't nest the param twice).
 export function RequireAuth({ children }: RequireAuthProps) {
   const { isAuthenticated, isHydrated } = useAuth();
   const location = useLocation();
 
+  useEffect(() => {
+    if (isHydrated && !isAuthenticated) {
+      const returnTo = location.pathname + location.search;
+      const url = `/login?returnTo=${encodeURIComponent(returnTo)}`;
+      window.location.replace(url);
+    }
+  }, [isHydrated, isAuthenticated, location.pathname, location.search]);
+
   if (!isHydrated) {
     return (
       <div
-        className="flex min-h-screen items-center justify-center bg-slate-50"
+        className="flex min-h-screen items-center justify-center bg-background"
         role="status"
         aria-live="polite"
         aria-label="Loading application"

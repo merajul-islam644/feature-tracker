@@ -8,3 +8,20 @@ dist-ssr
 .idea
 .DS_Store
 *.log
+
+# Local dev / debugging artifacts (keep repo clean going forward)
+.playwright-mcp/
+cert/
+npm-cache/
+server/
+prompt/
+
+# Root-level debug screenshots and ad-hoc state dumps from local sessions
+/*.png
+/dryrun-*
+/current-*
+/fresh-*
+/after-*-clone.json
+/projects-*.json
+/env-workflow-arrow-state.json
+/vite.config.js.bak
