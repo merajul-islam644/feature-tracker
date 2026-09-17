@@ -1,0 +1,108 @@
+# Cloud Build pipeline for the Feature Tracker Vite SPA.
+#
+# Trigger: connect this repo to Cloud Build via a trigger that uses this
+# file (Settings → Build configuration → Cloud Build configuration file).
+# The trigger's "Substitutions" panel should map the VITE_BLOCKS_* values
+# to your tenant's secrets / variables. The AI gateway + verification
+# backend vars live on Cloud Run, not in this build.
+#
+# Pipeline:
+#   1. npm ci — installs deps (uses lockfile, fails fast if out of sync).
+#   2. tsc -b  — type-checks (catches type errors before producing a build).
+#   3. vite build — produces dist/.
+#   4. docker build — single-stage from dist/ via the multi-stage Dockerfile
+#      (deps and devDeps live in earlier stages that get discarded).
+#   5. docker push — to Artifact Registry.
+#
+# Image tag: ${_TAG} substitutes to either the trigger-provided tag or
+# "$SHORT_SHA-$BUILD_ID" so every build is uniquely identifiable.
+#
+# Required substitutions (set on the trigger):
+#   _VITE_BLOCKS_API_URL
+#   _VITE_BLOCKS_KEY
+#   _VITE_BLOCKS_OIDC_CLIENT_ID
+#   _VITE_BLOCKS_OIDC_URL
+#   _VITE_BLOCKS_OIDC_SCOPE       (optional, defaults to "openid profile")
+#   _VITE_BLOCKS_APP_DOMAIN
+#   _REGION                       (e.g. us-central1)
+#   _REPOSITORY                   (Artifact Registry repo, e.g. feature-tracker)
+#   _SERVICE                      (Cloud Run service name, optional — only
+#                                  needed if you also want Cloud Build to
+#                                  deploy the image after pushing)
+
+substitutions:
+  _VITE_BLOCKS_OIDC_SCOPE: "openid profile"
+  _TAG: "${BRANCH_NAME##*/}-${SHORT_SHA}-${BUILD_ID}"
+  images:
+    - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/feature-tracker:${_TAG}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+steps:
+  # ── 1. install ──────────────────────────────────────────────────────────
+  - id: install
+    name: gcr.io/cloud-builders/npm
+    args:
+      - ci
+    entrypoint: npm
+    dir: .
+    timing: PUSH
+
+  # ── 2. typecheck ────────────────────────────────────────────────────────
+  - id: typecheck
+    name: gcr.io/cloud-builders/npm
+    args:
+      - run
+      - typecheck
+    entrypoint: npm
+    dir: .
+    timing: PUSH
+    waitFor:
+      - install
+
+  # ── 3. build the static SPA into dist/ ──────────────────────────────────
+  - id: build
+    name: gcr.io/cloud-builders/npm
+    args:
+      - run
+      - build
+    entrypoint: npm
+    dir: .
+    env:
+      # These are read by vite.config.ts → createBlocksClient at build time
+      # and inlined into the bundle. They MUST be set here, not on the
+      # runtime service, because Vite's build does not see runtime env.
+      - "VITE_BLOCKS_API_URL=${_VITE_BLOCKS_API_URL}"
+      - "VITE_BLOCKS_KEY=${_VITE_BLOCKS_KEY}"
+      - "VITE_BLOCKS_OIDC_CLIENT_ID=${_VITE_BLOCKS_OIDC_CLIENT_ID}"
+      - "VITE_BLOCKS_OIDC_URL=${_VITE_BLOCKS_OIDC_URL}"
+      - "VITE_BLOCKS_OIDC_SCOPE=${_VITE_BLOCKS_OIDC_SCOPE}"
+      - "VITE_BLOCKS_APP_DOMAIN=${_VITE_BLOCKS_APP_DOMAIN}"
+    timing: PUSH
+    waitFor:
+      - typecheck
+
+  # ── 4. build the container image ────────────────────────────────────────
+  # The Dockerfile is multi-stage (deps → build → nginx runtime), so this
+  # step is independent — it doesn't depend on the dist/ produced above
+  # being in the workspace, because the Dockerfile runs its own build.
+  - id: image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/feature-tracker:${_TAG}"
+      - "--build-arg=VITE_BLOCKS_API_URL=${_VITE_BLOCKS_API_URL}"
+      - "--build-arg=VITE_BLOCKS_KEY=${_VITE_BLOCKS_KEY}"
+      - "--build-arg=VITE_BLOCKS_OIDC_CLIENT_ID=${_VITE_BLOCKS_OIDC_CLIENT_ID}"
+      - "--build-arg=VITE_BLOCKS_OIDC_URL=${_VITE_BLOCKS_OIDC_URL}"
+      - "--build-arg=VITE_BLOCKS_OIDC_SCOPE=${_VITE_BLOCKS_OIDC_SCOPE}"
+      - "--build-arg=VITE_BLOCKS_APP_DOMAIN=${_VITE_BLOCKS_APP_DOMAIN}"
+      - "."
+    dir: .
+    timing: PUSH
+    waitFor:
+      - build
+
+  # ── 5. push to Artifact Registry (already declared in images:) ──────────

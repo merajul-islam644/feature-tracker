@@ -8,7 +8,40 @@
 #   paths to /index.html so client-side routing works on a refresh.
 #
 # Build context: project root.
-# Image tags: ${IMAGE_TAG} is supplied at build time by Cloud Build.
+#
+# Required build args (all VITE_BLOCKS_* — Vite inlines these into the bundle
+# at build time; runtime env vars cannot replace them):
+#   VITE_BLOCKS_API_URL          Blocks API gateway URL. For custom
+#                                registrable domains (e.g. *.slsblx.com)
+#                                this MUST be https://blocksapi.<reg-domain>
+#                                so the Secure IAM session cookie lands
+#                                on the same registrable domain as the app.
+#   VITE_BLOCKS_KEY              Tenant key sent as `x-blocks-key`.
+#   VITE_BLOCKS_OIDC_CLIENT_ID   Public OIDC client id for THIS app.
+#   VITE_BLOCKS_OIDC_URL         Tenant's OIDC discovery URL:
+#                                https://iam.seliseblocks.com/<tenant-id>/.well-known/openid-configuration
+#   VITE_BLOCKS_OIDC_SCOPE       OAuth scopes, default `openid profile`.
+#   VITE_BLOCKS_APP_DOMAIN       App domain for client metadata, e.g.
+#                                https://dbeegi.slsblx.com. Required on
+#                                custom (non-*.seliseblocks.com) domains.
+#
+# Pass via Cloud Build substitutions:
+#   --build-arg VITE_BLOCKS_API_URL=...
+#   --build-arg VITE_BLOCKS_KEY=...
+#   --build-arg VITE_BLOCKS_OIDC_CLIENT_ID=...
+#   --build-arg VITE_BLOCKS_OIDC_URL=...
+#   --build-arg VITE_BLOCKS_OIDC_SCOPE=openid profile
+#   --build-arg VITE_BLOCKS_APP_DOMAIN=...
+#
+# Or via cloudbuild.yaml:
+#   args:
+#     - VITE_BLOCKS_API_URL=${_VITE_BLOCKS_API_URL}
+#     - VITE_BLOCKS_KEY=${_VITE_BLOCKS_KEY}
+#     - ...
+#
+# AI gateway and verification backend use server-only (no VITE_ prefix)
+# env vars and are NOT baked into the bundle; set them on the runtime
+# service (Cloud Run) if needed.
 
 # ---------- 1. Dependencies ----------
 FROM node:20-alpine AS deps
@@ -37,11 +70,13 @@ COPY . .
 # VITE_BLOCKS_* env vars in (see cloudbuild.yaml / .env.example). ARG
 # defaults let the image build without them so a smoke build still works.
 ARG VITE_BLOCKS_API_URL
+ARG VITE_BLOCKS_KEY
 ARG VITE_BLOCKS_OIDC_URL
 ARG VITE_BLOCKS_OIDC_CLIENT_ID
 ARG VITE_BLOCKS_OIDC_SCOPE
 ARG VITE_BLOCKS_APP_DOMAIN
 ENV VITE_BLOCKS_API_URL=$VITE_BLOCKS_API_URL \
+    VITE_BLOCKS_KEY=$VITE_BLOCKS_KEY \
     VITE_BLOCKS_OIDC_URL=$VITE_BLOCKS_OIDC_URL \
     VITE_BLOCKS_OIDC_CLIENT_ID=$VITE_BLOCKS_OIDC_CLIENT_ID \
     VITE_BLOCKS_OIDC_SCOPE=$VITE_BLOCKS_OIDC_SCOPE \
