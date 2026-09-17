@@ -1,0 +1,53 @@
+# Files / directories that should never end up in the Docker build context.
+# Keeps the context small and prevents leaking secrets or local noise into
+# the image.
+
+# Git + IDE noise
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+.claude
+.codex
+
+# Local dev artifacts (also in .gitignore but we don't trust that alone
+# for the docker build — someone could clone and run docker before the
+# .gitignore was tightened).
+.playwright-mcp
+cert
+npm-cache
+server
+prompt
+
+# Build outputs that the image rebuilds itself
+dist
+dist-ssr
+node_modules
+*.log
+
+# Debug screenshots / JSON dumps that ended up in the working tree
+/*.png
+/dryrun-*
+/current-*
+/fresh-*
+/after-*-clone.json
+/projects-*.json
+/env-workflow-arrow-state.json
+/vite.config.js.bak
+/.dev-server.*.log
+
+# Secrets — never bake these in. The image gets runtime config via
+# Cloud Run env vars, not via build context.
+.env
+.env.local
+*.local
+
+# Docker / CI plumbing
+Dockerfile
+.dockerignore
+nginx.conf
+
+# The build context for `npm ci` only needs package*.json — keep the rest
+# out until COPY . . runs in the build stage.
