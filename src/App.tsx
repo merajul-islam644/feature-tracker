@@ -7,6 +7,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectDetailPage } from "@/pages/ProjectDetailPage";
 import { ProfilePage } from "@/pages/ProfilePage";
+import { SettingsPage } from "@/pages/SettingsPage";
 import { IssueTrackerPage } from "@/pages/IssueTrackerPage";
 import { ProjectInfoPage } from "@/pages/ProjectInfoPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -51,6 +52,7 @@ export default function App() {
               element={<ProjectDetailPage />}
             />
             <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/settings" element={<SettingsPage />} />
             <Route path="/issue-tracker" element={<IssueTrackerPage />} />
             <Route path="/repo-browser" element={<RepoBrowserPage />} />
             <Route path="/test-runner" element={<PlaywrightPage />} />

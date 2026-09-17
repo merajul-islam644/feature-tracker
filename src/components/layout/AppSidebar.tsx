@@ -7,6 +7,7 @@ import {
   ChevronsRight,
   FolderTree,
   PlayCircle,
+  Settings as SettingsIcon,
   LogOut,
 } from "lucide-react";
 import {
@@ -49,6 +50,11 @@ export function AppSidebar() {
       // label: t("nav.issueTracker", "Issue Tracker"),
       label: t("nav.issueTracker", "Issues"),
       icon: Bug,
+    },
+    {
+      to: "/settings",
+      label: t("nav.settings", "Settings"),
+      icon: SettingsIcon,
     },
     // {
     //   to: "/repo-browser",
@@ -99,7 +105,21 @@ export function AppSidebar() {
                     isActive={isActive}
                   >
                     <NavLink to={item.to}>
-                      <Icon aria-hidden="true" />
+                      <Icon
+                        aria-hidden="true"
+                        // Inactive icons render in a muted version of
+                        // the sidebar foreground — a neutral "default"
+                        // color that doesn't fight the user's chosen
+                        // accent. Active icons flip to the
+                        // contrasting foreground because the active
+                        // button paints its own background in
+                        // `--sidebar-accent`.
+                        className={
+                          isActive
+                            ? "text-sidebar-accent-foreground"
+                            : "text-sidebar-foreground/70"
+                        }
+                      />
                       <span>{item.label}</span>
                     </NavLink>
                   </SidebarMenuButton>

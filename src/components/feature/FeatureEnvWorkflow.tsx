@@ -7,30 +7,25 @@
 // the feature-row interaction model is rename/delete/details, not
 // clone-the-feature.
 //
-// Reads the cloned env set from `useClonedFeatureEnvs(feature.id,
-// feature.projectId)`. The hook queries the Feature collection for
-// records with `clonedFromFeatureId === feature.id`, returning the
-// set of env slugs where a sibling exists. No clicks, no pending
-// state, no toast — see EnvWorkflow.tsx (the flow-row version) for
-// the interactive counterpart. Visuals (Node / Arrow / palette) come
-// from EnvWorkflowPrimitives.tsx so the two workflows read as one
-// chain at a glance.
+// Reads the cloned env set from `useClonedFeatureEnvs` keyed on the
+// SOURCE feature id (the original dev feature). Every row in the same
+// promote chain (the original dev feature + every sibling clone) sees
+// the SAME chain visualization, so the animation is consistent across
+// every row even on non-dev envs. Without the source-id lookup, a
+// non-dev row would only see ITS OWN downstream clones and miss the
+// arrows leading up to its env.
 //
-// Arrow animation rule: on a dev row, an arrow into a sibling env
-// animates iff that env has a sibling clone. On a non-dev row the
-// row's own env IS the current step in the chain, so arrows leading
-// UP TO it animate regardless of `useClonedFeatureEnvs`. For a "uat"
-// feature, animate Dev→Stg and Stg→Prod arrows (chain reached prod)
-// but not the Prod→UAT arrow (the row itself is uat). For "prod",
-// animate Dev→Stg and Stg→Prod. For "stg" no sibling arrows animate.
-// Custom-env rows aren't in the canonical chain so the
-// position-based branch never fires; the clone-based branch covers
-// any downstream clones.
+// Arrow animation rule: the arrow into a sibling env animates iff that
+// env has a sibling clone (i.e. the chain has reached it). This is the
+// SAME rule for every row regardless of which env it lives in — the
+// user's "same animate as dev env for others env" requirement.
+// Position-based logic (animating arrows leading INTO the row's own
+// env) is gone — what matters is the chain state, not the row's
+// perspective.
 
 import { Fragment } from "react";
 import { useClonedFeatureEnvs } from "@/lib/blocks/hooks";
 import { useT } from "@/lib/blocks/i18n";
-import { CANONICAL_ENV_SLUGS } from "@/lib/validation";
 import type { Feature } from "@/lib/blocks/data";
 import {
   SIBLING_ENVS,
@@ -43,24 +38,17 @@ interface FeatureEnvWorkflowProps {
   feature: Feature;
 }
 
-// Index of a slug in the canonical promote order, or `-1` for slugs
-// not in the canonical chain (e.g. custom envs). Used by the
-// animation rule below to decide whether an arrow into a sibling
-// env is "up to" the row's own env.
-function canonicalIndex(slug: string | undefined): number {
-  if (!slug) return -1;
-  return (CANONICAL_ENV_SLUGS as readonly string[]).indexOf(slug);
-}
-
 export function FeatureEnvWorkflow({ feature }: FeatureEnvWorkflowProps) {
   const t = useT();
-  // Read-only sibling lookup — see useClonedFeatureEnvs for why we
-  // intentionally don't apply createdByFilter here. The hook is
-  // `enabled: false` until both userId and featureId resolve, so
-  // there's no startup flash of an empty chain.
-  const { data: clonedEnvs } = useClonedFeatureEnvs(feature.id, feature.projectId);
+  // Source id: every clone's view of the chain starts from the
+  // original dev feature. Without this, a non-dev row would only see
+  // ITS OWN downstream clones and miss the chain leading up to it.
+  const sourceId = feature.clonedFromFeatureId ?? feature.id;
+  // `enabled` stays false until both userId and featureId resolve, so
+  // there's no startup flash of an empty chain — same contract as the
+  // flow-row read-only mirror.
+  const { data: clonedEnvs } = useClonedFeatureEnvs(sourceId, feature.projectId);
   const cloned = clonedEnvs ?? new Set<string>();
-  const rowIndex = canonicalIndex(feature.envSlug);
 
   return (
     <>
@@ -81,21 +69,9 @@ export function FeatureEnvWorkflow({ feature }: FeatureEnvWorkflowProps) {
         />
         {SIBLING_ENVS.map((env) => {
           const alreadyCloned = cloned.has(env.slug);
-          // Same rule as the flow-row read-only mirror — animate the
-          // arrow leading INTO this sibling env when the chain has
-          // reached this env from the row's perspective. Two cases:
-          //   * Row is in a canonical env and this sibling env is
-          //     at or before the row's env in the canonical promote
-          //     order — the chain got here, so animate.
-          //   * Row has downstream clones — animate (preserves the
-          //     "this env has a clone" affordance even on non-dev
-          //     rows that have downstream activity).
-          const siblingIndex = canonicalIndex(env.slug);
-          const animateArrow =
-            (rowIndex >= 0 &&
-              siblingIndex >= 0 &&
-              siblingIndex <= rowIndex) ||
-            alreadyCloned;
+          // Single rule, same on dev and non-dev rows: animate the
+          // arrow into this sibling env iff the chain has reached it.
+          const animateArrow = alreadyCloned;
           return (
             <Fragment key={env.slug}>
               <EnvArrow animate={animateArrow} />

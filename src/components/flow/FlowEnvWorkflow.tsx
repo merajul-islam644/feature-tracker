@@ -9,27 +9,20 @@
 // without offering a mutation path inline — non-dev envs are
 // read-only views of what was authored in dev.
 //
-// Reads the cloned env set from `useClonedEnvs(flow.id)`. The hook
-// queries the Flow collection for records with `clonedFromFlowId ===
-// flow.id`, returning the set of env slugs where a sibling exists.
-// For a uat/stg/prod/custom flow this will usually be empty (most
-// non-dev flows are leaves in the promote chain), so all three
-// sibling nodes render as outlined "available" pills — that's the
-// intended visual.
+// Reads the cloned env set from `useClonedEnvs` keyed on the SOURCE
+// flow id (the original dev flow). Every row in the same promote
+// chain sees the same chain visualization, so the animation is
+// consistent across every row even on non-dev envs. Without the
+// source-id lookup, a non-dev row would only see ITS OWN downstream
+// clones and miss the arrows leading up to its env.
 //
-// Arrow animation rule for non-dev rows differs from the dev row:
-// on a dev row, the arrow into an env animates only if that env has
-// already been cloned (i.e. the chain "reached" it). On a non-dev
-// row the row's own env IS the current step in the chain, so the
-// arrows leading UP TO it animate regardless of `useClonedEnvs`.
-// Concretely: if `flow.envSlug` is "uat", animate the Dev→Stg and
-// Stg→Prod arrows (chain reached prod) but not the Prod→UAT arrow
-// (the row itself is uat — the destination pill, not a step still
-// to be taken). For "prod" animate Dev→Stg and Stg→Prod. For "stg"
-// no sibling arrows animate (only the source Dev→Stg, which is the
-// source position itself). Custom envs aren't in the
-// dev→stg→prod→uat chain so no sibling arrows animate for them.
-// Visuals (Node / Arrow / palette) come from
+// Arrow animation rule: the arrow into a sibling env animates iff
+// that env has a sibling clone (i.e. the chain has reached it). This
+// is the SAME rule for every row regardless of which env it lives in
+// — the user's "same animate as dev env for others env" requirement.
+// Position-based logic (animating arrows leading INTO the row's own
+// env) is gone — what matters is the chain state, not the row's
+// perspective. Visuals (Node / Arrow / palette) come from
 // EnvWorkflowPrimitives.tsx so this row and the dev interactive
 // `EnvWorkflow` row read as one chain at a glance. Only the
 // interactive affordances differ — `interactive={false}` on every
@@ -39,7 +32,6 @@
 import { Fragment } from "react";
 import { useClonedEnvs } from "@/lib/blocks/hooks";
 import { useT } from "@/lib/blocks/i18n";
-import { CANONICAL_ENV_SLUGS } from "@/lib/validation";
 import type { Flow } from "@/lib/blocks/data";
 import {
   SIBLING_ENVS,
@@ -52,23 +44,18 @@ interface FlowEnvWorkflowProps {
   flow: Flow;
 }
 
-// Index of a slug in the canonical promote order, or `-1` for slugs
-// not in the canonical chain (e.g. custom envs). Used by the
-// animation rule below to decide whether an arrow into a sibling
-// env is "up to" the row's own env.
-function canonicalIndex(slug: string | undefined): number {
-  if (!slug) return -1;
-  return (CANONICAL_ENV_SLUGS as readonly string[]).indexOf(slug);
-}
-
 export function FlowEnvWorkflow({ flow }: FlowEnvWorkflowProps) {
   const t = useT();
+  // Source id: every clone's view of the chain starts from the
+  // original dev flow. Same rationale as FeatureEnvWorkflow — without
+  // this, a non-dev row only sees its own downstream clones and misses
+  // the chain leading up to it.
+  const sourceId = flow.clonedFromFlowId ?? flow.id;
   // Sibling lookup keyed per source flow. `enabled` stays false until
   // both userId and flowId resolve, so there's no startup flash of an
   // empty chain — same contract as the feature-row read-only mirror.
-  const { data: clonedEnvs } = useClonedEnvs(flow.id);
+  const { data: clonedEnvs } = useClonedEnvs(sourceId);
   const cloned = clonedEnvs ?? new Set<string>();
-  const rowIndex = canonicalIndex(flow.envSlug);
 
   return (
     <>
@@ -90,26 +77,9 @@ export function FlowEnvWorkflow({ flow }: FlowEnvWorkflowProps) {
         />
         {SIBLING_ENVS.map((env) => {
           const alreadyCloned = cloned.has(env.slug);
-          // The arrow leading INTO this sibling env animates when
-          // the chain has reached this env from the row's
-          // perspective. Two cases:
-          //   * Row is in a canonical env (stg/prod/uat) and this
-          //     sibling env is at or before the row's env in the
-          //     canonical promote order — the chain got here, so
-          //     animate the arrow as a finished path of motion.
-          //   * Row has downstream clones — sibling env has a
-          //     sibling clone of this flow, animate (matches the
-          //     dev-row behavior; preserves the "this env has a
-          //     clone" affordance even if the row is non-dev).
-          // Custom-env rows aren't in the canonical chain so the
-          // first branch never fires; the second branch covers any
-          // downstream clones the row may have.
-          const siblingIndex = canonicalIndex(env.slug);
-          const animateArrow =
-            (rowIndex >= 0 &&
-              siblingIndex >= 0 &&
-              siblingIndex <= rowIndex) ||
-            alreadyCloned;
+          // Single rule, same on dev and non-dev rows: animate iff
+          // the chain has reached this sibling env.
+          const animateArrow = alreadyCloned;
           return (
             <Fragment key={env.slug}>
               <EnvArrow animate={animateArrow} />
