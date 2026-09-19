@@ -11,13 +11,16 @@ import {
 import { Badge } from "@/components/ui/badge";
 import {
   useNotificationInbox,
-  unreadCount,
   formatRelative,
 } from "@/lib/blocks/notifier";
 
 export function NotificationBell() {
-  const { items, isLoading, markRead, markAllRead } = useNotificationInbox();
-  const unread = unreadCount(items);
+  // `unread` and `total` come from the API-reported counts so the
+  // badge stays accurate even when the notifier persists records the
+  // List endpoint can't enumerate (a known platform quirk in this
+  // tenant — `totalNotificationsCount: N, notifications: []`).
+  const { items, isLoading, markRead, markAllRead, unread, total } =
+    useNotificationInbox();
 
   return (
     <DropdownMenu>
@@ -107,7 +110,7 @@ export function NotificationBell() {
         <DropdownMenuSeparator />
         <div className="px-3 py-2 text-center">
           <Badge variant="muted" className="font-normal">
-            {items.length} total
+            {total} total
           </Badge>
         </div>
       </DropdownMenuContent>

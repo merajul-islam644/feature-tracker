@@ -16,6 +16,7 @@ import {
 import type { BlocksOidcUserInfo } from "@seliseblocks/client";
 import {
   fetchSessionClaims,
+  fetchUserRoles,
   logout as sdkLogout,
   startLogin as sdkStartLogin,
 } from "@/lib/blocks/auth";
@@ -31,6 +32,12 @@ export interface CurrentUser {
   avatarUrl?: string;
   createdAt: string;
   updatedAt: string;
+  // IAM roles for the signed-in user (e.g. `["manager"]`, `["tester"]`).
+  // Populated by `AuthProvider.refresh()` from the IAM user record — the
+  // OIDC userInfo payload does NOT include roles, so this is a separate
+  // lookup that runs alongside the session-claims fetch. Default `[]`
+  // when the lookup has not yet completed or IAM didn't return any.
+  roles: string[];
 }
 
 interface AuthContextValue {
@@ -49,6 +56,7 @@ const STATUS_POLL_MS = 5 * 60 * 1000; // backup interval; visibility refresh is 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [claims, setClaims] = useState<BlocksOidcUserInfo | null>(null);
+  const [roles, setRoles] = useState<string[]>([]);
   // Guard against re-entrant `refresh()` calls from polling + visibility +
   // explicit clicks all firing together.
   const inflight = useRef<Promise<void> | null>(null);
@@ -59,6 +67,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const next = await fetchSessionClaims();
       setClaims(next);
       setStatus(next ? "authenticated" : "unauthenticated");
+      // Roles ride alongside the session check. Only fire the IAM
+      // lookup when there's a real session — an unauthenticated poll
+      // shouldn't waste a request on a 401-bound call. We hit
+      // `iam.me()` which resolves the user id from the session
+      // cookie, so we don't need to forward the OIDC `sub`.
+      if (next) {
+        const nextRoles = await fetchUserRoles(undefined);
+        setRoles(nextRoles);
+      } else {
+        setRoles([]);
+      }
     })();
     inflight.current = run;
     try {
@@ -90,19 +109,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await sdkLogout();
     setClaims(null);
+    setRoles([]);
     setStatus("unauthenticated");
   }, []);
 
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
-      user: claims ? toCurrentUser(claims) : null,
+      user: claims ? toCurrentUser(claims, roles) : null,
       claims,
       login,
       logout,
       refresh,
     }),
-    [status, claims, login, logout, refresh],
+    [status, claims, roles, login, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -116,7 +136,7 @@ export function useAuthContext(): AuthContextValue {
   return ctx;
 }
 
-function toCurrentUser(claims: BlocksOidcUserInfo): CurrentUser {
+function toCurrentUser(claims: BlocksOidcUserInfo, roles: string[]): CurrentUser {
   const email = typeof claims.email === "string" ? claims.email : "";
   const name =
     typeof claims.name === "string" && claims.name.length > 0
@@ -138,6 +158,7 @@ function toCurrentUser(claims: BlocksOidcUserInfo): CurrentUser {
       typeof claims.iat === "number"
         ? new Date(claims.iat * 1000).toISOString()
         : new Date(0).toISOString(),
+    roles,
   };
 }
 

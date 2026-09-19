@@ -31,6 +31,24 @@ export function useAuth(): UseAuthReturn {
   };
 }
 
+// `useIsRole` returns true when the signed-in user holds the given IAM
+// role. Reads from `currentUser.roles` (populated by `AuthProvider` from
+// the IAM user record alongside the session check). Defaults to `false`
+// while the user object is missing (loading or unauthenticated) so UI
+// gates stay "open" during the brief window between sign-in and the IAM
+// role lookup resolving — once roles land, gated buttons either appear
+// (current behavior) or disappear (tester mode). Components that hide
+// actions on `true` should pair this with the role check at the mutation
+// hook layer as defense-in-depth: a UI hide is a UX nicety, the hook
+// guard is the actual enforcement.
+//
+// Example: `const isTester = useIsRole("tester");`
+export function useIsRole(role: string): boolean {
+  const { currentUser } = useAuth();
+  const roles = currentUser?.roles ?? [];
+  return roles.includes(role);
+}
+
 interface RequireAuthProps {
   children: ReactElement;
 }

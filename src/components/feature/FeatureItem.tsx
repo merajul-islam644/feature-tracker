@@ -21,6 +21,7 @@ import { RenameFlowModal } from "@/components/flow/RenameFlowModal";
 import { DeleteFlowDialog } from "@/components/flow/DeleteFlowDialog";
 import { FlowDetailsDrawer } from "@/components/flow/FlowDetailsDrawer";
 import { useFeatureFlows } from "@/lib/blocks/hooks";
+import { useIsRole } from "@/hooks/useAuth";
 import { useLocale, useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 import type { Feature, Flow } from "@/lib/blocks/data";
@@ -172,6 +173,16 @@ export function FeatureItem({
   readOnly = false,
   envSlug,
 }: FeatureItemProps) {
+  // Testers are read-only across the workspace, even on the dev source
+  // env. We OR with `readOnly` here rather than relying on the page
+  // thread `readOnly` all the way down — the kebab gate lives next to
+  // the rename/delete state so it can't be accidentally bypassed by a
+  // page that forgets the OR. The hooks (`useUpdateFeature` /
+  // `useDeleteFeature` / `useUpdateFlow` / `useDeleteFlow`) also throw
+  // for testers as defense-in-depth.
+  const isTester = useIsRole("tester");
+  const effectiveReadOnly = readOnly || isTester;
+
   const [expanded, setExpanded] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
 
@@ -347,7 +358,7 @@ export function FeatureItem({
               * editable  → kebab with Rename + Delete + Feature Details.
                             Destructive Delete stays anchored at the
                             bottom. */}
-        {readOnly ? (
+        {effectiveReadOnly ? (
           <RowKebabMenu
             ariaLabel={t("featureItem.menu", "Feature actions")}
             readOnly
@@ -382,7 +393,7 @@ export function FeatureItem({
         >
           <Separator className="mb-3" />
           {visibleFlowList.length === 0 ? (
-            !readOnly ? (
+            !effectiveReadOnly ? (
               <FlowEmptyState onAdd={() => setAddFlowOpen(true)} />
             ) : (
               <FlowEmptyState />
@@ -455,8 +466,12 @@ export function FeatureItem({
                   />
                 </li>
               ))}
-              {!readOnly && (
+              {!effectiveReadOnly && (
                 <li className="pt-2">
+                  {/* "+ Add another flow" button — gated on effectiveReadOnly
+                      so testers can't add flows either, matching the rest of
+                      the read-only posture. Stays visible when the row is
+                      editable. */}
                   <Button
                     variant="ghost"
                     size="sm"

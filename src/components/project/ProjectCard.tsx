@@ -28,6 +28,7 @@ import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { useLocale, useT } from "@/lib/blocks/i18n";
 import type { Project } from "@/lib/blocks/data";
+import { useIsRole } from "@/hooks/useAuth";
 import { RenameProjectModal } from "./RenameProjectModal";
 import { DeleteProjectDialog } from "./DeleteProjectDialog";
 import { EnvironmentChips } from "./EnvironmentChips";
@@ -47,6 +48,11 @@ export function ProjectCard({
   const { formatRelativeTime } = useLocale();
   const t = useT();
   const navigate = useNavigate();
+  // Testers are read-only on the workspace — they can browse projects and
+  // follow Project Details, but Rename / Delete are hidden. The matching
+  // hooks (`useUpdateProject`, `useDeleteProject`) also throw the same
+  // error if reached programmatically.
+  const isTester = useIsRole("tester");
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -164,18 +170,22 @@ export function ProjectCard({
               <Info className="h-4 w-4" aria-hidden="true" />
               <span>{t("projectCard.details", "Project Details")}</span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setRenameOpen(true)}>
-              <Pencil className="h-4 w-4" aria-hidden="true" />
-              <span>{t("projectCard.rename", "Rename")}</span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() => setDeleteOpen(true)}
-              className="text-red-600 focus:bg-red-50 focus:text-red-700"
-            >
-              <Trash2 className="h-4 w-4" aria-hidden="true" />
-              <span>{t("projectCard.delete", "Delete")}</span>
-            </DropdownMenuItem>
+            {!isTester && (
+              <DropdownMenuItem onSelect={() => setRenameOpen(true)}>
+                <Pencil className="h-4 w-4" aria-hidden="true" />
+                <span>{t("projectCard.rename", "Rename")}</span>
+              </DropdownMenuItem>
+            )}
+            {!isTester && <DropdownMenuSeparator />}
+            {!isTester && (
+              <DropdownMenuItem
+                onSelect={() => setDeleteOpen(true)}
+                className="text-red-600 focus:bg-red-50 focus:text-red-700"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                <span>{t("projectCard.delete", "Delete")}</span>
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

@@ -58,6 +58,41 @@ export async function fetchSessionClaims(): Promise<BlocksOidcUserInfo | null> {
   }
 }
 
+// Fetches the signed-in user's IAM roles. The Blocks OIDC userInfo payload
+// does not include roles (those live on the IAM user record, not the OIDC
+// claim set), so we hit `iam.me()` — the SDK-documented "current
+// authenticated IAM account" endpoint that returns the signed-in user's
+// own record including their roles. We deliberately do NOT use
+// `iam.users.get(userId)`: that route reads any user by id and requires
+// admin privileges, which causes a 403 for ordinary signed-in users (and
+// breaks the role-gated UI for non-admins).
+//
+// The shape is intentionally loose: the SDK's response envelope is
+// `{ data: { ... } }` for the data layer, and `roles` is an optional
+// array. We never throw — a missing or malformed response becomes an
+// empty array so the AuthProvider never blocks the UI on a role hiccup.
+export async function fetchUserRoles(
+  _userId: string | null | undefined,
+): Promise<string[]> {
+  // Argument kept for backward compatibility with earlier callers — IAM
+  // resolves the user id from the session cookie for `iam.me()`, so we
+  // ignore whatever id the caller passes.
+  void _userId;
+  try {
+    const me = (await blocksClient.iam.me()) as {
+      data?: { roles?: unknown };
+    };
+    const roles = me.data?.roles;
+    if (!Array.isArray(roles)) return [];
+    return roles.filter((r): r is string => typeof r === "string");
+  } catch {
+    // IAM hiccup — treat as "no roles" so the UI doesn't lock out on a
+    // transient lookup failure. The next 5-minute poll / visibility
+    // refresh will retry.
+    return [];
+  }
+}
+
 // Asks IAM to invalidate the current session cookie, then forgets it locally.
 // Always returns; errors are swallowed because the local logout still succeeds.
 export async function logout(): Promise<void> {

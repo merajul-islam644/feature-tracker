@@ -16,6 +16,7 @@
 import { useEffect, useState } from "react";
 import { GitBranch } from "lucide-react";
 import { useAuthContext } from "@/components/blocks/AuthProvider";
+import { useIsRole } from "@/hooks/useAuth";
 import { useLocale } from "@/lib/blocks/i18n";
 import type { Flow } from "@/lib/blocks/data";
 import type { ReactNode } from "react";
@@ -119,6 +120,14 @@ function newId(): string {
 export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
   const { formatRelativeTime } = useLocale();
   const { user } = useAuthContext();
+  // Testers are read-only across the workspace — even on dev-source
+  // flows where regular users can click the env-workflow to clone
+  // across envs. Swap in the read-only `FlowEnvWorkflow` mirror for
+  // testers so the chain still shows the chain state ("already cloned
+  // to Stg / Prod / UAT") but no pill is actionable. The matching
+  // `useCloneFlow` hook also throws for testers — defense in depth
+  // against programmatic / stale-modal callers.
+  const isTester = useIsRole("tester");
 
   // Comments are seeded from localStorage on first render so a reload
   // restores the thread. The lazy initializer avoids a synchronous
@@ -194,7 +203,7 @@ export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
                                             anchor)
           See EnvWorkflow.tsx (interactive) and FlowEnvWorkflow.tsx
           (read-only mirror) for state details. */}
-      {flow.envSlug === "dev" ? (
+      {flow.envSlug === "dev" && !isTester ? (
         <EnvWorkflow flow={flow} />
       ) : flow.envSlug !== undefined ? (
         <FlowEnvWorkflow flow={flow} />

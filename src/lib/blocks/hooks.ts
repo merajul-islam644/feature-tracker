@@ -264,8 +264,12 @@ export function useProjects(): UseQueryResult<Project[]> {
     queryKey: queryKeys.projects(userId),
     enabled: Boolean(userId),
     queryFn: async () => {
+      // Workspace-wide listing — testers need to browse every project in
+      // the workspace (read-only). Mutating hooks still gate on `isTester`
+      // so they can't author/delete. We deliberately dropped
+      // `createdByFilter(userId)` here: with it on, a tester who didn't
+      // author the seed projects saw an empty workspace.
       const raw = await projectsCollection.list({
-        filter: createdByFilter(userId),
         pageNo: 1,
         pageSize: 100,
         // Server expects sort direction as a numeric (`-1` desc, `1` asc);
@@ -294,13 +298,12 @@ export function useProject(
       // `ItemId`, so the response is the same paged envelope as `list`:
       //   { data: { getProjects: { items: [...], totalCount } } }.
       // Drill through both layers; a missing item means the record doesn't
-      // exist or the caller isn't allowed to see it.
+      // exist. We deliberately dropped the `CreatedBy` ownership guard:
+      // a tester should be able to open a project they didn't author so
+      // they can browse it read-only. Mutations still gate on `isTester`.
       const paged = unwrapPaged<{ ItemId: string; CreatedBy?: string; name: string; CreatedDate: string; LastUpdatedDate: string }>(raw);
       const p = paged.items[0];
       if (!p) return null;
-      // Guard against reading another user's record (the platform may
-      // already enforce this through access policies; this is a UX layer).
-      if (userId && p.CreatedBy && p.CreatedBy !== userId) return null;
       return toProject(p as Parameters<typeof toProject>[0]);
     },
   });
@@ -327,8 +330,11 @@ export function useProjectFeatures(
         // optional and only present when the caller is on an env-scoped
         // page; legacy features (no envSlug) won't match a non-empty
         // envSlug and are correctly hidden from env-scoped reads.
+        //
+        // Workspace-wide read: we dropped `createdByFilter(userId)` so a
+        // tester can browse features authored by anyone. Mutating hooks
+        // (`useUpdateFeature`, `useDeleteFeature`) still throw for testers.
         filter: {
-          ...createdByFilter(userId),
           projectId,
           ...(envSlug ? { envSlug } : {}),
         },
@@ -355,7 +361,11 @@ export function useFeatureFlows(
     queryFn: async () => {
       if (!featureId) return [];
       const raw = await flowsCollection.list({
-        filter: { ...createdByFilter(userId), featureId },
+        // Workspace-wide read: dropped `createdByFilter(userId)` so a
+        // tester can browse flows they didn't author. Mutations stay
+        // blocked by the `isTester` guard in `useUpdateFlow` /
+        // `useDeleteFlow` / `useCloneFlow`.
+        filter: { featureId },
         pageNo: 1,
         pageSize: 200,
         sort: { CreatedDate: -1 },
@@ -403,7 +413,9 @@ export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
       // `useProjectFlows`. Going wider would mask genuine "the user's
       // recent N is not in the first 1000" bugs by silently truncating.
       const flowsRaw = await flowsCollection.list({
-        filter: createdByFilter(userId),
+        // Workspace-wide read: dropped `createdByFilter(userId)` so a
+        // tester can see recent workspace flows. Narrowed client-side to
+        // `scope.featureIds` (alive features in alive projects) below.
         pageNo: 1,
         pageSize: 1000,
         sort: { CreatedDate: -1 },
@@ -449,12 +461,16 @@ export function useWorkspaceTotals(): UseQueryResult<{
       if (scope.projectIds.size === 0) return { features: 0, flows: 0 };
       const [featuresRaw, flowsRaw] = await Promise.all([
         featuresCollection.list({
-          filter: createdByFilter(userId),
+          // Workspace-wide read: dropped `createdByFilter(userId)` so a
+          // tester can see totals across the workspace. Narrowed client-
+          // side to `scope.projectIds` (alive projects) below.
           pageNo: 1,
           pageSize: 1000,
         }),
         flowsCollection.list({
-          filter: createdByFilter(userId),
+          // Workspace-wide read: dropped `createdByFilter(userId)` so a
+          // tester can see totals across the workspace. Narrowed client-
+          // side to `scope.projectIds` (alive projects) below.
           pageNo: 1,
           pageSize: 1000,
         }),
@@ -501,7 +517,8 @@ function useAliveScope(userId: string): UseQueryResult<{
       //    the features query. This is the "deleted all projects" path:
       //    the tile should render zero, not orphans.
       const projectsRaw = await projectsCollection.list({
-        filter: createdByFilter(userId),
+        // Workspace-wide read: dropped `createdByFilter(userId)` so a
+        // tester can see the workspace's alive project set.
         pageNo: 1,
         pageSize: 500,
       });
@@ -517,7 +534,8 @@ function useAliveScope(userId: string): UseQueryResult<{
       //    operator objects (see the doc comment on `useProjectFlows`),
       //    so we list everything and filter client-side.
       const featuresRaw = await featuresCollection.list({
-        filter: createdByFilter(userId),
+        // Workspace-wide read: dropped `createdByFilter(userId)` so a
+        // tester can see features across the workspace.
         pageNo: 1,
         pageSize: 500,
       });
@@ -575,8 +593,9 @@ export function useProjectFlows(
     queryFn: async () => {
       if (!projectId) return [];
       const featuresRaw = await featuresCollection.list({
+        // Workspace-wide read: dropped `createdByFilter(userId)` so a
+        // tester can browse flows they didn't author.
         filter: {
-          ...createdByFilter(userId),
           projectId,
           ...(envSlug ? { envSlug } : {}),
         },
@@ -587,8 +606,9 @@ export function useProjectFlows(
       if (featureItems.length === 0) return [];
       const featureIds = new Set(featureItems.map((f) => f.ItemId));
       const flowsRaw = await flowsCollection.list({
+        // Workspace-wide read: dropped `createdByFilter(userId)` so a
+        // tester can browse flows they didn't author.
         filter: {
-          ...createdByFilter(userId),
           ...(envSlug ? { envSlug } : {}),
         },
         pageNo: 1,
@@ -764,6 +784,12 @@ export function useCreateProject(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Tester guard — mirrors `useCreateFeature` / `useAddProjectEnv` /
+  // `useRenameProjectEnv`. The Create Project button is hidden in the
+  // UI (ProjectsPage header + ProjectEmptyState), this is defense-in-
+  // depth so a tester who reaches the hook through any other path gets
+  // a clear toast instead of a cloud-side 403.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     // Optimistic insert into the projects list. The mutation below
     // returns the real Project (with server-issued `id` and timestamps);
@@ -818,22 +844,38 @@ export function useCreateProject(): UseMutationResult<
       });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
-      // Notify managers. Fire-and-forget — a notifier hiccup never blocks
+      // Notify testers. Fire-and-forget — a notifier hiccup never blocks
       // a successful project create (the cache is already settled, the
       // user already navigated). `context` + `actionName` are the
-      // subscription filter the manager's inbox can group by.
-      void notifyRole("manager", {
+      // subscription filter the tester inbox can group by. We target
+      // testers specifically (not managers) because the actor IS the
+      // manager — telling them about their own action would just spam
+      // the inbox of the very person who triggered it.
+      void notifyRole("tester", {
         context: "project",
         actionName: "created",
         value: project.id,
         projectId: project.id,
         projectName: project.name,
-        createdBy: userId,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
       }).catch(() => {
         /* notifier failures are non-fatal — see hook doc */
       });
     },
     mutationFn: async (input) => {
+      // Defense-in-depth: even though the UI hides the Create Project
+      // CTA for testers (ProjectsPage header + ProjectEmptyState), a
+      // tester can still reach this hook programmatically — through a
+      // stale modal, a stale form, a bookmark, or a third-party caller.
+      // Throw here so the same clear toast the user sees on feature /
+      // env actions surfaces here too, instead of a generic
+      // 403 from the cloud.
+      if (isTester) {
+        throw new Error(
+          "Testers cannot create projects. Ask a manager for access.",
+        );
+      }
       const created = await projectsCollection.create({
         name: input.name,
         status: input.status ?? "active",
@@ -881,8 +923,21 @@ export function useCreateFeature(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // `tester` role is read-only on the feature surface: testers can browse
+  // features and flows but must not be able to author them. The UI also
+  // hides the entry points (see ProjectDetailPage + FeatureEmptyState),
+  // but we guard here too — a UI hide is a UX nicety, this is the actual
+  // enforcement. The captured value is the latest one because `mutationFn`
+  // closes over the hook body each render and React Query picks up the
+  // freshest closure when the mutation actually fires.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async (input) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot create features. Ask a manager for access.",
+        );
+      }
       const created = await featuresCollection.create({
         title: input.name,
         projectId: input.projectId,
@@ -919,18 +974,20 @@ export function useCreateFeature(): UseMutationResult<
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
-      // Notify managers. `feature.id` (the server-issued id) is what the
+      // Notify testers. `feature.id` (the server-issued id) is what the
       // inbox uses as the subscription-filter `value` so future reads
       // can pivot on it. Same fire-and-forget discipline as
       // `useCreateProject` — a notifier hiccup never blocks the create.
-      void notifyRole("manager", {
+      // Targeted at testers because the actor IS a manager.
+      void notifyRole("tester", {
         context: "feature",
         actionName: "created",
         value: feature.id,
         projectId: vars.projectId,
         featureName: vars.name,
         envSlug: vars.envSlug,
-        createdBy: userId,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
       }).catch(() => {
         /* notifier failures are non-fatal */
       });
@@ -991,7 +1048,7 @@ export function useCreateFlow(): UseMutationResult<
       };
       return toFlow(item, input.projectId);
     },
-    onSuccess: (_flow, vars) => {
+    onSuccess: (flow, vars) => {
       qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
       // Mirror useCreateFeature: invalidate every project-scoped
       // feature/flow cache so the `/projects` page card counts (which
@@ -1002,6 +1059,21 @@ export function useCreateFlow(): UseMutationResult<
       // (`..., "dev", "flows"`, `..., "_all", "flows"`).
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.projectId);
+      void notifyRole("tester", {
+        context: "flow",
+        actionName: "created",
+        value: flow.id,
+        projectId: vars.projectId,
+        projectName: project?.name,
+        flowName: flow.name,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }
@@ -1010,13 +1082,40 @@ export function useDeleteProject(): UseMutationResult<void, Error, string> {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Tester guard — mirrors the pattern in `useCreateFeature` /
+  // `useAddProjectEnv` / `useRenameProjectEnv` / `useCreateProject`.
+  // The Delete item is hidden on the ProjectCard kebab menu for
+  // testers, this throws the same error for any other path.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async (projectId) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot delete projects. Ask a manager for access.",
+        );
+      }
       await projectsCollection.delete(projectId);
     },
-    onSuccess: () => {
+    onSuccess: (_void, projectId) => {
       qc.invalidateQueries({ queryKey: queryKeys.projects(userId) });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Capture the name before cache invalidation drops the row. The
+      // list is the source of truth — a single project may be in many
+      // query caches but the list always has it.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === projectId);
+      void notifyRole("tester", {
+        context: "project",
+        actionName: "deleted",
+        value: projectId,
+        projectId,
+        projectName: project?.name,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }
@@ -1038,8 +1137,19 @@ export function useUpdateFeature(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Tester guard — mirrors `useCreateFeature` / `useDeleteFeature`
+  // / `useAddProjectEnv` / `useRenameProjectEnv` / `useCreateProject`
+  // / `useDeleteProject` / `useUpdateProject`. The Rename item is hidden
+  // on the FeatureItem kebab for testers, this throws the same error
+  // if reached programmatically.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async ({ id, projectId, patch }) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot rename features. Ask a manager for access.",
+        );
+      }
       // Cloud field name for the feature title is `title`; map UI `name`
       // → cloud `title` here so callers don't have to remember.
       //
@@ -1090,9 +1200,27 @@ export function useUpdateFeature(): UseMutationResult<
           : (updated as CloudFeature);
       return toFeature(raw as Parameters<typeof toFeature>[0], "");
     },
-    onSuccess: (_feature, vars) => {
+    onSuccess: (feature, vars) => {
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Notify testers on rename. `feature.name` is the post-rename
+      // value the server echoed back — `vars.patch.name` is what the
+      // caller submitted. They're equal on success; we keep both so the
+      // inbox can show "X renamed F to G" without re-querying.
+      if (vars.patch.name !== undefined) {
+        void notifyRole("tester", {
+          context: "feature",
+          actionName: "renamed",
+          value: vars.id,
+          projectId: vars.projectId,
+          featureName: feature.name,
+          oldName: vars.patch.name,
+          newName: feature.name,
+          actorName: currentUser?.name ?? "A manager",
+          actorId: userId,
+        }).catch(() => {});
+      }
     },
   });
 }
@@ -1105,8 +1233,17 @@ export function useDeleteFeature(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Tester guard — mirrors `useUpdateFeature` and the other role-gated
+  // mutation hooks. The Delete item is hidden on the FeatureItem kebab
+  // for testers, this throws the same error if reached any other way.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async ({ id, projectId }) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot delete features. Ask a manager for access.",
+        );
+      }
       // Cascade delete: every sibling feature (one whose
       // `clonedFromFeatureId` points at the source) goes too. Only fires
       // for dev sources. Orphan flows under the deleted sibling features
@@ -1136,6 +1273,29 @@ export function useDeleteFeature(): UseMutationResult<
       // the now-removed feature.
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Capture the feature name from the features cache before it's
+      // invalidated away. We need the project name too for the body.
+      const features = qc.getQueryData<Feature[]>([
+        "features",
+        userId,
+        vars.projectId,
+      ]);
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.projectId);
+      const feature = features?.find((f) => f.id === vars.id);
+      void notifyRole("tester", {
+        context: "feature",
+        actionName: "deleted",
+        value: vars.id,
+        projectId: vars.projectId,
+        projectName: project?.name,
+        featureName: feature?.name,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }
@@ -1232,7 +1392,7 @@ export function useUpdateFlow(): UseMutationResult<
           : (updated as CloudFlow);
       return toFlow(raw as Parameters<typeof toFlow>[0], "");
     },
-    onSuccess: (_flow, vars) => {
+    onSuccess: (flow, vars) => {
       qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
       // Invalidate every sibling feature's flow cache too. The source
       // rename only refreshed `vars.featureId`; sibling feature caches
@@ -1249,6 +1409,25 @@ export function useUpdateFlow(): UseMutationResult<
       siblingFeatureIds.clear();
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      if (vars.patch.name !== undefined) {
+        const projects = qc.getQueryData<Project[]>(
+          queryKeys.projects(userId),
+        );
+        const project = projects?.find((p) => p.id === vars.projectId);
+        void notifyRole("tester", {
+          context: "flow",
+          actionName: "renamed",
+          value: vars.id,
+          projectId: vars.projectId,
+          projectName: project?.name,
+          flowName: flow.name,
+          oldName: vars.patch.name,
+          newName: flow.name,
+          actorName: currentUser?.name ?? "A manager",
+          actorId: userId,
+        }).catch(() => {});
+      }
     },
   });
 }
@@ -1304,6 +1483,28 @@ export function useDeleteFlow(): UseMutationResult<
       siblingFeatureIds.clear();
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Capture flow + project names from caches before invalidation
+      // wipes the row. The flow name is the row the user just deleted;
+      // without this we'd notify with a blank body.
+      const flows = qc.getQueryData<Flow[]>(
+        queryKeys.flows(userId, vars.featureId),
+      );
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const flow = flows?.find((f) => f.id === vars.id);
+      const project = projects?.find((p) => p.id === vars.projectId);
+      void notifyRole("tester", {
+        context: "flow",
+        actionName: "deleted",
+        value: vars.id,
+        projectId: vars.projectId,
+        projectName: project?.name,
+        flowName: flow?.name,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }
@@ -1436,8 +1637,18 @@ export function useUpdateProject(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Tester guard — mirrors `useCreateProject` and `useDeleteProject`.
+  // The Rename item is hidden on the ProjectCard kebab menu for testers,
+  // this throws the same error for any other path (stale modal,
+  // programmatic call, etc.).
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async ({ id, patch }) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot rename projects. Ask a manager for access.",
+        );
+      }
       // The cloud schema's `customEnvs` + `envLabelOverrides` are Strings
       // holding JSON. Translate the parsed UI shapes on the way out so the
       // rest of the file doesn't have to remember the encoding.
@@ -1456,9 +1667,68 @@ export function useUpdateProject(): UseMutationResult<
       const raw = "data" in updated && updated.data ? updated.data : (updated as CloudProject);
       return toProject(raw as Parameters<typeof toProject>[0]);
     },
-    onSuccess: (project) => {
+    onSuccess: (project, vars) => {
       qc.invalidateQueries({ queryKey: queryKeys.projects(userId) });
       qc.invalidateQueries({ queryKey: queryKeys.project(userId, project.id) });
+
+      // Fan-out notifications by what the patch actually changed.
+      // `useUpdateProject` carries multiple shapes (rename, env add,
+      // env rename) on the same hook, so we discriminate on which
+      // fields were present in the patch — testers should learn about
+      // every state change, not just renames.
+      const actorName = currentUser?.name ?? "A manager";
+      if (vars.patch.name !== undefined) {
+        void notifyRole("tester", {
+          context: "project",
+          actionName: "renamed",
+          value: project.id,
+          projectId: project.id,
+          projectName: project.name,
+          oldName: vars.patch.name,
+          newName: project.name,
+          actorName,
+          actorId: userId,
+        }).catch(() => {});
+      }
+      if (vars.patch.envLabelOverrides !== undefined) {
+        // Env rename — `envLabelOverrides` is `{ [slug]: label }`. We
+        // don't get old/new labels in the patch (only the new map), so
+        // we emit one notification per changed slug against the
+        // post-state keys. Testers see "X renamed env A to B".
+        const newLabels = vars.patch.envLabelOverrides;
+        for (const slug of Object.keys(newLabels)) {
+          void notifyRole("tester", {
+            context: "environment",
+            actionName: "renamed",
+            value: `${project.id}:${slug}`,
+            projectId: project.id,
+            projectName: project.name,
+            envSlug: slug,
+            actorName,
+            actorId: userId,
+          }).catch(() => {});
+        }
+      }
+      if (vars.patch.customEnvs !== undefined) {
+        // Env add — `customEnvs` is the new full list. Anything that
+        // wasn't in the pre-state is "added". Since the hook doesn't
+        // capture pre-state, we fire one event per slug in the new
+        // list. The inbox groups by `value` so duplicates from
+        // re-submits don't pile up.
+        const newEnvs = vars.patch.customEnvs;
+        for (const slug of newEnvs) {
+          void notifyRole("tester", {
+            context: "environment",
+            actionName: "created",
+            value: `${project.id}:${slug}`,
+            projectId: project.id,
+            projectName: project.name,
+            envSlug: slug,
+            actorName,
+            actorId: userId,
+          }).catch(() => {});
+        }
+      }
     },
   });
 }
@@ -1496,8 +1766,20 @@ export function useCloneFlow(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Tester guard — mirrors the other role-gated mutation hooks.
+  // Cloning moves data between envs, so it sits alongside other write
+  // paths (create/rename/delete feature/flow). The interactive
+  // `EnvWorkflow` swaps in for the read-only `FlowEnvWorkflow` mirror
+  // for testers (see FlowItem.tsx); this throw catches programmatic /
+  // stale-modal paths that bypass that gate.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async ({ flow, targetEnvSlug }) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot clone flows across environments. Ask a manager for access.",
+        );
+      }
       // 1. Source feature — needs its title for the destination lookup.
       const sourceRaw = await featuresCollection.get(flow.featureId);
       const sourceItems = unwrapPaged<{ ItemId: string; title: string }>(
@@ -1639,8 +1921,17 @@ export function useAddProjectEnv(): UseMutationResult<
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
   const updateProject = useUpdateProject();
+  // Tester guard — see `useCreateFeature` for the full rationale. UI
+  // hides the "Add Environment" CTA on ProjectsPage so testers never
+  // reach this hook through normal navigation; this is defense-in-depth.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async ({ projectId, env }) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot create environments. Ask a manager for access.",
+        );
+      }
       const cacheKey = queryKeys.project(userId, projectId);
       const cached = qc.getQueryData<Project>(cacheKey);
       const existing = cached?.customEnvs ?? [];
@@ -1695,8 +1986,17 @@ export function useRenameProjectEnv(): UseMutationResult<
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
   const updateProject = useUpdateProject();
+  // Tester guard — see `useCreateFeature` for the full rationale. The
+  // pencil trigger on the env Badge (ProjectDetailPage header) is hidden
+  // for testers so this hook stays unreachable from normal navigation.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
     mutationFn: async (input) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot update environments. Ask a manager for access.",
+        );
+      }
       const cacheKey = queryKeys.project(userId, input.projectId);
       // Pull a fresh read when the cache hasn't seen this project yet
       // (e.g. the page just mounted). Without this, a rename kicked off

@@ -6,11 +6,16 @@ import { ProjectEmptyState } from "@/components/project/ProjectEmptyState";
 import { CreateProjectModal } from "@/components/project/CreateProjectModal";
 import { AddEnvironmentModal } from "@/components/project/AddEnvironmentModal";
 import { useProjects } from "@/lib/blocks/hooks";
+import { useIsRole } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
 
 export function ProjectsPage() {
   const { data: projects, isLoading } = useProjects();
   const t = useT();
+  // Testers can browse existing environments but cannot add new ones. The
+  // hook itself enforces this — see `useAddProjectEnv` in `hooks.ts` —
+  // but hiding the CTA keeps the page honest about what a tester can do.
+  const isTester = useIsRole("tester");
   const [createOpen, setCreateOpen] = useState(false);
   const [addEnvOpen, setAddEnvOpen] = useState(false);
   const list = projects ?? [];
@@ -31,19 +36,32 @@ export function ProjectsPage() {
         </div>
         {list.length > 0 && (
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setAddEnvOpen(true)}
-              leftIcon={<Layers className="h-4 w-4" />}
-            >
-              {t("addEnvironment.cta", "Add Environment")}
-            </Button>
-            <Button
-              onClick={() => setCreateOpen(true)}
-              leftIcon={<Plus className="h-4 w-4" />}
-            >
-              {t("projects.createCta", "Create Project")}
-            </Button>
+            {/* Hidden for testers — the underlying mutation throws the
+                same error if it's reached another way (URL, programmatic
+                call, etc.). */}
+            {!isTester && (
+              <Button
+                variant="outline"
+                onClick={() => setAddEnvOpen(true)}
+                leftIcon={<Layers className="h-4 w-4" />}
+              >
+                {t("addEnvironment.cta", "Add Environment")}
+              </Button>
+            )}
+            {/* Create Project — also hidden for testers (read-only on
+                the workspace surface). The header is the easy case; the
+                harder one is `ProjectEmptyState` below, which surfaces
+                its own "Create Project" CTA when the project list is
+                empty. We gate that component the same way so testers
+                can't author a project through the empty state either. */}
+            {!isTester && (
+              <Button
+                onClick={() => setCreateOpen(true)}
+                leftIcon={<Plus className="h-4 w-4" />}
+              >
+                {t("projects.createCta", "Create Project")}
+              </Button>
+            )}
           </div>
         )}
       </header>

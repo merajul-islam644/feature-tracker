@@ -25,3 +25,4 @@ prompt/
 /projects-*.json
 /env-workflow-arrow-state.json
 /vite.config.js.bak
+docs/platform-bug-notifier-enumeration.md

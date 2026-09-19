@@ -15,6 +15,7 @@ import {
   useProjectFeatures,
   useProjectFlows,
 } from "@/lib/blocks/hooks";
+import { useIsRole } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
 import {
   CANONICAL_ENV_SLUGS,
@@ -186,6 +187,13 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
   const flowsQuery = useProjectFlows(projectId);
   const t = useT();
   const navigate = useNavigate();
+  // Testers can browse features and flows but cannot author features or
+  // rename envs. The underlying hooks throw the same error if reached
+  // another way — see `useCreateFeature` and `useRenameProjectEnv` in
+  // `hooks.ts`. We only hide the controls a tester would actually click
+  // ("Add Feature" + the rename-env pencil); "Add Flow" stays visible
+  // because the user's spec listed only feature creation as off-limits.
+  const isTester = useIsRole("tester");
 
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
@@ -278,15 +286,19 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
                   scaled down (`h-7 w-7`) to fit alongside the header
                   chip without crowding it. Disabled when no env is
                   mounted (the env-less /projects/:id landing) — there
-                  is nothing meaningful to rename in that case. */}
-              <button
-                type="button"
-                onClick={() => setRenameEnvOpen(true)}
-                aria-label={t("env.renameTitle", "Rename Environment")}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
+                  is nothing meaningful to rename in that case. Hidden
+                  entirely for testers; `useRenameProjectEnv` throws
+                  the same error if reached another way. */}
+              {!isTester && (
+                <button
+                  type="button"
+                  onClick={() => setRenameEnvOpen(true)}
+                  aria-label={t("env.renameTitle", "Rename Environment")}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
             </>
           )}
         </div>
@@ -313,12 +325,18 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
               >
                 {t("projectDetail.addFlow", "Add Flow")}
               </Button>
-              <Button
-                onClick={() => setAddFeatureOpen(true)}
-                leftIcon={<Plus className="h-4 w-4" />}
-              >
-                {t("projectDetail.addFeature", "Add Feature")}
-              </Button>
+              {/* Hidden for testers — `useCreateFeature` throws the same
+                  error if reached through any other path. "Add Flow"
+                  above stays available because the spec only listed
+                  feature creation as off-limits for testers. */}
+              {!isTester && (
+                <Button
+                  onClick={() => setAddFeatureOpen(true)}
+                  leftIcon={<Plus className="h-4 w-4" />}
+                >
+                  {t("projectDetail.addFeature", "Add Feature")}
+                </Button>
+              )}
             </>
           )}
         </div>
@@ -326,7 +344,12 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
 
       {features.length === 0 ? (
         envSlug === undefined || envSlug === "dev" ? (
-          <FeatureEmptyState onAdd={() => setAddFeatureOpen(true)} />
+          // Don't pass `onAdd` for testers — the empty state should
+          // not surface a CTA they can't act on. `useCreateFeature`
+          // throws if they reach it some other way.
+          <FeatureEmptyState
+            {...(!isTester ? { onAdd: () => setAddFeatureOpen(true) } : {})}
+          />
         ) : (
           // Non-dev envs show a read-only empty state when no features
           // exist there yet — features are authored under dev first,

@@ -70,9 +70,31 @@ export function Topbar() {
               <Avatar name={currentUser.name} size="md" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-44">
-            <DropdownMenuLabel className="capitalize">
-              {currentUser.name}
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="space-y-0.5">
+              <div className="truncate font-semibold capitalize text-foreground">
+                {currentUser.name}
+              </div>
+              {currentUser.email && (
+                <div
+                  className="truncate text-xs font-normal text-muted-foreground"
+                  title={currentUser.email}
+                >
+                  {currentUser.email}
+                </div>
+              )}
+              {currentUser.roles.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {currentUser.roles.map((r) => (
+                    <span
+                      key={r}
+                      className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+                    >
+                      {r}
+                    </span>
+                  ))}
+                </div>
+              )}
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem
