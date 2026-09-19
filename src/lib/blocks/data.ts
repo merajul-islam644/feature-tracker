@@ -47,6 +47,19 @@ export interface CloudFeature {
   // find sibling features in other envs. Undefined for source records and
   // pre-existing clones made before this feature shipped.
   clonedFromFeatureId?: string;
+  // OIDC `sub`s of users assigned to develop this feature. Populated
+  // from the "Assign Developers" multi-select on the Add Feature modal.
+  // A feature can be co-developed by any number of developers — empty
+  // array (or omitted) means unassigned. Per-env — different teams own
+  // different envs, so dev assignments do NOT cascade to cloned
+  // siblings in stg/uat/prod. The FeatureDetailsDrawer renders "—" when
+  // the array is empty or every entry is unrecognised.
+  developerIds?: string[];
+  // OIDC `sub`s of users assigned to QA this feature. Same array
+  // shape + per-env semantics as `developerIds`. Populated from the
+  // "Assign QAs" multi-select, which sources from users with the
+  // `tester` IAM role.
+  qaIds?: string[];
   CreatedDate: string;
   LastUpdatedDate: string;
   // Platform-managed audit fields. `CreatedBy` / `LastUpdatedBy` are the
@@ -143,6 +156,14 @@ export interface Feature {
   // when the dev feature is renamed or deleted. Optional — undefined for
   // source records and pre-existing clones.
   clonedFromFeatureId?: string;
+  // OIDC `sub`s of the assigned developers. See CloudFeature.developerIds
+  // for the per-env semantics and how empty / other-user arrays render in
+  // the details drawer. Replaces the single-value `developerId` field.
+  developerIds?: string[];
+  // OIDC `sub`s of the assigned QAs. See CloudFeature.qaIds for the
+  // per-env semantics and the "tester" role the multi-select is
+  // populated from. Replaces the single-value `qaId` field.
+  qaIds?: string[];
   createdAt: string;
   updatedAt: string;
   // IAM subject id (OIDC `sub`) of the user who created / last updated this
@@ -289,6 +310,8 @@ export function toFeature(f: CloudFeature, projectId: string): Feature {
     name: f.title,
     envSlug: f.envSlug,
     clonedFromFeatureId: f.clonedFromFeatureId,
+    developerIds: f.developerIds,
+    qaIds: f.qaIds,
     createdAt: f.CreatedDate,
     updatedAt: f.LastUpdatedDate,
     // Forward audit fields verbatim. `f.CreatedBy` / `f.LastUpdatedBy`
@@ -437,7 +460,13 @@ export const featuresCollection = blocksClient.data.collection<CloudFeature>("Fe
   // them, and ProjectInfoPage mirrors the same. Keep them aligned across
   // the three collections so future "Created by" surfaces inherit the
   // same plumbing.
-  fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "clonedFromFeatureId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  // `developerIds` / `qaIds` are the optional assignment arrays added by
+  // the "Assign Developers / Assign QAs" multi-selects on the Add Feature
+  // modal. They MUST be in the selector — same reason as CreatedBy:
+  // omitted fields are dropped from the read response AND from any
+  // filter the gateway might receive later. These are the multi-value
+  // replacements for the old `developerId` / `qaId` singular fields.
+  fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "clonedFromFeatureId", "developerIds", "qaIds", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
   // `CreatedBy` is included in the field list so the per-user filter at

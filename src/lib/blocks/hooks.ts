@@ -36,7 +36,7 @@ import {
   type Project,
   type ProjectCustomEnv,
 } from "./data";
-import { notifyRole } from "./notifier";
+import { notifyAssignedFeature, notifyRole } from "./notifier";
 import type { ChatSessionSummary } from "@/types/issue-tracker";
 
 // Pull the newly-created ItemId out of an `insert<Schema>` mutation envelope.
@@ -918,7 +918,21 @@ export function useCreateProject(): UseMutationResult<
 export function useCreateFeature(): UseMutationResult<
   Feature,
   Error,
-  { projectId: string; name: string; envSlug?: string }
+  {
+    projectId: string;
+    name: string;
+    envSlug?: string;
+    // OIDC `sub`s of the assigned developers. A feature can be
+    // co-developed by any number of users — empty array (or omitted)
+    // means unassigned. Forwarded verbatim to the cloud; the multi-
+    // select modal sends `undefined` when nothing is picked. Schema
+    // marks the field `requiredOn: 0` so absence is safe.
+    developerIds?: string[];
+    // OIDC `sub`s of the assigned QAs. Same array semantics as
+    // `developerIds`. Populated from the "Assign QAs" multi-select,
+    // which sources from users with the `tester` IAM role.
+    qaIds?: string[];
+  }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
@@ -938,6 +952,19 @@ export function useCreateFeature(): UseMutationResult<
           "Testers cannot create features. Ask a manager for access.",
         );
       }
+      // Build the assignment arrays. Empty arrays are sent through
+      // verbatim so the cloud stores an explicit "no one assigned"
+      // signal (the schema marks the field `requiredOn: 0` so
+      // absence and empty are both safe, but having them on the row
+      // makes the FeatureDetailsDrawer render "—" without a
+      // separate check).
+      const assignments: Record<string, string[]> = {};
+      if (input.developerIds !== undefined) {
+        assignments.developerIds = input.developerIds;
+      }
+      if (input.qaIds !== undefined) {
+        assignments.qaIds = input.qaIds;
+      }
       const created = await featuresCollection.create({
         title: input.name,
         projectId: input.projectId,
@@ -945,6 +972,7 @@ export function useCreateFeature(): UseMutationResult<
         // envSlug is optional — on the env-less project page it's omitted
         // and the record is created without one (legacy-compatible shape).
         ...(input.envSlug ? { envSlug: input.envSlug } : {}),
+        ...assignments,
       });
       // Same wire-shape fix as `useCreateProject` — see that hook's
       // comment for why the old `created.data ?? ...` cast was wrong.
@@ -961,6 +989,11 @@ export function useCreateFeature(): UseMutationResult<
         projectId: input.projectId,
         status: "backlog",
         envSlug: input.envSlug,
+        // Echo the assignment arrays onto the read-shape record so
+        // the optimistic placeholder + subsequent renders carry the
+        // same developer/QA list the cloud has.
+        developerIds: input.developerIds,
+        qaIds: input.qaIds,
         CreatedDate: now,
         LastUpdatedDate: now,
       };
@@ -974,18 +1007,28 @@ export function useCreateFeature(): UseMutationResult<
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
-      // Notify testers. `feature.id` (the server-issued id) is what the
-      // inbox uses as the subscription-filter `value` so future reads
-      // can pivot on it. Same fire-and-forget discipline as
-      // `useCreateProject` — a notifier hiccup never blocks the create.
-      // Targeted at testers because the actor IS a manager.
-      void notifyRole("tester", {
-        context: "feature",
-        actionName: "created",
-        value: feature.id,
-        projectId: vars.projectId,
+      // Notify the SPECIFIC users assigned to this feature — every
+      // entry in `developerIds` and every entry in `qaIds`. Targeted,
+      // not a role broadcast: a tester who wasn't picked for this
+      // feature does NOT receive a row in their inbox (the role-
+      // targeted `notifyRole("tester")` shape from the old path
+      // would have reached every user holding the tester role).
+      // `feature.id` (the server-issued id) is what the inbox uses as
+      // the subscription-filter `value` so future reads can pivot on
+      // it. Same fire-and-forget discipline as `useCreateProject` — a
+      // notifier hiccup never blocks the create.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.projectId);
+      void notifyAssignedFeature({
+        featureId: feature.id,
         featureName: vars.name,
+        projectId: vars.projectId,
+        projectName: project?.name,
         envSlug: vars.envSlug,
+        developerIds: vars.developerIds ?? [],
+        qaIds: vars.qaIds ?? [],
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {
@@ -1558,6 +1601,28 @@ export function useUpdateFlowStatus(): UseMutationResult<
       qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Notify testers on status chip change (Option C). The chip is
+      // the user's "what state is this test in?" surface, so a flip is
+      // exactly the kind of state change testers want to learn about.
+      // `vars.status` is the new value the cloud echoed back; `vars.name`
+      // is the flow title. Project name comes from the projects cache
+      // — we read it before invalidation runs in the next mutation.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.projectId);
+      void notifyRole("tester", {
+        context: "flow",
+        actionName: "status_changed",
+        value: vars.id,
+        projectId: vars.projectId,
+        projectName: project?.name,
+        flowName: vars.name,
+        status: vars.status,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }
@@ -1605,6 +1670,26 @@ export function useUpdateFlowStack(): UseMutationResult<
       qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Notify testers on stack chip change (Option C). Same shape as
+      // the status notification above; the `stack` field replaces
+      // `status` in the payload and the body builder picks it up
+      // because we discriminate on `actionName`.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.projectId);
+      void notifyRole("tester", {
+        context: "flow",
+        actionName: "stack_changed",
+        value: vars.id,
+        projectId: vars.projectId,
+        projectName: project?.name,
+        flowName: vars.name,
+        stack: vars.stack,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }
@@ -1678,13 +1763,24 @@ export function useUpdateProject(): UseMutationResult<
       // every state change, not just renames.
       const actorName = currentUser?.name ?? "A manager";
       if (vars.patch.name !== undefined) {
+        // Pull the prior name out of the cache so the rename payload
+        // actually carries `oldName !== newName`. Without this we were
+        // emitting `oldName: vars.patch.name` which is *the new name*
+        // — a no-op rename showed up in the inbox as a rename with
+        // identical from/to, and a real rename carried only the new
+        // name once the server's required-field strip kicked in.
+        const cached = qc.getQueryData<Project>(
+          queryKeys.project(userId, project.id),
+        );
+        const oldName =
+          typeof cached?.name === "string" ? cached.name : vars.patch.name;
         void notifyRole("tester", {
           context: "project",
           actionName: "renamed",
           value: project.id,
           projectId: project.id,
           projectName: project.name,
-          oldName: vars.patch.name,
+          oldName,
           newName: project.name,
           actorName,
           actorId: userId,
@@ -1903,6 +1999,27 @@ export function useCloneFlow(): UseMutationResult<
         ],
       });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Notify testers on cross-env clone (Option C). `vars.flow` is the
+      // source flow (with its pre-clone env), `vars.targetEnvSlug` is
+      // the destination env the user picked from the chip. The body
+      // builder uses `envSlug` to render "to environment 'uat'" — so we
+      // send the destination env, not the source's env.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.flow.projectId);
+      void notifyRole("tester", {
+        context: "flow",
+        actionName: "cloned",
+        value: vars.flow.id,
+        projectId: vars.flow.projectId,
+        projectName: project?.name,
+        flowName: vars.flow.name,
+        envSlug: vars.targetEnvSlug,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
     },
   });
 }

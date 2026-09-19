@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/sheet";
 import { useAuth } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
+import { lookupUserById } from "@/lib/blocks/users";
 import type { Feature } from "@/lib/blocks/data";
 
 interface FeatureDetailsDrawerProps {
@@ -52,40 +53,138 @@ function Field({
   );
 }
 
-// Render a user-reference (createdBy / updatedBy) in a way that scales:
-// when the id matches the signed-in user we render a friendly "You"
-// chip with the user's display name as a tooltip; otherwise we fall
-// back to the raw subject id in mono so any audit-style consumer can
-// still read it. Missing ids render "—" via the same path other
-// optional fields use.
+// Render a user-reference (createdBy / updatedBy / assigned
+// developer / assigned QA) so audit-style fields show a friendly
+// name + email when we have it, and degrade gracefully otherwise.
+//
+// Resolution priority:
+//   1. If `userId` matches the signed-in user we render a "You" badge
+//      using `currentUserName` / `currentUserEmail` from `useAuth()`.
+//   2. If `userId` resolves via `lookupUserById()` (the hardcoded IAM
+//      roster — see `users.ts`) we render the friendly `resolvedName`
+//      + `resolvedEmail` from the lookup result.
+//   3. Otherwise we fall back to the raw OIDC `sub` in mono, so an
+//      audit-style reader can still copy/paste the id when the roster
+//      doesn't yet know about that user.
+//
+// Missing ids render "—" via the same path other optional fields use.
 function UserChip({
   userId,
   youLabel,
   currentUserId,
   currentUserName,
+  currentUserEmail,
+  resolvedName,
+  resolvedEmail,
 }: {
   userId?: string;
   youLabel: string;
   currentUserId?: string;
   currentUserName?: string;
+  currentUserEmail?: string;
+  resolvedName?: string;
+  resolvedEmail?: string;
 }) {
   if (!userId) {
     return <span className="text-muted-foreground">—</span>;
   }
-  if (currentUserId && userId === currentUserId) {
+  const isCurrentUser = !!currentUserId && userId === currentUserId;
+  // Compose the visible name/email. "You" case draws from the auth
+  // context; other users draw from the hardcoded roster. Either path
+  // is optional — when neither is available we fall through to the
+  // mono-id fallback below.
+  const visibleName = isCurrentUser ? currentUserName : resolvedName;
+  const visibleEmail = isCurrentUser ? currentUserEmail : resolvedEmail;
+  if (!visibleName && !visibleEmail) {
     return (
-      <span
-        title={currentUserName}
-        className="inline-flex items-center rounded-full border border-border bg-muted px-1.5 py-0.5 text-xs font-medium text-foreground"
-      >
-        {youLabel}
+      <span className="break-all font-mono text-xs" title={userId}>
+        {userId}
       </span>
     );
   }
+  // Two-line name-on-top, mailto-below layout. The "You" badge rides
+  // above only when the reference matches the signed-in user; for
+  // any other user we drop the badge (it's redundant with the name)
+  // and let the name stand alone.
   return (
-    <span className="break-all font-mono text-xs" title={userId}>
-      {userId}
-    </span>
+    <div className="space-y-0.5">
+      {isCurrentUser && (
+        <span
+          title={currentUserName}
+          className="inline-flex items-center rounded-full border border-border bg-muted px-1.5 py-0.5 text-xs font-medium text-foreground"
+        >
+          {youLabel}
+        </span>
+      )}
+      {visibleName && (
+        <div className="text-sm font-medium text-foreground">
+          {visibleName}
+        </div>
+      )}
+      {visibleEmail && (
+        <a
+          href={`mailto:${visibleEmail}`}
+          className="block break-all text-xs text-muted-foreground hover:underline"
+        >
+          {visibleEmail}
+        </a>
+      )}
+    </div>
+  );
+}
+
+// Render a list of user references — used for "Assigned developers"
+// / "Assigned QAs" fields which carry `string[]` (multiple co-
+// developers / co-QAs per feature). Each entry resolves through the
+// same `UserChip` so name + email renders identically, with one chip
+// per assignee. Empty array renders the same "—" as a missing scalar
+// field. Multiple chips stack vertically with a thin gap so the
+// drawer doesn't widen to fit a long email address mid-row.
+function UserChipList({
+  userIds,
+  youLabel,
+  currentUserId,
+  currentUserName,
+  currentUserEmail,
+  resolveName,
+  resolveEmail,
+}: {
+  userIds: string[];
+  youLabel: string;
+  currentUserId?: string;
+  currentUserName?: string;
+  currentUserEmail?: string;
+  /**
+   * Lookup function: given an id, return the friendly name + email
+   * (or `undefined`). Wired this way (instead of taking a map) so
+   * callers don't have to build a per-render map and so a missing
+   * UserOption falls through to the mono-id fallback inside
+   * `UserChip` automatically.
+   */
+  resolveName: (id: string) => string | undefined;
+  resolveEmail: (id: string) => string | undefined;
+}) {
+  if (userIds.length === 0) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  return (
+    <div className="space-y-2">
+      {userIds.map((id) => {
+        const isCurrentUser = !!currentUserId && id === currentUserId;
+        return (
+          <UserChip
+            key={id}
+            userId={id}
+            youLabel={youLabel}
+            currentUserId={currentUserId}
+            currentUserName={isCurrentUser ? currentUserName : undefined}
+            currentUserEmail={isCurrentUser ? currentUserEmail : undefined}
+            resolvedName={isCurrentUser ? undefined : resolveName(id)}
+            resolvedEmail={isCurrentUser ? undefined : resolveEmail(id)}
+          />
+        );
+      })}
+    </div>
   );
 }
 
@@ -97,13 +196,30 @@ export function FeatureDetailsDrawer({
   statusCounts,
 }: FeatureDetailsDrawerProps) {
   const t = useT();
-  // We don't have a user directory to look up other authors by id, so
-  // the "Created by / Updated by" fields render the raw IAM subject
-  // (OIDC `sub`) in mono — except when the id matches the signed-in
-  // user, in which case we swap in a friendly "You" label with the
-  // user's display name as a tooltip. The fallback "—" kicks in for
-  // pre-audit records where the cloud returned neither field.
   const { currentUser } = useAuth();
+  // Resolve every user-reference on the feature to a friendly
+  // name + email against the hardcoded IAM roster
+  // (`HARDCODED_USER_BY_ID` — see `users.ts`). When an id matches
+  // the signed-in user, `UserChip` / `UserChipList` draw name/email
+  // from the auth context instead so a sign-out doesn't
+  // temporarily blank the field during the IAM fetch. Unknown ids
+  // fall through to the raw OIDC `sub` mono-id fallback inside
+  // `UserChip`.
+  //
+  // Assignment fields are arrays now (`developerIds` / `qaIds`) —
+  // the same UserOption rosters supply per-id lookups; we expose
+  // them as resolver functions to keep `UserChipList` generic.
+  const developerIds = feature.developerIds ?? [];
+  const qaIds = feature.qaIds ?? [];
+  const developerName = (id: string) => lookupUserById(id)?.name;
+  const developerEmail = (id: string) => lookupUserById(id)?.email;
+  const qaName = (id: string) => lookupUserById(id)?.name;
+  const qaEmail = (id: string) => lookupUserById(id)?.email;
+  // Single-id audit lookups (Created by / Updated by) still go
+  // through the same mapper — both audit fields are single ids,
+  // not arrays.
+  const createdByUser = lookupUserById(feature.createdBy);
+  const updatedByUser = lookupUserById(feature.updatedBy);
 
   return (
     <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
@@ -175,6 +291,9 @@ export function FeatureDetailsDrawer({
                 youLabel={t("featureItem.details.you", "You")}
                 currentUserId={currentUser?.id}
                 currentUserName={currentUser?.name}
+                currentUserEmail={currentUser?.email}
+                resolvedName={createdByUser?.name}
+                resolvedEmail={createdByUser?.email}
               />
             </Field>
             <Field label={t("featureItem.details.updatedBy", "Updated by")}>
@@ -183,6 +302,40 @@ export function FeatureDetailsDrawer({
                 youLabel={t("featureItem.details.you", "You")}
                 currentUserId={currentUser?.id}
                 currentUserName={currentUser?.name}
+                currentUserEmail={currentUser?.email}
+                resolvedName={updatedByUser?.name}
+                resolvedEmail={updatedByUser?.email}
+              />
+            </Field>
+            {/* Assignment fields — populated by the Assign-a-Developer
+                and Assign-a-QA dropdowns on the Add Feature modal.
+                Render the same UserChip pattern as Created/Updated by
+                so a manager assigned to their own feature sees "You"
+                with their name + email below, and any other assignee
+                resolves to friendly name + email from the hardcoded
+                IAM roster. Unknown ids fall back to the mono id. */}
+            <Field
+              label={t("featureItem.details.developer", "Assigned developers")}
+            >
+              <UserChipList
+                userIds={developerIds}
+                youLabel={t("featureItem.details.you", "You")}
+                currentUserId={currentUser?.id}
+                currentUserName={currentUser?.name}
+                currentUserEmail={currentUser?.email}
+                resolveName={developerName}
+                resolveEmail={developerEmail}
+              />
+            </Field>
+            <Field label={t("featureItem.details.qa", "Assigned QAs")}>
+              <UserChipList
+                userIds={qaIds}
+                youLabel={t("featureItem.details.you", "You")}
+                currentUserId={currentUser?.id}
+                currentUserName={currentUser?.name}
+                currentUserEmail={currentUser?.email}
+                resolveName={qaName}
+                resolveEmail={qaEmail}
               />
             </Field>
           </dl>

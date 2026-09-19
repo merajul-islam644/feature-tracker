@@ -10,6 +10,7 @@ import { ProfilePage } from "@/pages/ProfilePage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { IssueTrackerPage } from "@/pages/IssueTrackerPage";
 import { ProjectInfoPage } from "@/pages/ProjectInfoPage";
+import { NotificationDetailPage } from "@/pages/NotificationDetailPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { RequireAuth } from "@/hooks/useAuth";
 import { PlaywrightPage } from "./playwright/PlaywrightPage";
@@ -54,6 +55,10 @@ export default function App() {
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/issue-tracker" element={<IssueTrackerPage />} />
+            <Route
+              path="/notifications/:notificationId"
+              element={<NotificationDetailPage />}
+            />
             <Route path="/repo-browser" element={<RepoBrowserPage />} />
             <Route path="/test-runner" element={<PlaywrightPage />} />
           </Route>
