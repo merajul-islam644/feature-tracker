@@ -91,7 +91,8 @@ export function ChatPanel({
   const isEmpty = messages.length <= 1; // just the greeting
 
   const currentSessionName =
-    sessions.find((s) => s.id === currentSessionId)?.title ?? "New session";
+    sessions.find((s) => s.sessionId === currentSessionId)?.title ??
+    "New session";
 
   return (
     <Card className="flex h-full flex-col overflow-hidden border-0 bg-card shadow-none">
