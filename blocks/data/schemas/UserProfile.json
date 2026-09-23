@@ -1,0 +1,10 @@
+{
+  "schemaName": "UserProfile",
+  "collectionName": "blx_UserProfiles",
+  "schemaType": 1,
+  "description": "Per-user profile extras the IAM record doesn't carry. Today that's the profile picture: the image bytes live in Blocks Data Storage (files) and this row maps an IAM user id to the uploaded file's id, so every avatar surface in the app can resolve userId → picture. One row per user (upsert by the app layer).",
+  "fields": [
+    { "name": "userId", "type": "String", "requiredOn": 3, "description": "IAM user id (OIDC `sub`) this profile belongs to. The app layer treats it as unique — upsert semantics, not append." },
+    { "name": "imageFileId", "type": "String", "requiredOn": 0, "description": "Blocks Data Storage file id of the user's profile picture (returned by the presign/upload flow). Empty while the user hasn't uploaded one — surfaces render the initials fallback." }
+  ]
+}

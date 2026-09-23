@@ -1,0 +1,27 @@
+{
+  "schemaName": "Issue",
+  "collectionName": "blx_Issues",
+  "schemaType": 1,
+  "description": "Defect detected during a verification run. Scoped per user — runs surface issues created by the agent. Free-form text fields (description / expected / actual / reproduction steps) sit alongside structured severity / status / category enums.",
+  "fields": [
+    { "name": "title", "type": "String", "requiredOn": 3, "description": "Short issue title." },
+    { "name": "applicationName", "type": "String", "requiredOn": 3, "description": "Target application the issue belongs to (e.g. 'MailCraft')." },
+    { "name": "url", "type": "String", "requiredOn": 3, "description": "Page or endpoint where the issue was detected." },
+    { "name": "category", "type": "String", "requiredOn": 3, "description": "authentication | authorization | navigation | ui | functional | forms | api | performance | accessibility | other." },
+    { "name": "severity", "type": "String", "requiredOn": 3, "description": "critical | high | medium | low." },
+    { "name": "status", "type": "String", "requiredOn": 3, "description": "open | investigating | confirmed | fixed | resolved | wont_fix | ignored | reopened." },
+    { "name": "description", "type": "String", "requiredOn": 0, "description": "Long-form description of the defect." },
+    { "name": "expected", "type": "String", "requiredOn": 0, "description": "Expected behaviour." },
+    { "name": "actual", "type": "String", "requiredOn": 0, "description": "Actual behaviour observed." },
+    { "name": "reproductionStepsJson", "type": "String", "requiredOn": 0, "description": "JSON-encoded string[] of ordered reproduction steps." },
+    { "name": "evidenceJson", "type": "String", "requiredOn": 0, "description": "JSON-encoded Evidence[] (type/label/value/timestamp/storageRef). Stringified so the row fits the Blocks Data primitive-only field types." },
+    { "name": "detectedAt", "type": "String", "requiredOn": 3, "description": "ISO timestamp of detection. Used as the default sort key." },
+    { "name": "verificationRunId", "type": "String", "requiredOn": 0, "description": "ID of the verification run that first surfaced the issue. Optional so legacy/test rows can exist without a run linkage." },
+    { "name": "fingerprint", "type": "String", "requiredOn": 0, "description": "Stable dedup key: hash of origin+pathname | category | normalized title (digits collapsed to '#'). Same defect re-detected across runs matches here instead of creating a duplicate row. Empty on legacy rows created before fingerprinting." },
+    { "name": "occurrenceCount", "type": "String", "requiredOn": 0, "description": "How many runs have re-detected this defect (numeric string — Blocks Data stores primitives only). '1' on first detection." },
+    { "name": "lastSeenAt", "type": "String", "requiredOn": 0, "description": "ISO timestamp of the most recent detection. Distinct from detectedAt, which stays frozen at first detection." },
+    { "name": "seenInRunIdsJson", "type": "String", "requiredOn": 0, "description": "JSON-encoded string[] of verification run ids that detected this defect, newest last, capped to keep the row small." },
+    { "name": "assignedDeveloperIdsJson", "type": "String", "requiredOn": 0, "description": "JSON-encoded string[] of OIDC subs of the developers this issue is assigned to (multi-select from the issue-group dropdown). Empty while unassigned." },
+    { "name": "approvedById", "type": "String", "requiredOn": 0, "description": "OIDC sub of the tester who manually re-tested and approved this issue after the AI verification run. Empty while unapproved — only approved issues are assignable to developers." }
+  ]
+}

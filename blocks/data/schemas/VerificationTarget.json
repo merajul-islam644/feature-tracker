@@ -1,0 +1,15 @@
+{
+  "schemaName": "VerificationTarget",
+  "collectionName": "blx_VerificationTargets",
+  "schemaType": 1,
+  "description": "One configured application URL that the Issue Tracker verifies. Scoped per user so each account tracks its own set of URLs; mutating hooks gate on the manager role.",
+  "fields": [
+    { "name": "applicationName", "type": "String", "requiredOn": 3, "description": "Display name shown in the UI (MailCraft, IAM, etc.)." },
+    { "name": "url", "type": "String", "requiredOn": 3, "description": "Application URL — must be http(s); validated in the form layer." },
+    { "name": "environment", "type": "String", "requiredOn": 3, "description": "production | staging | development | preview." },
+    { "name": "credentialId", "type": "String", "requiredOn": 0, "description": "Optional Secret.ItemId used to log into the target during verification." },
+    { "name": "enabled", "type": "String", "requiredOn": 3, "description": "true | false. Stored as a string because Blocks Data schema fields are primitives — the adapter coerces to boolean." },
+    { "name": "lastVerifiedAt", "type": "String", "requiredOn": 0, "description": "ISO timestamp of the last completed verification run on this target." },
+    { "name": "lastStatus", "type": "String", "requiredOn": 0, "description": "TargetStatus of the most recent run (healthy / issues_found / verification_failed / …)." }
+  ]
+}

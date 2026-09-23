@@ -1,0 +1,13 @@
+{
+  "schemaName": "DirectMessage",
+  "collectionName": "blx_DirectMessages",
+  "schemaType": 1,
+  "description": "One direct message between two members of the workspace. A row is written once by the sender and read by the recipient through the `recipientId` filter (rules.json keeps the collection readable workspace-wide). `readAt` is stamped by the recipient's client to drive unread badges and read ticks; it stays empty until then.",
+  "fields": [
+    { "name": "senderId", "type": "String", "requiredOn": 3, "description": "IAM sub of the sender. Duplicates the platform's CreatedBy audit field, but an explicit column keeps the filter + selector self-documenting and immune to rows with a null CreatedBy." },
+    { "name": "recipientId", "type": "String", "requiredOn": 3, "description": "IAM sub of the recipient — the inbox filter key (`recipientId: me`)." },
+    { "name": "content", "type": "String", "requiredOn": 0, "description": "Message text. Optional so an image-only message (attachmentFileId set, content empty) is a valid row — the bubble renders the attachment in place of text in that case. Roster previews fall back to a localized 'Image' label when content is empty." },
+    { "name": "readAt", "type": "String", "requiredOn": 0, "description": "ISO timestamp set by the recipient's client when the message is seen; empty string while unread." },
+    { "name": "attachmentFileId", "type": "String", "requiredOn": 0, "description": "Blocks Data Storage file id of an optional image attached to this message (returned by the presign/PUT flow used for profile pictures). Empty string when the message has no attachment. Receivers render the image via files.get on this id." }
+  ]
+}

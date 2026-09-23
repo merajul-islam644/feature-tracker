@@ -1,0 +1,10 @@
+{
+  "schemaName": "Announcement",
+  "collectionName": "blx_Announcements",
+  "schemaType": 1,
+  "description": "Workspace-wide announcement posted by a manager on the Dashboard. Every invited member reads this collection; posting is gated to the manager role in the app (the composer only renders for managers). Newest-first ordering comes from CreatedDate.",
+  "fields": [
+    { "name": "authorId", "type": "String", "requiredOn": 3, "description": "IAM sub of the posting manager. Duplicates CreatedBy for the same self-documenting reason as DirectMessage.senderId — explicit column, explicit filter." },
+    { "name": "content", "type": "String", "requiredOn": 3, "description": "Announcement text, e.g. 'Hello team, today we are going to prod'." }
+  ]
+}
