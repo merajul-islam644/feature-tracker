@@ -100,6 +100,33 @@
     animation: sidebar-close 0.2s ease-out;
   }
 
+  /* Feature row collapse/expand. The wrapper reads its target
+     height from the `--feature-content-height` CSS variable, which
+     the React effect in FeatureItem writes from the inner
+     scrollHeight. Two keyframes (one per direction) so the
+     transition reads naturally both ways — when the user opens the
+     row from a previously known height, the height snaps to that
+     variable on next render and `feature-expand` plays from 0 →
+     that pixel value. Conversely on close, the wrapper holds the
+     last measured height for one frame so `feature-collapse` can
+     play from pixels → 0 instead of jumping to 0 first and never
+     animating. The 200ms ease-out mirrors the sidebar and Radix
+     accordion timings so the app's motion language stays uniform.
+     `animation-fill-mode: forwards` keeps the end state stuck —
+     without it the height reverts to its intrinsic value (208px of
+     content) after the animation finishes, leaving the panel open
+     while looking collapsed because the 30% muted background
+     barely shows on white. The closed-state rule also hard-sets
+     `height: 0` so the wrapper is genuinely collapsed before the
+     first animation tick (or if animations are disabled). */
+  .feature-collapse-wrapper[data-state="open"] {
+    animation: feature-expand 0.2s ease-out forwards;
+  }
+  .feature-collapse-wrapper[data-state="closed"] {
+    height: 0;
+    animation: feature-collapse 0.2s ease-out forwards;
+  }
+
   .sr-only {
     position: absolute;
     width: 1px;
@@ -110,5 +137,23 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border-width: 0;
+  }
+}
+
+@keyframes feature-expand {
+  from {
+    height: 0;
+  }
+  to {
+    height: var(--feature-content-height, 0);
+  }
+}
+
+@keyframes feature-collapse {
+  from {
+    height: var(--feature-content-height, 0);
+  }
+  to {
+    height: 0;
   }
 }

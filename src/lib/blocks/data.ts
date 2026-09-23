@@ -60,6 +60,12 @@ export interface CloudFeature {
   // "Assign QAs" multi-select, which sources from users with the
   // `tester` IAM role.
   qaIds?: string[];
+  // Optional GitHub URL — issue, PR, or repo path — associated with
+  // this feature. Free-form string; no validation enforced at the
+  // data layer (the AddFeatureModal adds an `https://` prefix when
+  // the user omits the scheme). Rendered as a clickable external
+  // link in `FeatureDetailsDrawer`.
+  githubLink?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   // Platform-managed audit fields. `CreatedBy` / `LastUpdatedBy` are the
@@ -106,6 +112,108 @@ export interface CloudChatMessage {
   role: string;
   content: string;
   actionsJson?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+// Direct (member-to-member) messages. Unlike ChatMessage (a user's private
+// thread with the AI assistant), these rows are WRITTEN by the sender but
+// READ by the recipient — so the list hooks filter on `senderId` /
+// `recipientId` columns instead of the platform's CreatedBy. `readAt` rides
+// as a plain string ("" while unread) because Blocks Data fields are
+// primitives.
+export interface CloudDirectMessage {
+  ItemId: string;
+  senderId: string;
+  recipientId: string;
+  content: string;
+  readAt?: string;
+  attachmentFileId?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+// Manager announcements shown on the Dashboard. Written by a manager,
+// read by EVERY workspace member — no per-user filter on the read path.
+// Posting is gated client-side (manager role), mirroring the tester
+// guards on the project mutations.
+export interface CloudAnnouncement {
+  ItemId: string;
+  authorId: string;
+  content: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+// --- Issue Tracker cloud shapes --------------------------------------------
+//
+// The Issue Tracker feature keeps its per-user data in three separate
+// collections so each row can be filtered, mutated, and permission-gated
+// independently. Targets (configured URLs) and secrets (credentials) are
+// each their own collection because their mutating hooks carry different
+// role gates; issues are their own collection so per-run provenance and
+// per-row status edits stay atomic.
+//
+// `enabled` rides the wire as `"true"` / `"false"` (Blocks Data fields are
+// primitives — there's no native boolean), and `evidence` /
+// `reproductionSteps` ride as JSON-encoded strings for the same reason.
+// The adapter functions on the UI side handle the coercion.
+
+export interface CloudVerificationTarget {
+  ItemId: string;
+  applicationName: string;
+  url: string;
+  environment: string;
+  credentialId?: string;
+  // `String` of "true" | "false" — see the adapter for the boolean rehydrate.
+  enabled: string;
+  lastVerifiedAt?: string;
+  lastStatus?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+export interface CloudSecret {
+  ItemId: string;
+  name: string;
+  email: string;
+  passwordMasked: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+export interface CloudIssue {
+  ItemId: string;
+  title: string;
+  applicationName: string;
+  url: string;
+  category: string;
+  severity: string;
+  status: string;
+  description?: string;
+  expected?: string;
+  actual?: string;
+  reproductionStepsJson?: string;
+  evidenceJson?: string;
+  detectedAt: string;
+  verificationRunId?: string;
+  // Dedup identity + recurrence stats (numeric strings on the wire —
+  // Blocks Data only stores primitives). Absent on pre-fingerprint rows.
+  fingerprint?: string;
+  occurrenceCount?: string;
+  lastSeenAt?: string;
+  seenInRunIdsJson?: string;
+  // Developer triage (multi-assign) — set from the issue-group dropdown.
+  // Empty while unassigned; absent on rows created before the field existed.
+  assignedDeveloperIdsJson?: string;
+  // Tester approval — OIDC sub of the tester who re-tested and approved.
+  // Empty while unapproved; absent on rows created before the field existed.
+  approvedById?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
@@ -164,6 +272,10 @@ export interface Feature {
   // per-env semantics and the "tester" role the multi-select is
   // populated from. Replaces the single-value `qaId` field.
   qaIds?: string[];
+  // Optional GitHub URL the manager attached to this feature in the
+  // AddFeatureModal. Empty/undefined → drawer hides the row entirely
+  // rather than rendering a broken-link placeholder.
+  githubLink?: string;
   createdAt: string;
   updatedAt: string;
   // IAM subject id (OIDC `sub`) of the user who created / last updated this
@@ -312,6 +424,13 @@ export function toFeature(f: CloudFeature, projectId: string): Feature {
     clonedFromFeatureId: f.clonedFromFeatureId,
     developerIds: f.developerIds,
     qaIds: f.qaIds,
+    // `githubLink` is optional on the cloud record (the schema marks
+    // `requiredOn: 0`). Normalize empty strings to `undefined` so the
+    // Feature Details drawer doesn't render an empty row + a broken
+    // `https://` link.
+    githubLink: typeof f.githubLink === "string" && f.githubLink.trim() !== ""
+      ? f.githubLink.trim()
+      : undefined,
     createdAt: f.CreatedDate,
     updatedAt: f.LastUpdatedDate,
     // Forward audit fields verbatim. `f.CreatedBy` / `f.LastUpdatedBy`
@@ -365,6 +484,192 @@ export function toFlow(fl: CloudFlow, projectId: string): Flow {
   };
 }
 
+// --- Issue Tracker adapters -------------------------------------------------
+//
+// These take a Cloud-shape record (camelCase platform fields + JSON-string
+// blobs) and return the matching UI `Issue` / `Secret` / `VerificationTarget`
+// shapes from `src/types/issue-tracker.ts`. Keeping the wire ↔ UI translation
+// in one place means call sites never have to know about the
+// `"true"/"false"` boolean-as-string quirk or the JSON encoding.
+
+import type {
+  Evidence,
+  Issue,
+  IssueCategory,
+  IssueSeverity,
+  IssueStatus,
+  Secret,
+  TargetEnvironment,
+  TargetStatus,
+  VerificationTarget,
+} from "@/types/issue-tracker";
+
+// Narrow union helpers — used by the adapters to safely coerce free-form
+// `String` cloud fields into the typed enums the UI consumes. Unknown
+// values fall through to the documented defaults so legacy or
+// hand-edited rows don't break the page.
+const TARGET_ENV_VALUES: readonly TargetEnvironment[] = [
+  "production",
+  "staging",
+  "development",
+  "preview",
+];
+const TARGET_STATUS_VALUES: readonly TargetStatus[] = [
+  "not_verified",
+  "queued",
+  "verifying",
+  "healthy",
+  "issues_found",
+  "verification_failed",
+  "authentication_failed",
+  "unreachable",
+  "completed",
+];
+const ISSUE_SEVERITY_VALUES: readonly IssueSeverity[] = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+];
+const ISSUE_STATUS_VALUES: readonly IssueStatus[] = [
+  "open",
+  "investigating",
+  "confirmed",
+  "fixed",
+  "resolved",
+  "wont_fix",
+  "ignored",
+  "reopened",
+];
+const ISSUE_CATEGORY_VALUES: readonly IssueCategory[] = [
+  "authentication",
+  "authorization",
+  "navigation",
+  "ui",
+  "functional",
+  "forms",
+  "api",
+  "performance",
+  "accessibility",
+  "other",
+];
+
+function narrowOr<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : fallback;
+}
+
+function narrowOrUndefined<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): T | undefined {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : undefined;
+}
+
+// Reparse a JSON-encoded blob into a narrow shape; corrupt / missing
+// payloads surface as `undefined` so the UI side keeps the field empty
+// instead of throwing. Mirrors the `toChatMessage` `actionsJson` and
+// `toProject` `customEnvs` graceful fallbacks.
+function parseJsonArray<T>(raw: string | undefined): T[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as T[];
+  } catch {
+    // Corrupt blob — drop it but keep the parent record.
+  }
+  return undefined;
+}
+
+export function toVerificationTarget(
+  t: CloudVerificationTarget,
+): VerificationTarget {
+  return {
+    id: t.ItemId,
+    applicationName: t.applicationName ?? "",
+    url: t.url ?? "",
+    environment: narrowOr<TargetEnvironment>(
+      t.environment,
+      TARGET_ENV_VALUES,
+      "production",
+    ),
+    credentialId: t.credentialId ?? null,
+    // `enabled` rides the wire as `"true"/"false"` — coerce so the UI
+    // gets a real boolean without the consumer knowing the wire quirk.
+    enabled: String(t.enabled ?? "true").toLowerCase() !== "false",
+    lastVerifiedAt: t.lastVerifiedAt ?? null,
+    lastStatus: narrowOrUndefined<TargetStatus>(t.lastStatus, TARGET_STATUS_VALUES) ?? null,
+    createdAt: t.CreatedDate,
+    updatedAt: t.LastUpdatedDate,
+  };
+}
+
+export function toSecret(s: CloudSecret): Secret {
+  return {
+    id: s.ItemId,
+    name: s.name ?? "",
+    email: s.email ?? "",
+    passwordMasked: s.passwordMasked ?? "••••••••••",
+    createdAt: s.CreatedDate,
+    updatedAt: s.LastUpdatedDate,
+  };
+}
+
+export function toIssue(i: CloudIssue): Issue {
+  // Evidence + reproductionSteps stay independent — losing one (corrupt
+  // blob) shouldn't blank the other. `optional` fields fall back to
+  // undefined so the optional typing on `Issue` is preserved.
+  const evidence = parseJsonArray<Evidence>(i.evidenceJson);
+  const reproductionSteps = parseJsonArray<string>(i.reproductionStepsJson);
+  const seenInRunIds = parseJsonArray<string>(i.seenInRunIdsJson);
+  return {
+    id: i.ItemId,
+    title: i.title ?? "",
+    applicationName: i.applicationName ?? "",
+    url: i.url ?? "",
+    category: narrowOr<IssueCategory>(
+      i.category,
+      ISSUE_CATEGORY_VALUES,
+      "other",
+    ),
+    severity: narrowOr<IssueSeverity>(
+      i.severity,
+      ISSUE_SEVERITY_VALUES,
+      "low",
+    ),
+    status: narrowOr<IssueStatus>(
+      i.status,
+      ISSUE_STATUS_VALUES,
+      "open",
+    ),
+    description: i.description ?? "",
+    expected: i.expected,
+    actual: i.actual,
+    reproductionSteps,
+    evidence,
+    detectedAt: i.detectedAt ?? i.CreatedDate,
+    verificationRunId: i.verificationRunId,
+    fingerprint: i.fingerprint,
+    // Numeric-on-the-wire → number; absent stays undefined so
+    // `occurrenceCount ?? 1` reads correctly for legacy rows.
+    occurrenceCount: i.occurrenceCount
+      ? Number(i.occurrenceCount) || undefined
+      : undefined,
+    lastSeenAt: i.lastSeenAt,
+    seenInRunIds,
+    assignedDeveloperIds: parseJsonArray<string>(i.assignedDeveloperIdsJson),
+    // Absent/empty stays undefined so `!!issue.approvedById` gates cleanly.
+    approvedById: i.approvedById || undefined,
+  };
+}
+
 // --- Chat adapter -----------------------------------------------------------
 //
 // `actionsJson` is the JSON-serialised `ChatAction[]` because the Blocks Data
@@ -403,6 +708,83 @@ export function toChatMessage(c: CloudChatMessage): PersistedChatMessage {
     content: c.content ?? "",
     timestamp: c.CreatedDate,
     actions,
+  };
+}
+
+// --- Direct message adapter ---------------------------------------------------
+
+export interface DirectMessage {
+  id: string;
+  senderId: string;
+  recipientId: string;
+  content: string;
+  sentAt: string;
+  /** ISO timestamp once the recipient has seen it; null while unread. */
+  readAt: string | null;
+  /** Blocks Data Storage file id of an optional image attachment. Null when
+   * the message is text-only — receivers render an inline thumb via
+   * useFileDownloadUrl(fileId) only when this is a non-empty string. */
+  attachmentFileId: string | null;
+}
+
+export function toDirectMessage(c: CloudDirectMessage): DirectMessage {
+  return {
+    id: c.ItemId,
+    senderId: c.senderId ?? "",
+    recipientId: c.recipientId ?? "",
+    content: c.content ?? "",
+    sentAt: c.CreatedDate,
+    readAt: c.readAt || null,
+    attachmentFileId: c.attachmentFileId || null,
+  };
+}
+
+// --- Announcement adapter -----------------------------------------------------
+
+export interface Announcement {
+  id: string;
+  authorId: string;
+  content: string;
+  postedAt: string;
+}
+
+export function toAnnouncement(c: CloudAnnouncement): Announcement {
+  return {
+    id: c.ItemId,
+    authorId: c.authorId ?? "",
+    content: c.content ?? "",
+    postedAt: c.CreatedDate,
+  };
+}
+
+// --- Profile picture adapter --------------------------------------------------
+//
+// The user's profile picture bytes live in Blocks Data Storage (files); this
+// row only maps an IAM user id to the uploaded file's id, so every avatar
+// surface (chat roster, thread header, announcements, members grid, topbar)
+// can resolve userId → picture with a single workspace-wide list call.
+export interface CloudUserProfile {
+  ItemId: string;
+  userId: string;
+  imageFileId?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+export interface UserProfilePic {
+  /** Row id — needed for the update leg of the upload upsert. */
+  id: string;
+  userId: string;
+  /** Blocks Data Storage file id of the picture; null while unset. */
+  imageFileId: string | null;
+}
+
+export function toUserProfilePic(c: CloudUserProfile): UserProfilePic {
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    imageFileId: c.imageFileId || null,
   };
 }
 
@@ -466,7 +848,7 @@ export const featuresCollection = blocksClient.data.collection<CloudFeature>("Fe
   // omitted fields are dropped from the read response AND from any
   // filter the gateway might receive later. These are the multi-value
   // replacements for the old `developerId` / `qaId` singular fields.
-  fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "clonedFromFeatureId", "developerIds", "qaIds", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "clonedFromFeatureId", "developerIds", "qaIds", "githubLink", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
   // `CreatedBy` is included in the field list so the per-user filter at
@@ -483,6 +865,99 @@ export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
 export const chatMessagesCollection = blocksClient.data.collection<CloudChatMessage>("ChatMessage", {
   fields: ["sessionId", "role", "content", "actionsJson", "CreatedDate", "LastUpdatedDate"],
 });
+// `senderId` / `recipientId` MUST both be in the selector: the inbox and
+// outbox reads filter on them, and the gateway drops filter clauses whose
+// field isn't selected (the same silent no-op that caused the duplicate-
+// rows bug on Issue). `readAt` feeds the unread badges / read ticks.
+export const directMessagesCollection = blocksClient.data.collection<CloudDirectMessage>("DirectMessage", {
+  fields: ["senderId", "recipientId", "content", "readAt", "attachmentFileId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `authorId` in the selector for the same filter-gating reason as the DM
+// columns; `CreatedBy` rides along for the audit-style "posted by" render.
+export const announcementsCollection = blocksClient.data.collection<CloudAnnouncement>("Announcement", {
+  fields: ["authorId", "content", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` MUST be selected: the read path filters on it when looking up the
+// caller's own row for the upload upsert (an unselected filter column is
+// silently dropped by the gateway — the duplicate-rows lesson from Issue).
+export const userProfilesCollection = blocksClient.data.collection<CloudUserProfile>("UserProfile", {
+  fields: ["userId", "imageFileId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+
+// --- Issue Tracker collection accessors -------------------------------------
+//
+// Each accessor lists every field a hook might read or filter by. Missing
+// fields are dropped from the response AND from any filter the gateway
+// receives later — that's why `enabled` (the boolean-encoded-string) and
+// the JSON-encoded `reproductionStepsJson` / `evidenceJson` ride along
+// even though the UI only consumes them through the adapter.
+
+export const verificationTargetsCollection = blocksClient.data.collection<CloudVerificationTarget>(
+  "VerificationTarget",
+  {
+    fields: [
+      "applicationName",
+      "url",
+      "environment",
+      "credentialId",
+      "enabled",
+      "lastVerifiedAt",
+      "lastStatus",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
+export const secretsCollection = blocksClient.data.collection<CloudSecret>(
+  "Secret",
+  {
+    fields: [
+      "name",
+      "email",
+      "passwordMasked",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
+export const issuesCollection = blocksClient.data.collection<CloudIssue>(
+  "Issue",
+  {
+    fields: [
+      "title",
+      "applicationName",
+      "url",
+      "category",
+      "severity",
+      "status",
+      "description",
+      "expected",
+      "actual",
+      "reproductionStepsJson",
+      "evidenceJson",
+      "detectedAt",
+      "verificationRunId",
+      // Dedup identity + recurrence stats — MUST stay in the selection:
+      // persistDetectedIssue matches loaded rows by fingerprint, and a
+      // missing column here maps to `undefined` on every row, so every
+      // re-detection files a duplicate instead of merging.
+      "fingerprint",
+      "occurrenceCount",
+      "lastSeenAt",
+      "seenInRunIdsJson",
+      "assignedDeveloperIdsJson",
+      "approvedById",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
 
 // --- Helpers ----------------------------------------------------------------
 

@@ -1,180 +1,70 @@
-// Frontend-only service abstraction for the Issue Tracker.
+// Backend-facing methods for the Issue Tracker.
 //
-// MCP integration: methods are gated on the `USE_REAL_VERIFY` flag (see
-// the helper at the bottom). When the flag is off (today's default) the
-// in-browser mocks run, preserving the demo experience for users without
-// a backend. When the flag is on, every method routes through `/api/verify/*`;
-// on any failure (503, network, parse), the call falls back to the
-// in-browser mock so the UI never gets stuck.
+// CRUD on per-user data (verification targets, secrets, issues) now
+// lives in `src/lib/blocks/hooks.ts` — those hooks own the TanStack
+// Query cache and route everything through the Blocks Data SDK. The
+// Issue Tracker page consumes them via `useIssueTracker`.
+//
+// This module keeps only the four pieces that still talk to the live
+// backend (or fall back to mocks when the backend isn't wired up):
+//
+//   * `testConnection` — POSTs to `/api/verify/test` for a per-target
+//     reachability + login check. Falls back to a deterministic local
+//     heuristic when `VITE_USE_REAL_VERIFY` is off.
+//   * `startVerification` — POSTs to `/api/verify/runs` to schedule the
+//     run; returns the new run id (real progress arrives over SSE).
+//   * `subscribeRun` — opens the SSE stream that the backend emits while
+//     the run is in flight; returns a teardown function. No-op when the
+//     flag is off — the page's mock-run driver fills the gap.
+//   * `sendChatMessage` — POSTs to the Vite-side proxy at `/api/ai/chat`
+//     for a real Assistant reply. Falls back to a canned-reply matcher
+//     when the proxy returns 503 / errors out.
 //
 // MCP cutover (step 8 of prompt/Issue-Tracker-MCP-Design.md): the
 // production-ready version of this file is the same module with
-// `USE_REAL_VERIFY` set to `true` and the in-browser mocks deleted
-// from the helper. That change is one line; this comment marks where it
-// happens so the diff stays auditable.
+// `USE_REAL_VERIFY` set to `true`. That change is one line; this comment
+// marks where it happens so the diff stays auditable.
 //
 // IMPORTANT: This file must never log credentials, never write secrets to
 // localStorage, and never hardcode real passwords. See spec section 12.3.
 
-import {
-  mockIssues,
-  mockSecrets,
-  mockTargets,
-  idleRun,
-} from "@/data/mockIssueTrackerData";
 import type {
+  AnthropicTool,
   ChatMessage,
   ChatAction,
-  Issue,
   RunEvent,
-  Secret,
+  ToolUseBlock,
   VerificationRun,
   VerificationTarget,
 } from "@/types/issue-tracker";
+import { verificationChecks } from "@/data/issueTrackerConstants";
+import type { IssueTrackerContextSnapshot } from "@/lib/issueTrackerContext";
+import { renderContextForSystemPrompt } from "@/lib/issueTrackerContext";
+import { buildSystemPrompt } from "@/lib/chatSystemPrompt";
 
 // MCP feature flag — read once at module load; flipping it requires a
 // rebuild. Default off keeps today's behaviour bit-identical for users
-// without a backend running.
-//
-// To cut over to the real backend permanently:
-//   1. Set VITE_USE_REAL_VERIFY=1 in .env (or the build pipeline).
-//   2. Delete the in-browser mocks from the helper below.
-//   3. Run npm run build && npm run typecheck — there should be no
-//      remaining references to mockSecrets / mockTargets / mockIssues.
+// without a backend running. The cutover to the real backend is a single
+// constant flip + dropping the canned fallback in `sendChatMessage`.
 const USE_REAL_VERIFY = import.meta.env.VITE_USE_REAL_VERIFY === "1";
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Targets
-// ────────────────────────────────────────────────────────────────────────────
-
 export const issueTrackerApi = {
-  async getTargets(): Promise<VerificationTarget[]> {
-    await delay(120);
-    return [...mockTargets];
-  },
-
-  async addTarget(
-    payload: Omit<VerificationTarget, "id" | "createdAt" | "updatedAt">,
-  ): Promise<VerificationTarget> {
-    await delay(120);
-    const now = new Date().toISOString();
-    const created: VerificationTarget = {
-      ...payload,
-      id: `tgt-${Math.random().toString(36).slice(2, 8)}`,
-      createdAt: now,
-      updatedAt: now,
-    };
-    mockTargets.push(created);
-    return created;
-  },
-
-  async removeTarget(id: string): Promise<void> {
-    await delay(80);
-    const idx = mockTargets.findIndex((t) => t.id === id);
-    if (idx >= 0) mockTargets.splice(idx, 1);
-  },
-
-  async updateTarget(
-    id: string,
-    patch: Partial<VerificationTarget>,
-  ): Promise<VerificationTarget> {
-    await delay(80);
-    const idx = mockTargets.findIndex((t) => t.id === id);
-    if (idx < 0) throw new Error("Target not found");
-    mockTargets[idx] = { ...mockTargets[idx], ...patch, updatedAt: new Date().toISOString() };
-    return mockTargets[idx];
-  },
-
-  // ──────────────────────────────────────────────────────────────────────────
-  //  Secrets
-  // ──────────────────────────────────────────────────────────────────────────
-
-  async getSecrets(): Promise<Secret[]> {
-    return gateVerify<Secret[]>(
-      () => fetch("/api/secrets", { method: "GET" }),
-      (res) => res.json() as Promise<Secret[]>,
-      async () => {
-        await delay(120);
-        return [...mockSecrets];
-      },
-    );
-  },
-
-  async addSecret(payload: { name: string; email: string; password: string }): Promise<Secret> {
-    // MCP step 6: when the flag is on, the password round-trips to the
-    // server, which stores it encrypted at rest and returns a masked
-    // response. When the flag is off, we keep the original "drop the
-    // password client-side" behaviour so local dev with no backend
-    // still works.
-    return gateVerify<Secret>(
-      () =>
-        fetch("/api/secrets", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        }),
-      (res) => res.json() as Promise<Secret>,
-      async () => {
-        await delay(120);
-        const now = new Date().toISOString();
-        const created: Secret = {
-          id: `secret-${Math.random().toString(36).slice(2, 8)}`,
-          name: payload.name,
-          email: payload.email,
-          passwordMasked: "•".repeat(Math.min(10, Math.max(6, payload.password.length))),
-          createdAt: now,
-          updatedAt: now,
-        };
-        mockSecrets.push(created);
-        return created;
-      },
-    );
-  },
-
-  async deleteSecret(id: string): Promise<void> {
-    await gateVerify<void>(
-      () =>
-        fetch(`/api/secrets/${encodeURIComponent(id)}`, { method: "DELETE" }),
-      // 204 No Content — don't try to read the (empty) body. Skipping
-      // the body is the safe default for DELETE-style endpoints.
-      async () => undefined,
-      async () => {
-        await delay(80);
-        const idx = mockSecrets.findIndex((s) => s.id === id);
-        if (idx >= 0) mockSecrets.splice(idx, 1);
-      },
-    );
-  },
-
-  // ──────────────────────────────────────────────────────────────────────────
-  //  Issues
-  // ──────────────────────────────────────────────────────────────────────────
-
-  async getIssues(): Promise<Issue[]> {
-    await delay(120);
-    return [...mockIssues];
-  },
-
-  async updateIssueStatus(id: string, status: Issue["status"]): Promise<Issue> {
-    await delay(80);
-    const idx = mockIssues.findIndex((i) => i.id === id);
-    if (idx < 0) throw new Error("Issue not found");
-    mockIssues[idx] = { ...mockIssues[idx], status };
-    return mockIssues[idx];
-  },
-
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
   //  Test connection (section 14)
-  // ──────────────────────────────────────────────────────────────────────────
   //
-  // MCP integration step 1: gated behind `VITE_USE_REAL_VERIFY=1`. When off
-  // (the default), the deterministic mock below runs unchanged — same
-  // behaviour every existing user has today. When on, the client POSTs to
-  // `/api/verify/test`, which the Vite proxy either forwards to a real
-  // backend or responds 503 with `verify_not_configured`. On any failure
-  // (non-2xx, network error, parse error) we fall through to the mock so
-  // the UI never gets stuck — same fallback strategy the chat uses for an
-  // unconfigured AI gateway.
+  //  MCP integration step 1: gated behind `VITE_USE_REAL_VERIFY=1`. When
+  //  off (the default), the deterministic mock below runs unchanged —
+  //  same behaviour every existing user has today. When on, the client
+  //  POSTs to `/api/verify/test`, which the Vite proxy either forwards to
+  //  a real backend or responds 503 with `verify_not_configured`. On any
+  //  failure (non-2xx, network error, parse error) we fall through to the
+  //  mock so the UI never gets stuck — same fallback strategy the chat
+  //  uses for an unconfigured AI gateway.
+  // ────────────────────────────────────────────────────────────────────────
+
+  // interactRun was removed — the in-app preview overlay is gone and the
+  // headed Playwright browser is the only preview surface. Click
+  // forwarding through this API no longer makes sense.
 
   async testConnection(target: VerificationTarget): Promise<{
     urlReachable: boolean;
@@ -185,7 +75,14 @@ export const issueTrackerApi = {
         fetch("/api/verify/test", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ targetId: target.id, url: target.url }),
+          body: JSON.stringify({
+            target: {
+              id: target.id,
+              applicationName: target.applicationName,
+              url: target.url,
+              credentialId: target.credentialId ?? null,
+            },
+          }),
         }),
       // Trust the backend's view of the world, but keep the same shape
       // even if a field is missing.
@@ -211,34 +108,81 @@ export const issueTrackerApi = {
     );
   },
 
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
   //  Verification runs (sections 16, 19, 20)
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
 
-  async getCurrentRun(): Promise<VerificationRun> {
-    await delay(80);
-    return { ...idleRun };
-  },
+  async startVerification(
+    targets: VerificationTarget[],
+    options: {
+      scope?: string[];
+      userId?: string;
+      // Device emulation preset — forwarded to the backend so the run's
+      // browser context gets the matching viewport + touch flags.
+      device?: "desktop" | "mobile" | "tablet";
+    } = {},
+  ): Promise<VerificationRun> {
+    // Stable run id (32 hex chars) — the MCP server uses it as the
+    // idempotency key plus the file-naming prefix for evidence.
+    // Spec §6 step 5 / §7: duplicate Start with same enabled targets
+    // and same scope returns the existing run.
+    const runId = generateRunId();
+    const scope = (options.scope ?? verificationChecks.filter((c) => c.recommended).map((c) => c.id)) as string[];
 
-  async startVerification(targets: VerificationTarget[]): Promise<VerificationRun> {
     // MCP step 2: when the flag is on, ask the backend to schedule the run.
-    // The backend returns immediately with the new run id; real progress
-    // arrives via the SSE stream returned by `subscribeRun`. On any failure
-    // (proxy 503, network error, parse error) we fall back to the local
-    // mock so the UI never blocks.
+    // The backend returns immediately with `{ id, replay, status }`; real
+    // progress arrives via the SSE stream returned by `subscribeRun`. On any
+    // failure (proxy 503, network error, parse error) we fall back to the
+    // local mock so the UI never blocks.
     return gateVerify<VerificationRun>(
       () =>
         fetch("/api/verify/runs", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ targetIds: targets.map((t) => t.id) }),
+          body: JSON.stringify({
+            runId,
+            userId: options.userId ?? "local",
+            targets: targets.map((t) => ({
+              id: t.id,
+              applicationName: t.applicationName,
+              url: t.url,
+              enabled: t.enabled,
+              credentialId: t.credentialId ?? null,
+            })),
+            scope,
+            ...(options.device ? { device: options.device } : {}),
+          }),
         }),
-      (res) => res.json() as Promise<VerificationRun>,
+      async (res) => {
+        const payload = (await res.json()) as { id: string; replay?: boolean; status?: string };
+        const now = new Date().toISOString();
+        return {
+          id: payload.id,
+          // The backend answers "queued" but starts the agent immediately
+          // and has no run_started event to flip it later — map it to
+          // "running" here so run-dependent UI (chat feed spinner, pause
+          // controls) is live for the whole run, not just after completion.
+          status: (!payload.status || payload.status === "queued"
+            ? "running"
+            : payload.status) as VerificationRun["status"],
+          totalTargets: targets.length,
+          completedTargets: 0,
+          failedTargets: 0,
+          startedAt: now,
+          perApp: targets.map((t) => ({
+            targetId: t.id,
+            applicationName: t.applicationName,
+            status: "queued",
+          })),
+          currentActivity: [],
+          scope: scope as VerificationRun["scope"],
+        };
+      },
       async () => {
         await delay(150);
         const now = new Date().toISOString();
         return {
-          id: `run-${Math.random().toString(36).slice(2, 8)}`,
+          id: runId,
           status: "running",
           totalTargets: targets.length,
           completedTargets: 0,
@@ -257,8 +201,59 @@ export const issueTrackerApi = {
             { step: "Detect UI issues",          done: false },
             { step: "Generate report",           done: false },
           ],
-          scope: idleRun.scope,
+          scope: scope as VerificationRun["scope"],
         };
+      },
+    );
+  },
+
+  // Run history — the persisted records the backend keeps across restarts
+  // (newest first, without their event logs). Used by the history panel to
+  // show past runs with status/duration. Empty when the flag is off: there
+  // is no local mock history worth fabricating.
+  async listRuns(limit = 10): Promise<
+    Array<{
+      id: string;
+      status: string;
+      scope: string[];
+      targetNames: Record<string, string>;
+      startedAt: string;
+      completedAt?: string;
+      eventCount: number;
+    }>
+  > {
+    type RunSummary = {
+      id: string;
+      status: string;
+      scope: string[];
+      targetNames: Record<string, string>;
+      startedAt: string;
+      completedAt?: string;
+      eventCount: number;
+    };
+    const parse = async (res: Response): Promise<RunSummary[]> => {
+      const data = (await res.json()) as { runs?: RunSummary[] };
+      return data.runs ?? [];
+    };
+    return gateVerify(
+      () => fetch(`/api/verify/runs?limit=${limit}`),
+      parse,
+      // Dev fallback: the dev proxy only learned GET /verify/runs recently
+      // (vite.config.ts) and needs a dev-server restart to pick it up. The
+      // MCP backend itself sends permissive CORS, and http://localhost is a
+      // potentially-trustworthy origin, so a direct fetch works from the
+      // page without mixed-content blocks — try that before giving up.
+      async () => {
+        if (!USE_REAL_VERIFY) return [];
+        try {
+          const res = await fetch(
+            `http://localhost:8787/verify/runs?limit=${limit}`,
+          );
+          if (!res.ok) return [];
+          return await parse(res);
+        } catch {
+          return [];
+        }
       },
     );
   },
@@ -283,54 +278,278 @@ export const issueTrackerApi = {
       // the hook's lifecycle tidy (no special-case branching).
       return () => {};
     }
-    const es = new EventSource(`/api/verify/runs/${runId}/events`);
-    es.onmessage = (msg) => {
-      try {
-        const parsed = JSON.parse(msg.data) as RunEvent;
-        handlers.onEvent(parsed);
-      } catch (err) {
-        handlers.onError(err instanceof Error ? err : new Error(String(err)));
-      }
+    // Manual reconnect instead of EventSource's built-in retry. Two
+    // reasons: (1) the backend tail supports `?since=<cursor>` resume,
+    // so a reconnect asks for ONLY the events missed during the drop —
+    // native auto-reconnect re-requests from 0 and replays the whole
+    // run (re-firing target_started, re-persisting issues…); (2) a
+    // flapping proxy gets exponential backoff instead of a reconnect
+    // storm at the browser's default interval.
+    let es: EventSource | null = null;
+    let reconnectTimer: number | undefined;
+    let disposed = false;
+    let openedOnce = false;
+    let settled = false;
+    // The first URL omits `since`, so the stream starts at backend
+    // cursor 0 — counting received `event` envelopes therefore tracks
+    // the backend cursor exactly.
+    let cursor = 0;
+    const MAX_FAILURES = 3;
+    let consecutiveFailures = 0;
+    let backoffMs = 1_000;
+
+    const connect = () => {
+      if (disposed || settled) return;
+      es = new EventSource(
+        cursor > 0
+          ? `/api/verify/runs/${runId}/events?since=${cursor}`
+          : `/api/verify/runs/${runId}/events`,
+      );
+      es.onopen = () => {
+        openedOnce = true;
+        // Contact made — transient drops don't count toward the budget
+        // and the next drop starts back at the initial delay.
+        consecutiveFailures = 0;
+        backoffMs = 1_000;
+      };
+      es.onmessage = (msg) => {
+        try {
+          // The MCP server wraps each event as
+          //   { type: "event", event: <RunEvent> }
+          // (with a separate `{ type: "done" }` sentinel when the run
+          // settles). Unwrap before handing the typed payload to the
+          // hook — without this the consumer sees `event.kind === "event"`
+          // and falls through every switch arm, so the VerificationPanel
+          // stays at "Queued" forever.
+          const envelope = JSON.parse(msg.data) as
+            | { type: "event"; event: RunEvent }
+            | { type: "done" }
+            | { type?: string };
+          if (
+            envelope &&
+            (envelope as { type?: string }).type === "event" &&
+            (envelope as { event?: RunEvent }).event
+          ) {
+            cursor += 1;
+            handlers.onEvent((envelope as { event: RunEvent }).event);
+          }
+          // `done` = the run settled server-side. Close and never
+          // reconnect — an error on a finished run's stream would
+          // otherwise look like a live failure.
+          if (envelope && (envelope as { type?: string }).type === "done") {
+            settled = true;
+            es?.close();
+          }
+        } catch (err) {
+          handlers.onError(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+      es.onerror = () => {
+        // Close immediately — WE own the retry decision now, so the
+        // browser must not race us with its own auto-reconnect.
+        es?.close();
+        es = null;
+        if (disposed || settled) return;
+        // If the proxy returned 503 on the very first request, the
+        // connection never opened and no event arrived — that's the
+        // signal to downgrade to the local mock-run driver.
+        if (!openedOnce && cursor === 0) {
+          handlers.onError(new Error("real stream unavailable"));
+        } else {
+          handlers.onError(new Error("run stream error"));
+        }
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= MAX_FAILURES) {
+          // Budget burnt — stop trying. The caller downgrades on its
+          // side (see `useIssueTracker.startVerification`).
+          return;
+        }
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = undefined;
+          connect();
+        }, backoffMs);
+        backoffMs = Math.min(backoffMs * 2, 8_000);
+      };
     };
-    es.onerror = () => {
-      // EventSource auto-reconnects, so we don't close on a single error.
-      // But if the proxy already 503'd on the first request, the connection
-      // never opens — EventSource fires error once and that's enough
-      // signal for the hook to downgrade to local mode.
-      handlers.onError(new Error("run stream error"));
+    connect();
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      es?.close();
     };
-    return () => es.close();
   },
 
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
+  //  Official Playwright MCP bridge — the chatbot's browser tools.
+  //  The catalog is read LIVE from the backend (which spawns the official
+  //  `npx @playwright/mcp@latest` server); nothing is hardcoded here. Both
+  //  methods degrade silently (empty catalog / thrown Error) so the chat
+  //  keeps working when the backend or the MCP child is unavailable.
+  // ────────────────────────────────────────────────────────────────────────
+
+  async listBrowserTools(): Promise<AnthropicTool[]> {
+    try {
+      const res = await fetch("/api/playwright/tools");
+      if (!res.ok) return [];
+      const data = (await res.json()) as {
+        tools?: Array<{
+          name: string;
+          description: string;
+          inputSchema: Record<string, unknown>;
+        }>;
+      };
+      return (data.tools ?? []).map((t) => ({
+        name: t.name,
+        description: t.description,
+        // The official server ships full JSON Schemas — spread them in and
+        // pin the type so an odd schema still serialises cleanly.
+        input_schema: {
+          type: "object",
+          ...t.inputSchema,
+        } as AnthropicTool["input_schema"],
+      }));
+    } catch {
+      return [];
+    }
+  },
+
+  async callBrowserTool(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    const res = await fetch("/api/playwright/call", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tool: name, arguments: args }),
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as { message?: string };
+      throw new Error(err.message ?? `Playwright bridge error (${res.status})`);
+    }
+    const data = (await res.json()) as { result?: string };
+    return data.result ?? "(no output)";
+  },
+
+  // ────────────────────────────────────────────────────────────────────────
   //  Chat (section 7) — POSTs to the Vite-side proxy at `/api/ai/chat`,
   //  which forwards to the upstream AI gateway with the bearer token. When
   //  the proxy reports the gateway isn't configured (503), or the request
   //  fails for any reason, we fall back to a local pattern-matcher so the
   //  chat still returns useful canned replies in a setup without an AI
   //  backend (e.g. running `npm run dev` without setting `AI_GATEWAY_TOKEN`).
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
 
-  async sendChatMessage(text: string): Promise<ChatMessage> {
+  async sendChatMessage(
+    text: string,
+    options: {
+      context?: IssueTrackerContextSnapshot;
+      tools?: AnthropicTool[];
+      /** Last few turns, so multi-step browser sessions (navigate →
+       *  snapshot → click a ref) survive the stateless AI call. */
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
+      /** Fired just before a gateway-retry backoff sleep, so the UI can
+       * show "Retrying AI request… 2/3" instead of silent dead air. */
+      onRetry?: (attempt: number, maxAttempts: number) => void;
+    } = {},
+  ): Promise<ChatMessage> {
     try {
-      const res = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
+      // Prepend the context inside the user message as well — some
+      // gateways rewrite / drop the `system` field, so a model that
+      // ignores our base prompt still sees the current state. The model
+      // can answer in any language (we keep the user's own text after
+      // a clear separator), and the prose reply renders without the
+      // state block because we read the response off `content[]` not
+      // off the user's request.
+      const userText = options.context
+        ? `${renderContextForSystemPrompt(options.context)}\n\n---\n\nUser request: ${text}`
+        : text;
+      const chatFetch = () =>
+        fetch("/api/ai/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            text: userText,
+            // Full app knowledge (pages, hierarchy, verification internals,
+            // security posture, tool routing). The proxy prefers this over
+            // its built-in default — see vite.config.ts aiChatProxy.
+            system: buildSystemPrompt(),
+            context: options.context,
+            tools: options.tools,
+            history: options.history,
+          }),
+        });
+      // The AI gateway intermittently flaps (502/503/504, occasionally
+      // 429). Retrying the MODEL call is safe — it executes nothing;
+      // state changes happen only on an Allow click — so retry transient
+      // statuses with short exponential backoff (1s, 2s; 3 attempts
+      // total) before falling through to the offline matcher.
+      let res = await chatFetch();
+      for (
+        let attempt = 1;
+        attempt <= 2 &&
+        !res.ok &&
+        [502, 503, 504, 429].includes(res.status);
+        attempt++
+      ) {
+        options.onRetry?.(attempt + 1, 3);
+        await delay(attempt * 1000);
+        res = await chatFetch();
+      }
       if (res.ok) {
         const payload = (await res.json()) as {
-          content?: Array<{ type: string; text?: string }>;
+          content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>;
+          stop_reason?: string;
           message?: string;
         };
-        const replyText =
-          payload.content?.find((c) => c.type === "text")?.text ??
-          (typeof payload.message === "string" ? payload.message : "");
-        if (replyText) {
+        const content = payload.content ?? [];
+        const textBlock = content.find((c) => c.type === "text");
+        const toolUseBlocks: ToolUseBlock[] = content
+          .filter(
+            (c): c is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
+              c.type === "tool_use" &&
+              typeof (c as { id?: unknown }).id === "string" &&
+              typeof (c as { name?: unknown }).name === "string",
+          )
+          .map((c) => ({
+            id: c.id,
+            name: c.name,
+            input: c.input ?? {},
+          }));
+
+        if (toolUseBlocks.length > 0) {
+          // Tool-use turn — assistant proposes actions. Render a short
+          // summary of the first tool in the content text, keep the full
+          // proposal in `toolUse` so the permission UI can show "Allow".
+          const summary = textBlock?.text ?? toolUseSummary(toolUseBlocks);
           return {
             id: `msg-${Math.random().toString(36).slice(2, 8)}`,
             role: "assistant",
-            content: replyText,
+            content: summary,
+            timestamp: new Date().toISOString(),
+            toolUse: toolUseBlocks,
+            actions: toolUseBlocks.map((t) => ({
+              id: `perm-${t.id}`,
+              label: "Allow",
+              kind: "request_tool_permission",
+              payload: { toolUseId: t.id, toolName: t.name, toolInput: t.input },
+            })),
+          };
+        }
+
+        if (textBlock?.text) {
+          return {
+            id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+            role: "assistant",
+            content: textBlock.text,
+            timestamp: new Date().toISOString(),
+          };
+        }
+        if (typeof payload.message === "string" && payload.message) {
+          return {
+            id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+            role: "assistant",
+            content: payload.message,
             timestamp: new Date().toISOString(),
           };
         }
@@ -346,46 +565,193 @@ export const issueTrackerApi = {
 
 // Local fallback used when the AI gateway proxy is unavailable or unconfigured.
 // Keeps the chat surface useful in dev environments without AI creds.
+//
+// Operates on content hints rather than the (now removed) in-memory store,
+// so the canned replies stay useful after targets and issues moved out to
+// the Blocks collections. Also pattern-matches a small set of action
+// intents (toggle a check, start verification, change filters) and
+// returns them as tool_use-style proposals — the same permission card
+// the live model emits, just with no upstream model involved. That way
+// the user can demo the "Allow / Deny" flow without a gateway token.
 async function mockAssistantReply(text: string): Promise<ChatMessage> {
   await delay(450);
   const lower = text.toLowerCase();
   const actions: ChatAction[] = [];
+  const toolUse: ToolUseBlock[] = [];
+
+  // Pattern-match intent → emit a tool_use proposal. Each pattern
+  // produces a single tool block so the permission card stays tidy.
+  const checkMatch = matchCheckIntent(lower);
+  if (checkMatch) {
+    const block: ToolUseBlock = {
+      id: `tool-mock-${Math.random().toString(36).slice(2, 8)}`,
+      name: "toggle_verification_check",
+      input: {
+        checkId: checkMatch.checkId,
+        // Carry the parsed verb as an explicit flag so the dispatcher
+        // sets the desired end-state instead of flipping blind.
+        ...(checkMatch.action !== "toggle"
+          ? { enabled: checkMatch.action === "enable" }
+          : {}),
+      },
+    };
+    toolUse.push(block);
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      role: "assistant",
+      content: `I'd like to ${checkMatch.action} the "${checkMatch.checkId}" verification check. Allow?`,
+      timestamp: new Date().toISOString(),
+      toolUse: [block],
+      actions: [
+        {
+          id: `perm-${block.id}`,
+          label: "Allow",
+          kind: "request_tool_permission",
+          payload: { toolUseId: block.id, toolName: block.name, toolInput: block.input },
+        },
+      ],
+    };
+  }
+
+  if (
+    lower.includes("start verification") ||
+    lower.includes("verify all") ||
+    lower.includes("run verification")
+  ) {
+    const block: ToolUseBlock = {
+      id: `tool-mock-${Math.random().toString(36).slice(2, 8)}`,
+      name: "start_verification",
+      input: {},
+    };
+    toolUse.push(block);
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      role: "assistant",
+      content: `I'd like to start a verification run on your enabled targets. Allow?`,
+      timestamp: new Date().toISOString(),
+      toolUse: [block],
+      actions: [
+        {
+          id: `perm-${block.id}`,
+          label: "Allow",
+          kind: "request_tool_permission",
+          payload: { toolUseId: block.id, toolName: block.name, toolInput: block.input },
+        },
+      ],
+    };
+  }
+
+  // Verify / navigate to a free-form URL — "verify https://example.com",
+  // "check https://...", "test http://localhost:3000", etc. We pull the
+  // URL out of the message with a regex so the dispatcher can re-validate
+  // it. Match the URL FIRST, before the open_target fallback below, so
+  // a user who says "open https://x" or "verify https://x" always gets
+  // the Playwright-driven verify_live_url — not a new tab.
+  const urlMatch = text.match(/\bhttps?:\/\/[^\s,]+/i);
+  if (urlMatch) {
+    const rawUrl = urlMatch[0].replace(/[.,;!?)]+$/, "");
+    const block: ToolUseBlock = {
+      id: `tool-mock-${Math.random().toString(36).slice(2, 8)}`,
+      name: "verify_live_url",
+      input: { url: rawUrl },
+    };
+    toolUse.push(block);
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      role: "assistant",
+      content: `I'd like to navigate Playwright to ${rawUrl} and run the full verification suite. Allow?`,
+      timestamp: new Date().toISOString(),
+      toolUse: [block],
+      actions: [
+        {
+          id: `perm-${block.id}`,
+          label: "Allow",
+          kind: "request_tool_permission",
+          payload: { toolUseId: block.id, toolName: block.name, toolInput: block.input },
+        },
+      ],
+    };
+  }
+
+  // Open a CONFIGURED target in a new browser tab. Pattern matches
+  // Bengali / English variants. Skipped when the user pasted a URL (the
+  // verify_live_url branch above handles that — opening a target in a
+  // tab is only useful when the user names one of their configured
+  // targets). The real `targetId` is filled in by the dispatcher when
+  // the mock isn't running — when the live AI is configured, it picks
+  // the id from the CURRENT STATE targets[] list.
+  if (
+    lower.includes("open") ||
+    lower.includes("visit") ||
+    lower.includes("show") ||
+    lower.includes("browse") ||
+    lower.includes("open the target") ||
+    lower.includes("target open") ||
+    lower.includes("target টা open") ||
+    lower.includes("open করো")
+  ) {
+    const block: ToolUseBlock = {
+      id: `tool-mock-${Math.random().toString(36).slice(2, 8)}`,
+      name: "open_target_in_browser",
+      input: { targetId: "" },
+    };
+    toolUse.push(block);
+    return {
+      id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      role: "assistant",
+      content: `I'd like to open one of your configured targets in a new browser tab. Allow?`,
+      timestamp: new Date().toISOString(),
+      toolUse: [block],
+      actions: [
+        {
+          id: `perm-${block.id}`,
+          label: "Allow",
+          kind: "request_tool_permission",
+          payload: { toolUseId: block.id, toolName: block.name, toolInput: block.input },
+        },
+      ],
+    };
+  }
 
   let content: string;
-  if (lower.includes("verify all")) {
-    content = `I found ${mockTargets.length} configured applications:\n\n${mockTargets
-      .map((t) => `• ${t.applicationName}`)
-      .join("\n")}\n\nReady to start verification.`;
-    actions.push({ id: "act-start", label: "Start Verification", kind: "start_verification" });
-  } else if (lower.includes("critical")) {
-    const critical = mockIssues.filter((i) => i.severity === "critical");
-    content = `I found ${critical.length} critical issue${
-      critical.length === 1 ? "" : "s"
-    }:\n\n${critical.map((i, idx) => `${idx + 1}. ${i.title}`).join("\n")}`;
+  if (lower.includes("critical")) {
+    content = `Filter the list down to critical issues with the chip filter — or open any issue from the list to see its evidence.`;
     actions.push({
       id: "act-critical",
       label: "View Critical Issues",
       kind: "view_critical_issues",
     });
-  } else if (lower.match(/verify\s+issue-\d+/i)) {
-    const match = text.match(/issue-\d+/i);
+  } else if (lower.match(/verify\s+issue-[a-z0-9-]+/i)) {
+    const match = text.match(/issue-[a-z0-9-]+/i);
     const issueId = match?.[0].toUpperCase();
-    const issue = mockIssues.find((i) => i.id === issueId);
-    content = issue
-      ? `Targeted verification started for ${issue.id}.\n\n✓ Issue located in mock store\n✓ Reproduction steps queued\n⟳ Running checks...`
-      : `I couldn't find ${issueId ?? "that issue"} in the current issue list.`;
-    if (issue) {
-      actions.push({
-        id: "act-again",
-        label: "Verify Again",
-        kind: "verify_again",
-        payload: { issueId: issue.id },
-      });
-    }
+    content = `Re-running verification for ${issueId ?? "the named issue"}.`;
+    actions.push({
+      id: "act-again",
+      label: "Verify Again",
+      kind: "verify_again",
+      payload: { issueId },
+    });
   } else if (lower.includes("changed") || lower.includes("last verification")) {
-    content = `Since the last verification:\n\n• 2 new issues detected\n• 1 issue marked fixed\n• 0 issues reopened`;
+    content = `Open the Issue Tracker page to see the latest run summary and any new findings.`;
+  } else if (
+    lower.includes("how many") ||
+    lower.includes("কয়টা") ||
+    lower.includes("কত")
+  ) {
+    content = `Open the Issue Tracker page to see the latest run summary and any new findings.`;
   } else {
-    content = `I can help with that. Try one of the suggested prompts, or ask me about verification, issues, or configuration.`;
+    // Honest offline notice — without this the canned fallback
+    // impersonates a dim assistant and the user can't tell the AI
+    // gateway is down (the bug behind "it can't answer me"). Framed as
+    // an explicit "command mode" with the supported verb list, so the
+    // user knows exactly what still works instead of guessing.
+    content =
+      `⚠️ The AI gateway isn't responding, so I'm in **command mode** — open questions are unavailable, but these still work:\n` +
+      `• Start / stop a verification run\n` +
+      `• Verify a URL (e.g. "verify https://example.com")\n` +
+      `• Toggle a check (e.g. "enable the all_functionality check")\n` +
+      `• Filter issues (e.g. "show critical issues")\n` +
+      `Full answers return once the gateway is reachable.`;
   }
 
   return {
@@ -397,12 +763,103 @@ async function mockAssistantReply(text: string): Promise<ChatMessage> {
   };
 }
 
+// Detect intent like "uncheck forms", "Forms check off করো", "enable
+// navigation". Returns the matching check id + the verb the mock should
+// use in the bubble text. Returns null when no check intent matches —
+// the caller falls through to the rest of the mock patterns. Exported
+// because the permission card reuses it as a semantic guard: when the
+// model proposes toggling a DIFFERENT check than the one the user just
+// named, the card says so instead of rubber-stamping the mismatch.
+export function matchCheckIntent(
+  lower: string,
+): { checkId: string; action: string } | null {
+  // Map common synonyms to the canonical VerificationCheckId. Base
+  // entries DERIVE from the check catalog (single source of truth) so a
+  // newly added check can't silently go missing here — the exact drift
+  // that once left "all functionality" unmatchable in command mode.
+  // Shorthand aliases follow the derived full-label entries, so "auth"
+  // only fires when "authentication" itself didn't match.
+  const synonyms: Array<{ phrases: string[]; checkId: string }> = [
+    ...verificationChecks.map((c) => ({
+      phrases: [c.label.toLowerCase(), c.id],
+      checkId: c.id,
+    })),
+    { phrases: ["nav link"], checkId: "navigation" },
+    { phrases: ["auth"], checkId: "authentication" },
+    { phrases: ["a11y"], checkId: "accessibility" },
+    { phrases: ["perf"], checkId: "performance" },
+    { phrases: ["deep walk", "deep-walk"], checkId: "all_functionality" },
+  ];
+  for (const { phrases, checkId } of synonyms) {
+    if (!phrases.some((p) => lower.includes(p))) continue;
+    // If user says "uncheck / off / disable / remove", action verb =
+    // "disable". If "check / on / enable / add", verb = "enable".
+    // Default to "toggle" when no verb is present.
+    const wantsDisable =
+      lower.includes("uncheck") ||
+      lower.includes("off") ||
+      lower.includes("disable") ||
+      lower.includes("remove") ||
+      lower.includes("বন্ধ") ||
+      lower.includes("অফ") ||
+      lower.includes("উঠাও");
+    const wantsEnable =
+      lower.includes("check") ||
+      lower.includes("on") ||
+      lower.includes("enable") ||
+      lower.includes("add") ||
+      lower.includes("চালু") ||
+      lower.includes("অন") ||
+      lower.includes("যোগ");
+    const action = wantsDisable ? "disable" : wantsEnable ? "enable" : "toggle";
+    return { checkId, action };
+  }
+  return null;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ────────────────────────────────────────────────────────────────────────────
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Stable run id (32 hex chars). Used as both the request id the MCP
+// server expects and the evidence-file prefix.
+function generateRunId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID().replace(/-/g, "");
+  }
+  return Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+}
+
+// Build a short, human-readable summary when the assistant responds with
+// tool_use blocks but no accompanying text. The permission card has the
+// full proposal in `toolUse[]`; the bubble just needs a one-liner so
+// the chat thread still reads naturally.
+function toolUseSummary(blocks: ToolUseBlock[]): string {
+  if (blocks.length === 1) {
+    return `I'd like to ${describeTool(blocks[0]!)}. Allow?`;
+  }
+  return `I'd like to take ${blocks.length} actions. Allow?`;
+}
+
+function describeTool(t: ToolUseBlock): string {
+  switch (t.name) {
+    case "toggle_verification_check":
+      return `toggle the "${String(t.input.checkId ?? "")}" verification check`;
+    case "set_target_enabled":
+      return `${t.input.enabled ? "enable" : "disable"} target ${String(t.input.targetId ?? "")}`;
+    case "set_filters":
+      return "update the issue filters";
+    case "start_verification":
+      return "start a verification run";
+    case "update_issue_status":
+      return `set ${String(t.input.issueId ?? "")} to "${String(t.input.status ?? "")}"`;
+    default:
+      return `run ${t.name}`;
+  }
 }
 
 // Single seam between the API layer and the live backend. Every method

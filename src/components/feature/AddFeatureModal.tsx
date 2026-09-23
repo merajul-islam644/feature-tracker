@@ -79,6 +79,13 @@ export function AddFeatureModal({
   // sentinel needed like the previous single-value `UNASSIGNED`).
   const [developerIds, setDeveloperIds] = useState<string[]>([]);
   const [qaIds, setQaIds] = useState<string[]>([]);
+  // Free-form GitHub link — issue, PR, or repo path. Empty string
+  // when the user leaves the field blank so the submit handler can
+  // distinguish "user typed nothing" from "user typed a value we
+  // normalized away". The trim/normalize step happens in
+  // `handleSubmit`, just before the mutation, so we don't surprise
+  // the user mid-typing by silently mutating their input.
+  const [githubLink, setGithubLink] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -86,6 +93,7 @@ export function AddFeatureModal({
       setName("");
       setDeveloperIds([]);
       setQaIds([]);
+      setGithubLink("");
       setError(null);
     }
   }, [open]);
@@ -116,6 +124,21 @@ export function AddFeatureModal({
         // rationale.
         developerIds,
         qaIds,
+        // Normalize the GitHub link before sending:
+        //   - trim whitespace (handles accidental spaces at copy time)
+        //   - empty after trim → omit entirely so the cloud record
+        //     doesn't store an empty string (the schema is optional;
+        //     we want clean NULLs in the data layer)
+        //   - if the user pasted a bare `github.com/...` or
+        //     `owner/repo#123` without a scheme, prefix `https://`
+        //     so the URL is clickable in the drawer.
+        ...((): { githubLink?: string } => {
+          const trimmed = githubLink.trim();
+          if (trimmed === "") return {};
+          const withScheme =
+            /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+          return { githubLink: withScheme };
+        })(),
       });
       toast.success(
         t("toast.featureCreated", 'Feature "{name}" added successfully.', {
@@ -221,6 +244,27 @@ export function AddFeatureModal({
               }
               value={qaIds}
               onChange={setQaIds}
+            />
+            {/* Optional GitHub link — issue, PR, or repo path. The
+                field is free-form; the submit handler normalizes
+                missing schemes (e.g. `github.com/foo/bar` →
+                `https://github.com/foo/bar`) so the value is always
+                clickable in the details drawer. Leaving the field
+                empty omits the property from the mutation entirely
+                — see the spread above. */}
+            <Input
+              label={t("addFeature.githubLinkLabel", "GitHub Link (optional)")}
+              type="url"
+              placeholder={t(
+                "addFeature.githubLinkPlaceholder",
+                "https://github.com/owner/repo/issues/123",
+              )}
+              value={githubLink}
+              onChange={(e) => {
+                setGithubLink(e.target.value);
+                if (error) setError(null);
+              }}
+              maxLength={500}
             />
           </form>
         </DialogBody>

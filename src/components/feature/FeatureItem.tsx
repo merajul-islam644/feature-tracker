@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight, GitBranch, Info } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronRight, GitBranch, Info } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -231,6 +231,39 @@ export function FeatureItem({
   const statusCounts = tallyByStatus(visibleFlowList);
   const otherCounts = tallyOthers(visibleFlowList);
 
+  // Measure the inner content's height after every render that could
+  // change it (rows added/removed, modal opens, error-state swap) and
+  // expose it as a CSS variable on the wrapper. The expand/collapse
+  // keyframes in index.css read this variable so the animation
+  // always lands on the real content height — no height cap, no
+  // guess. Refs stay stable across renders so the ResizeObserver
+  // and effect deps don't churn. We re-measure on every render of
+  // the children (visibleFlowList length, rename/delete state) by
+  // depending on `expanded` plus the visibleFlowList reference; the
+  // observer also catches intrinsic-size changes (flow names wrapping,
+  // status pill wrap, etc.) we wouldn't otherwise catch.
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = contentRef.current;
+    if (!node) return;
+    const measure = () => {
+      // Use the natural content height, not bounding rect — when the
+      // wrapper is collapsed, the inner `overflow-hidden` clips the
+      // child to 0 but the child's scrollHeight still reports the
+      // real content height. Setting the wrapper to that height (in
+      // CSS pixels) is what the expand keyframe ends on.
+      const h = node.scrollHeight;
+      node.parentElement?.style.setProperty(
+        "--feature-content-height",
+        `${h}px`,
+      );
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [expanded, visibleFlowList]);
+
   const handleKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -249,17 +282,20 @@ export function FeatureItem({
         aria-controls={`feature-content-${feature.id}`}
         className="flex w-full cursor-pointer items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        {expanded ? (
-          <ChevronDown
-            className="h-4 w-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
-        ) : (
-          <ChevronRight
-            className="h-4 w-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
-        )}
+        {/* Single icon that rotates 90° on expand — `ChevronRight`
+            pointing right + `rotate-90` lands pointing down, matching
+            the previous collapsed/expanded glyphs without a hard cut
+            between two different elements. `transition-transform`
+            pairs with the panel's `transition-[grid-template-rows]`
+            so the icon sweep and the height open/close share the
+            same 200ms ease-out. */}
+        <ChevronRight
+          className={cn(
+            "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out",
+            expanded && "rotate-90",
+          )}
+          aria-hidden="true"
+        />
         <span className="flex-1 text-sm font-semibold text-foreground">
           {feature.name}
         </span>
@@ -386,9 +422,33 @@ export function FeatureItem({
         )}
       </div>
 
-      {expanded && (
+      {/* Always-mounted wrapper so the height can animate between 0
+          and the measured content height instead of mount/unmount on
+          toggle. The keyframes in index.css (`feature-expand` /
+          `feature-collapse`) read `--feature-content-height`, which
+          the effect above writes from the inner scrollHeight on
+          every content change. Two animation classes are toggled by
+          `data-state` — open plays the expand keyframe (0 → height),
+          closed plays the collapse keyframe (height → 0). The inner
+          `overflow-hidden` keeps any content past the wrapper's
+          current height clipped during the transition.
+          `role="region"` + `aria-hidden={!expanded}` keeps the AT
+          contract honest when collapsed: the panel is removed from
+          the accessibility tree and the keyboard tab order, even
+          though it stays in the DOM for the animation. The 200ms
+          timing matches the existing `accordion-down` /
+          `sidebar-open` keyframes in tailwind.config.js so the
+          row's motion language stays consistent with the rest of
+          the app. */}
+      <div
+        id={`feature-content-${feature.id}`}
+        role="region"
+        aria-hidden={!expanded}
+        data-state={expanded ? "open" : "closed"}
+        className="feature-collapse-wrapper overflow-hidden"
+      >
         <div
-          id={`feature-content-${feature.id}`}
+          ref={contentRef}
           className="bg-muted/30 px-4 py-3"
         >
           <Separator className="mb-3" />
@@ -485,7 +545,7 @@ export function FeatureItem({
             </ul>
           )}
         </div>
-      )}
+      </div>
 
       <AddFlowModal
         open={addFlowOpen}

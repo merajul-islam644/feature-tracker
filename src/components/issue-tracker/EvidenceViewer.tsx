@@ -67,16 +67,38 @@ function renderBody(evidence: Evidence) {
         </pre>
       );
     case "url":
-      return (
-        <a
-          href={evidence.storageRef ? `/api/evidence/${encodeURIComponent(evidence.storageRef)}` : evidence.value}
-          target="_blank"
-          rel="noreferrer"
-          className="break-all text-xs text-primary hover:underline"
-        >
-          {evidence.storageRef ? `Open ${evidence.storageRef}` : evidence.value}
-        </a>
-      );
+      // When `storageRef` is present, the link resolves to the MCP-server
+      // evidence file. When absent, `value` is the URL itself — the caller
+      // (verification agent) is responsible for ensuring it's a safe
+      // http(s) href; we still gate to those schemes defensively so a
+      // `javascript:` value can't execute in the new tab.
+      //
+      // `noopener,noreferrer` is the correct combo for `target="_blank"`:
+      // noreferrer keeps Referer quiet; noopener prevents the opened tab
+      // from reaching back into window.opener and rewriting this page.
+      {
+        const href = evidence.storageRef
+          ? `/api/evidence/${encodeURIComponent(evidence.storageRef)}`
+          : evidence.value;
+        const safeHref = /^https?:\/\//i.test(href) ? href : "";
+        if (!safeHref) {
+          return (
+            <p className="break-all text-xs text-muted-foreground">
+              {evidence.value || evidence.storageRef}
+            </p>
+          );
+        }
+        return (
+          <a
+            href={safeHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="break-all text-xs text-primary hover:underline"
+          >
+            {evidence.storageRef ? `Open ${evidence.storageRef}` : href}
+          </a>
+        );
+      }
     case "observation":
       return (
         <p className="whitespace-pre-wrap text-xs text-foreground">{evidence.value}</p>

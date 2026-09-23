@@ -22,6 +22,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
 import { lookupUserById } from "@/lib/blocks/users";
 import type { Feature } from "@/lib/blocks/data";
+import { Github, ExternalLink } from "lucide-react";
 
 interface FeatureDetailsDrawerProps {
   open: boolean;
@@ -39,12 +40,18 @@ interface FeatureDetailsDrawerProps {
 function Field({
   label,
   children,
+  fullWidth = false,
 }: {
   label: string;
   children: React.ReactNode;
+  // When true, the field spans both columns of the parent grid (sm:grid-cols-2)
+  // — useful for long, single-line content like a GitHub URL where wrapping
+  // into the right column would clip the visible path. Default `false` keeps
+  // the existing two-column rhythm for short fields.
+  fullWidth?: boolean;
 }) {
   return (
-    <div>
+    <div className={fullWidth ? "sm:col-span-2" : undefined}>
       <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </dt>
@@ -338,6 +345,35 @@ export function FeatureDetailsDrawer({
                 resolveEmail={qaEmail}
               />
             </Field>
+            {/* GitHub link — optional. Only render the row when
+                the feature actually has a value: empty/undefined
+                would otherwise render a broken-link placeholder
+                (`<a href="">`) or a `—` that's worse than silence.
+                The URL is rendered with an external-link icon so
+                users know it leaves the app, opens in a new tab,
+                and is safe to share as-is. We don't try to shorten
+                the display text — long issue/PR paths are part of
+                the URL the user expects to land on. */}
+            {feature.githubLink && (
+              <Field
+                label={t("featureItem.details.githubLink", "GitHub Link")}
+                fullWidth
+              >
+                <a
+                  href={feature.githubLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm text-primary underline-offset-2 hover:underline break-all"
+                >
+                  <Github className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  <span>{feature.githubLink}</span>
+                  <ExternalLink
+                    className="h-3 w-3 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
+                </a>
+              </Field>
+            )}
           </dl>
 
           <Separator className="my-5" />

@@ -9,10 +9,11 @@ import {
   Sun,
   UserCog,
 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/useToast";
 import { useLocale, useT } from "@/lib/blocks/i18n";
+import { useUploadProfilePic } from "@/lib/blocks/hooks";
 import {
   applyTheme,
   useThemeStore,
@@ -20,8 +21,8 @@ import {
 } from "@/store/themeStore";
 import { cn } from "@/lib/utils";
 import {
-  Avatar,
-} from "@/components/ui/avatar";
+  UserAvatar,
+} from "@/components/ui/UserAvatar";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -298,7 +299,7 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent>
               <div className="flex items-start gap-5">
-                <Avatar name={currentUser.name} size="lg" />
+                <UserAvatar userId={currentUser.id} name={currentUser.name} size="lg" />
                 <div className="min-w-0 flex-1">
                   <h3 className="truncate text-lg font-semibold text-foreground">
                     {currentUser.name}
@@ -306,6 +307,14 @@ export function SettingsPage() {
                   <p className="truncate text-sm text-muted-foreground">
                     {currentUser.email}
                   </p>
+                  {/* Profile picture upload — visible to the signed-in
+                      user only (you can't change someone else's avatar).
+                      Hidden file input driven by the Button's ref so the
+                      native picker opens on click; the mutation runs the
+                      presign + PUT + UserProfile upsert flow and toasts
+                      the outcome. Same picture surfaces everywhere via
+                      the shared `useProfilePics` map. */}
+                  <ProfilePictureUpload />
                 </div>
               </div>
 
@@ -345,6 +354,89 @@ export function SettingsPage() {
           </Card>
         </section>
       )}
+    </div>
+  );
+}
+
+// Profile picture uploader — a button that opens a native file picker
+// and triggers the presign + PUT + UserProfile upsert flow. Lives in
+// SettingsPage because that's where signed-in users manage their own
+// identity; the same picture surfaces everywhere else (chat, members,
+// announcements, topbar) via the shared `useProfilePics` map.
+function ProfilePictureUpload() {
+  const t = useT();
+  const toast = useToast();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const upload = useUploadProfilePic();
+
+  // Max 4 MB — anything bigger makes the presigned-URL PUT fragile and
+  // bloats the table view of every avatar in the app.
+  const MAX_BYTES = 4 * 1024 * 1024;
+
+  const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset the input so picking the same file twice still triggers
+    // onChange — browsers silently suppress same-value re-selects.
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error(t("settings.account.uploadInvalid", "Please pick an image file."));
+      return;
+    }
+    if (file.size > MAX_BYTES) {
+      toast.error(
+        t(
+          "settings.account.uploadTooLarge",
+          "Image must be 4 MB or smaller.",
+        ),
+      );
+      return;
+    }
+    upload.mutate(
+      { file },
+      {
+        onSuccess: () =>
+          toast.success(
+            t(
+              "settings.account.uploadSuccess",
+              "Profile picture updated.",
+            ),
+          ),
+        onError: (err) =>
+          toast.error(
+            t(
+              "settings.account.uploadError",
+              "Couldn't upload picture: {message}",
+              { message: err.message },
+            ),
+          ),
+      },
+    );
+  };
+
+  return (
+    <div className="mt-3">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="sr-only"
+        onChange={onPick}
+        // Disabling while in flight blocks the user from queuing
+        // another upload before the first PUT settles.
+        disabled={upload.isPending}
+      />
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        onClick={() => inputRef.current?.click()}
+        disabled={upload.isPending}
+      >
+        {upload.isPending
+          ? t("settings.account.uploading", "Uploading…")
+          : t("settings.account.upload", "Upload picture")}
+      </Button>
     </div>
   );
 }

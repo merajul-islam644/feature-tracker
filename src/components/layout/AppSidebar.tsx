@@ -6,8 +6,10 @@ import {
   ChevronsLeft,
   ChevronsRight,
   FolderTree,
+  MessageSquare,
   PlayCircle,
   Settings as SettingsIcon,
+  Users,
   LogOut,
 } from "lucide-react";
 import {
@@ -50,6 +52,16 @@ export function AppSidebar() {
       // label: t("nav.issueTracker", "Issue Tracker"),
       label: t("nav.issueTracker", "Issues"),
       icon: Bug,
+    },
+    {
+      to: "/chat",
+      label: t("nav.chat", "Chat"),
+      icon: MessageSquare,
+    },
+    {
+      to: "/members",
+      label: t("nav.members", "Members"),
+      icon: Users,
     },
     {
       to: "/settings",

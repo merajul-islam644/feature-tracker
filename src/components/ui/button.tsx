@@ -96,7 +96,12 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         ) : (
           leftIcon
         )}
-        <span>{children}</span>
+        {/* Flex, not a plain span: call sites pass icon + text as children
+            (e.g. IssueTrackerHeader's Start button), and without this the
+            icon and text collapse into one inline run — no gap, baseline
+            alignment, icon visually off-center. Mirrors the button's own
+            items-center/gap-2 so nested content aligns identically. */}
+        <span className="inline-flex items-center gap-2">{children}</span>
         {!loading && rightIcon}
       </button>
     );

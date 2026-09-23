@@ -23,6 +23,7 @@ import {
   useWorkspaceTotals,
 } from "@/lib/blocks/hooks";
 import { useLocale, useT } from "@/lib/blocks/i18n";
+import { AnnouncementsSection } from "@/components/dashboard/AnnouncementsSection";
 
 export function DashboardPage() {
   const { currentUser } = useAuth();
@@ -61,6 +62,11 @@ export function DashboardPage() {
             : t("dashboard.welcomeFallback", "Welcome back.")}
         </p>
       </header>
+
+      {/* Manager broadcast — pinned above everything else so a
+          "going to prod" style announcement is the first thing every
+          member reads after signing in. */}
+      <AnnouncementsSection />
 
       <section
         className="grid gap-4 sm:grid-cols-3"

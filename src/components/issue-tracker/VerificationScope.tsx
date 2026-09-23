@@ -1,7 +1,9 @@
 // Verification Scope card (spec section 11) — pick which checks run during
 // verification. Recommended checks are pre-selected; users can opt in/out.
+// The device picker sizes the run's browser context (viewport + touch) so
+// responsive layouts actually get exercised differently per preset.
 
-import { ListChecks } from "lucide-react";
+import { ListChecks, MonitorSmartphone } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -13,7 +15,16 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import type { VerificationCheck } from "@/types/issue-tracker";
+
+export type VerificationDevice = "desktop" | "mobile" | "tablet";
+
+const DEVICE_OPTIONS: { value: VerificationDevice; label: string }[] = [
+  { value: "desktop", label: "Desktop · 1280×800" },
+  { value: "mobile", label: "Mobile · 390×844 (touch)" },
+  { value: "tablet", label: "Tablet · 820×1180 (touch)" },
+];
 
 interface Props {
   checks: VerificationCheck[];
@@ -21,6 +32,8 @@ interface Props {
   onToggle: (id: string) => void;
   onSelectAll: () => void;
   onClear: () => void;
+  device: VerificationDevice;
+  onDeviceChange: (device: VerificationDevice) => void;
 }
 
 export function VerificationScope({
@@ -29,6 +42,8 @@ export function VerificationScope({
   onToggle,
   onSelectAll,
   onClear,
+  device,
+  onDeviceChange,
 }: Props) {
   const recommended = checks.filter((c) => c.recommended);
   const optional = checks.filter((c) => !c.recommended);
@@ -71,6 +86,29 @@ export function VerificationScope({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="flex items-center gap-3 rounded-md border border-border bg-card p-3">
+          <MonitorSmartphone
+            className="h-4 w-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <div className="flex-1">
+            <Label htmlFor="verification-device" className="cursor-pointer">
+              <span className="block text-sm font-medium text-foreground">Device</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                Viewport + touch emulation the next run uses.
+              </span>
+            </Label>
+          </div>
+          <Select
+            id="verification-device"
+            className="h-9 w-52 shrink-0"
+            value={device}
+            onChange={(e) =>
+              onDeviceChange(e.target.value as VerificationDevice)
+            }
+            options={DEVICE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+          />
+        </div>
         <ScopeGroup
           title="Recommended"
           description="Enabled by default — the AI always runs these checks."

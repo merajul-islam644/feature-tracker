@@ -20,13 +20,30 @@ import {
   flowsCollection,
   projectsCollection,
   chatMessagesCollection,
+  directMessagesCollection,
+  announcementsCollection,
+  issuesCollection,
+  secretsCollection,
+  userProfilesCollection,
+  verificationTargetsCollection,
+  toAnnouncement,
   toChatMessage,
+  toDirectMessage,
   toFeature,
   toFlow,
+  toIssue,
   toProject,
+  toSecret,
+  toUserProfilePic,
+  toVerificationTarget,
+  type Announcement,
+  type CloudAnnouncement,
+  type CloudDirectMessage,
   type CloudFeature,
   type CloudFlow,
   type CloudProject,
+  type CloudUserProfile,
+  type DirectMessage,
   type Feature,
   type Flow,
   type FlowStack,
@@ -35,9 +52,21 @@ import {
   type PersistedChatMessage,
   type Project,
   type ProjectCustomEnv,
+  type UserProfilePic,
 } from "./data";
+import {
+  fetchFileDownloadUrl,
+  presignUpload,
+  uploadToPresignedUrl,
+} from "./files";
 import { notifyAssignedFeature, notifyRole } from "./notifier";
-import type { ChatSessionSummary } from "@/types/issue-tracker";
+import type {
+  ChatSessionSummary,
+  Issue,
+  IssueStatus,
+  Secret,
+  VerificationTarget,
+} from "@/types/issue-tracker";
 
 // Pull the newly-created ItemId out of an `insert<Schema>` mutation envelope.
 //
@@ -253,6 +282,25 @@ export const queryKeys = {
   chatHistory: (userId: string, sessionId: string) =>
     ["chat", userId, sessionId] as const,
   chatSessions: (userId: string) => ["chat-sessions", userId] as const,
+  // Member-to-member direct messages — the /chat page's inbox+outbox feed.
+  directMessages: (userId: string) => ["direct-messages", userId] as const,
+  // Manager announcements — workspace-wide, so no user scoping in the key.
+  announcements: ["announcements"] as const,
+  // Profile pictures — the userId → fileId map is workspace-wide (every
+  // member's row, so any avatar can render); the caller id in the key only
+  // keeps one session's cache from bleeding into the next.
+  profilePics: (userId: string) => ["profile-pics", userId] as const,
+  // Provider-signed download URL for one Blocks Data Storage file. Cached
+  // per file id — every UserAvatar showing the same picture shares it.
+  fileDownloadUrl: (fileId: string) => ["file-download-url", fileId] as const,
+  // Issue Tracker — keyed per-user so a sign-out / sign-in cycle doesn't
+  // bleed one user's targets / secrets / issues into another's caches.
+  issueTrackerTargets: (userId: string) =>
+    ["issue-tracker-targets", userId] as const,
+  issueTrackerSecrets: (userId: string) =>
+    ["issue-tracker-secrets", userId] as const,
+  issueTrackerIssues: (userId: string) =>
+    ["issue-tracker-issues", userId] as const,
 };
 
 // --- Reads ------------------------------------------------------------------
@@ -626,6 +674,38 @@ export function useProjectFlows(
   });
 }
 
+// Plain (non-hook) fetcher for imperative callers — the Issue Tracker chat
+// tool dispatch uses it to list a project's features/flows and resolve ids
+// by name without mounting the project page's hooks. Same two-query shape
+// as `useProjectFlows` (features by projectId, then all flows filtered
+// client-side against that feature-id set) so the results can never drift
+// from what the project page renders.
+export async function fetchProjectContents(
+  projectId: string,
+): Promise<{ features: Feature[]; flows: Flow[] }> {
+  const featuresRaw = await featuresCollection.list({
+    filter: { projectId },
+    pageNo: 1,
+    pageSize: 500,
+  });
+  const features = unwrapPaged<unknown>(featuresRaw).items.map((f) =>
+    toFeature(f as Parameters<typeof toFeature>[0], projectId),
+  );
+  if (features.length === 0) return { features, flows: [] };
+  const featureIds = new Set(features.map((f) => f.id));
+  const flowsRaw = await flowsCollection.list({
+    pageNo: 1,
+    pageSize: 1000,
+  });
+  const flows = unwrapPaged<unknown>(flowsRaw).items
+    .filter((f) => {
+      const fid = (f as { featureId?: string }).featureId;
+      return fid !== undefined && featureIds.has(fid);
+    })
+    .map((f) => toFlow(f as Parameters<typeof toFlow>[0], projectId));
+  return { features, flows };
+}
+
 // Loads every persisted chat message for one session in CreatedDate order.
 // Greeting / seed messages are not in the store — the caller prepends them
 // when the result is empty.
@@ -718,6 +798,121 @@ function truncate(text: string, max: number): string {
   return clean.length <= max ? clean : `${clean.slice(0, max - 1).trimEnd()}…`;
 }
 
+// Delete every persisted message for one chat session. We don't keep a
+// Session collection — sessions are derived from message rows sharing a
+// `sessionId`, so a session delete is "delete all messages where
+// sessionId = X". The list call paginates at 500 (one conversation rarely
+// has more) and the deletes run serially so the gateway's per-request
+// rate-limit window isn't exhausted by a fan-out. Errors on individual
+// row deletes are swallowed so a single 403 doesn't leave the user with
+// half-deleted history visible.
+//
+// If a row's delete fails we still consider the session removed from
+// the user's perspective once the list has been repulled — the worst
+// case is a stale ghost message that reappears on next refresh, which
+// is preferable to blocking the whole delete on one transient failure.
+export function useDeleteChatSession(): UseMutationResult<
+  { sessionId: string; deleted: number },
+  Error,
+  string
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (sessionId: string) => {
+      const raw = await chatMessagesCollection.list({
+        filter: { ...createdByFilter(userId), sessionId },
+        pageNo: 1,
+        pageSize: 500,
+      });
+      const messages = unwrapPaged<unknown>(raw).items;
+      let deleted = 0;
+      for (const m of messages) {
+        const id = (m as { ItemId?: string }).ItemId;
+        if (!id) continue;
+        try {
+          await chatMessagesCollection.delete(id);
+          deleted += 1;
+        } catch (err) {
+          console.warn(
+            `Failed to delete chat message ${id} while removing session ${sessionId}:`,
+            err,
+          );
+        }
+      }
+      return { sessionId, deleted };
+    },
+    onSuccess: (_res, sessionId) => {
+      // The current session's history is now empty — invalidate it so the
+      // greeting rehydrates. Same for the sessions list (the row should
+      // disappear); user-scoped key so it works across users.
+      qc.invalidateQueries({
+        queryKey: queryKeys.chatHistory(userId, sessionId),
+      });
+      qc.invalidateQueries({ queryKey: queryKeys.chatSessions(userId) });
+    },
+  });
+}
+
+// Rename a chat session. The session title is *derived* from the most
+// recent user message (`useChatSessions` walks messages to build titles),
+// so "rename" actually rewrites that message's content. We update the
+// first user-authored row we find — walking backward in the (CreatedDate
+// desc) list so we prefer the latest user turn.
+//
+// Updates only the `content` field; role/sessionId/createdAt pass through
+// unchanged. `requiredOn: 3` on the schema means echo is mandatory, and
+// the gateway revalidates every required field on each PATCH.
+export function useRenameChatSession(): UseMutationResult<
+  { sessionId: string; newTitle: string },
+  Error,
+  { sessionId: string; newTitle: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ sessionId, newTitle }) => {
+      const trimmed = newTitle.trim();
+      if (!trimmed) throw new Error("Title cannot be empty.");
+      const raw = await chatMessagesCollection.list({
+        filter: { ...createdByFilter(userId), sessionId },
+        pageNo: 1,
+        pageSize: 500,
+        sort: { CreatedDate: -1 },
+      });
+      const messages = unwrapPaged<unknown>(raw).items;
+      // Walk forward in the list until we find a user-authored message —
+      // messages are newest-first, so the latest user turn is the row we
+      // want to rewrite. If we can't find one (a session that has only
+      // assistant / system turns), we throw — the caller should surface
+      // a friendly message.
+      const target = messages.find(
+        (m) => (m as { role?: string }).role === "user",
+      );
+      if (!target) throw new Error("Cannot rename: no user turn in this session.");
+      const id = (target as { ItemId?: string }).ItemId;
+      const role = (target as { role?: string }).role ?? "user";
+      const actionsJson = (target as { actionsJson?: string }).actionsJson ?? "";
+      if (!id) throw new Error("Cannot rename: target message missing id.");
+      await chatMessagesCollection.update(id, {
+        sessionId,
+        role,
+        content: trimmed,
+        actionsJson,
+      });
+      return { sessionId, newTitle: trimmed };
+    },
+    onSuccess: (_res, vars) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.chatHistory(userId, vars.sessionId),
+      });
+      qc.invalidateQueries({ queryKey: queryKeys.chatSessions(userId) });
+    },
+  });
+}
+
 export function useAppendChatMessage(): UseMutationResult<
   PersistedChatMessage,
   Error,
@@ -770,6 +965,311 @@ export function useAppendChatMessage(): UseMutationResult<
       // for the first time after this mutation, and an existing one's
       // title/lastActivity/messageCount may have changed.
       qc.invalidateQueries({ queryKey: queryKeys.chatSessions(userId) });
+    },
+  });
+}
+
+// --- Direct messages (member chat) ------------------------------------------
+//
+// The /chat page's data feed. One row per message; the sender writes it,
+// the recipient reads it back through `recipientId`. The gateway's flat
+// AND-filters can't express "senderId = me OR recipientId = me", so the
+// read is two list calls (outbox + inbox) merged and deduped by ItemId.
+// There's no push channel for Blocks Data, so the query polls every 5s
+// while the page is mounted — WhatsApp-ish liveness without websockets.
+
+export function useDirectMessages(): UseQueryResult<DirectMessage[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.directMessages(userId),
+    enabled: Boolean(userId),
+    refetchInterval: 5000,
+    queryFn: async () => {
+      const [sent, received] = await Promise.all([
+        directMessagesCollection.list({
+          filter: { senderId: userId },
+          pageNo: 1,
+          pageSize: 500,
+          sort: { CreatedDate: 1 },
+        }),
+        directMessagesCollection.list({
+          filter: { recipientId: userId },
+          pageNo: 1,
+          pageSize: 500,
+          sort: { CreatedDate: 1 },
+        }),
+      ]);
+      const merged = new Map<string, DirectMessage>();
+      for (const raw of [
+        ...unwrapPaged<CloudDirectMessage>(sent).items,
+        ...unwrapPaged<CloudDirectMessage>(received).items,
+      ]) {
+        merged.set(raw.ItemId, toDirectMessage(raw));
+      }
+      return [...merged.values()].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
+    },
+  });
+}
+
+export function useSendDirectMessage(): UseMutationResult<
+  DirectMessage,
+  Error,
+  { recipientId: string; content: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      const created = (await directMessagesCollection.create({
+        senderId: userId,
+        recipientId: input.recipientId,
+        content: input.content,
+        readAt: "",
+      })) as { data?: CloudDirectMessage } | CloudDirectMessage;
+      const item =
+        "data" in created && created.data
+          ? created.data
+          : (created as CloudDirectMessage);
+      return toDirectMessage(item as Parameters<typeof toDirectMessage>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+    },
+  });
+}
+
+// Stamps `readAt` on the given received messages (the caller passes the
+// unread rows of the conversation being opened). Updates run one-by-one —
+// the SDK exposes no bulk update — each carrying the full required field
+// set, mirroring the rename-chat-session patch shape.
+export function useMarkDirectMessagesRead(): UseMutationResult<
+  void,
+  Error,
+  DirectMessage[]
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (messages) => {
+      const now = new Date().toISOString();
+      for (const m of messages) {
+        await directMessagesCollection.update(m.id, {
+          senderId: m.senderId,
+          recipientId: m.recipientId,
+          content: m.content,
+          readAt: now,
+        });
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+    },
+  });
+}
+
+// --- Chat image attachment ---------------------------------------------------
+//
+// Send a direct message that carries an optional image attachment. Mirrors
+// `useUploadProfilePic`'s three-step flow (presign → PUT → row create) but
+// drives the `directMessages` collection instead of `userProfiles`.
+//
+// Why a separate hook rather than widening `useSendDirectMessage`:
+//   - Different async shape — three round-trips, two of them with distinct
+//     failure modes the caller needs to surface (presign denied, PUT 4xx,
+//     row create 400). Collapsing into one mutation hides those from the
+//     toast layer.
+//   - Different UX state — the composer mounts a paperclip + removable
+//     preview chip and needs its own `isPending` for the spinner + button
+//     disable. `useSendDirectMessage`'s `isPending` should stay scoped to
+//     the text-only path so a stalled attachment upload doesn't grey out
+//     text sends.
+//   - Presigned URLs are single-use — `retry: false` is mandatory below so
+//     a transient row-create failure doesn't re-PUT duplicate bytes.
+//
+// Orphan files: if `presignUpload` + `uploadToPresignedUrl` succeed but the
+// row create fails, the bytes are left in storage (no compensating delete).
+// Acceptable for v1; `files.delete` is the manual escape hatch.
+
+const CHAT_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
+
+export function useSendChatAttachment(): UseMutationResult<
+  { message: DirectMessage; fileId: string },
+  Error,
+  { recipientId: string; content: string; file: File }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    retry: false,
+    mutationFn: async ({ recipientId, content, file }) => {
+      if (!userId) {
+        throw new Error("You must be signed in to send attachments.");
+      }
+      if (!file.type.startsWith("image/")) {
+        throw new Error("Please pick an image file.");
+      }
+      if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
+        throw new Error("Image must be 4 MB or smaller.");
+      }
+      // Unique filename per send — same shape as profile pics so the storage
+      // layout is predictable, but `tags` lets admins distinguish the two.
+      const ext =
+        (file.name.split(".").pop() ?? "").toLowerCase() ||
+        file.type.replace("image/", "") ||
+        "png";
+      const fileName = `chat-${userId}-${Date.now()}.${ext}`;
+      const presign = await presignUpload({
+        fileName,
+        contentType: file.type,
+        tags: "chat-attachment",
+      });
+      await uploadToPresignedUrl(presign.uploadUrl, file, file.type);
+      const created = (await directMessagesCollection.create({
+        senderId: userId,
+        recipientId,
+        content: content || "",
+        readAt: "",
+        attachmentFileId: presign.fileId,
+      })) as { data?: CloudDirectMessage } | CloudDirectMessage;
+      const item =
+        "data" in created && created.data
+          ? created.data
+          : (created as CloudDirectMessage);
+      return {
+        message: toDirectMessage(item as Parameters<typeof toDirectMessage>[0]),
+        fileId: presign.fileId,
+      };
+    },
+    onSuccess: ({ fileId }) => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+      // Prefill the URL cache so the new bubble's <img> renders immediately
+      // without waiting for the bubble component to mount the query.
+      qc.prefetchQuery({
+        queryKey: queryKeys.fileDownloadUrl(fileId),
+        queryFn: () => fetchFileDownloadUrl(fileId),
+      });
+    },
+  });
+}
+
+// --- Announcements (manager broadcast) ---------------------------------------
+//
+// Dashboard section: a manager posts a workspace-wide message ("today we
+// are going to prod") and every invited member reads it. The read has NO
+// per-user filter — the collection is intentionally public to the
+// workspace. The write paths gate on the manager role client-side, the
+// same defense-in-depth pattern as the tester guards on project
+// mutations (the composer doesn't even render for non-managers).
+
+export function useAnnouncements(): UseQueryResult<Announcement[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    // `userId` in the key only so a sign-out / sign-in cycle doesn't
+    // serve one session's cache into the next; the rows themselves are
+    // workspace-wide.
+    queryKey: [...queryKeys.announcements, userId],
+    enabled: Boolean(userId),
+    // Announcements are rare — a slow poll keeps a freshly posted
+    // message appearing on other members' dashboards within a minute.
+    refetchInterval: 60_000,
+    queryFn: async () => {
+      const raw = await announcementsCollection.list({
+        pageNo: 1,
+        pageSize: 50,
+        sort: { CreatedDate: -1 },
+      });
+      return unwrapPaged<CloudAnnouncement>(raw).items.map((a) =>
+        toAnnouncement(a),
+      );
+    },
+  });
+}
+
+export function usePostAnnouncement(): UseMutationResult<
+  Announcement,
+  Error,
+  { content: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!isManager) {
+        throw new Error("Only managers can post announcements.");
+      }
+      const created = (await announcementsCollection.create({
+        authorId: userId,
+        content: input.content,
+      })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      const item =
+        "data" in created && created.data
+          ? created.data
+          : (created as CloudAnnouncement);
+      return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.announcements });
+    },
+  });
+}
+
+// Editing keeps the ORIGINAL authorId: an edit by another manager must
+// not rewrite authorship (the row still shows who first posted it).
+// `authorId` re-sent unchanged because requiredOn:3 fields must all ride
+// the update patch — same full-patch shape as the DM readAt stamp.
+export function useUpdateAnnouncement(): UseMutationResult<
+  Announcement,
+  Error,
+  { id: string; authorId: string; content: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!isManager) {
+        throw new Error("Only managers can edit announcements.");
+      }
+      const updated = (await announcementsCollection.update(input.id, {
+        authorId: input.authorId,
+        content: input.content,
+      })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      const item =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as CloudAnnouncement);
+      return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.announcements });
+    },
+  });
+}
+
+export function useDeleteAnnouncement(): UseMutationResult<
+  void,
+  Error,
+  string
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
+  return useMutation({
+    mutationFn: async (id) => {
+      if (!isManager) {
+        throw new Error("Only managers can delete announcements.");
+      }
+      await announcementsCollection.delete(id);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.announcements });
     },
   });
 }
@@ -932,6 +1432,13 @@ export function useCreateFeature(): UseMutationResult<
     // `developerIds`. Populated from the "Assign QAs" multi-select,
     // which sources from users with the `tester` IAM role.
     qaIds?: string[];
+    // Optional GitHub URL — issue, PR, or repo path. The Add
+    // Feature modal normalizes missing schemes (`github.com/...`
+    // → `https://github.com/...`) before forwarding. `undefined`
+    // means the user left the field blank; the mutation handler
+    // below strips it from the wire payload so the cloud record
+    // doesn't store an empty string.
+    githubLink?: string;
   }
 > {
   const { currentUser } = useAuth();
@@ -973,6 +1480,14 @@ export function useCreateFeature(): UseMutationResult<
         // and the record is created without one (legacy-compatible shape).
         ...(input.envSlug ? { envSlug: input.envSlug } : {}),
         ...assignments,
+        // githubLink: only forwarded when the user actually typed
+        // something. The modal normalizes missing schemes; this
+        // hook just gates inclusion on `input.githubLink` being a
+        // non-empty string so a stale empty-state on an existing
+        // feature never accidentally clears a link.
+        ...(input.githubLink && input.githubLink.trim() !== ""
+          ? { githubLink: input.githubLink.trim() }
+          : {}),
       });
       // Same wire-shape fix as `useCreateProject` — see that hook's
       // comment for why the old `created.data ?? ...` cast was wrong.
@@ -994,6 +1509,12 @@ export function useCreateFeature(): UseMutationResult<
         // same developer/QA list the cloud has.
         developerIds: input.developerIds,
         qaIds: input.qaIds,
+        // Same echo for githubLink — `toFeature` normalizes empty
+        // strings to `undefined`, so `input.githubLink` undefined
+        // here is fine; the drawer just won't render the row.
+        githubLink: input.githubLink && input.githubLink.trim() !== ""
+          ? input.githubLink.trim()
+          : undefined,
         CreatedDate: now,
         LastUpdatedDate: now,
       };
@@ -2304,6 +2825,758 @@ export function useRenameProjectEnv(): UseMutationResult<
         queryKey: ["features", userId, vars.projectId],
       });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Issue Tracker — per-user collections + mutations
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The Issue Tracker's storage shapes live in `blocks/data/schemas/*.json`
+// (VerificationTarget, Secret, Issue). The hooks below are the single
+// place that talks to those collections: pages consuming the Issue Tracker
+// pull data via `useIssueTrackerTargets` / `useIssueTrackerSecrets` /
+// `useIssueTrackerIssues`, and call mutations through the matching
+// `useCreate*` / `useUpdate*` / `useDelete*` hooks.
+//
+// Why per-user scoping: each user has their own verification surface —
+// the configured URLs, the credentials, and the detected issues all belong
+// to the signed-in operator. `createdByFilter(userId)` filters reads and
+// the platform auto-attaches `CreatedBy` to writes, mirroring the pattern
+// in `useProjects` / `useProjectFeatures`.
+//
+// Mutations invalidate the per-user list cache so the UI refreshes in
+// place without forcing a remount. We deliberately avoid placing these
+// behind any per-query-key dashboard invalidation — the Issue Tracker
+// page is the only consumer, and coupling its updates to dashboard totals
+// would force unnecessary refetches on every change.
+
+// Read every configured URL for the signed-in user. Sort by
+// `LastUpdatedDate` desc so the most recently touched targets surface
+// first — the `UrlInput` panel shows what the user just edited at the top
+// of the list. Matches the Project listing's sort choice.
+export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.issueTrackerTargets(userId),
+    enabled: Boolean(userId),
+    queryFn: async () => {
+      const raw = await verificationTargetsCollection.list({
+        filter: createdByFilter(userId),
+        pageNo: 1,
+        pageSize: 200,
+        sort: { LastUpdatedDate: -1 },
+      });
+      return unwrapPaged<unknown>(raw).items.map((t) =>
+        toVerificationTarget(t as Parameters<typeof toVerificationTarget>[0]),
+      );
+    },
+  });
+}
+
+// Read every credential row for the signed-in user. The page never needs
+// the real password — `passwordMasked` rides alone on the wire, the form
+// holds the value during the active session and clears on unmount (see
+// the form's local-state treatment + spec section 12.3).
+export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.issueTrackerSecrets(userId),
+    enabled: Boolean(userId),
+    queryFn: async () => {
+      const raw = await secretsCollection.list({
+        filter: createdByFilter(userId),
+        pageNo: 1,
+        pageSize: 200,
+        sort: { CreatedDate: -1 },
+      });
+      return unwrapPaged<unknown>(raw).items.map((s) =>
+        toSecret(s as Parameters<typeof toSecret>[0]),
+      );
+    },
+  });
+}
+
+// Read every issue recorded for the signed-in user. The IssueTrackerPage
+// filters / sorts the returned list client-side (search is server-cheap
+// but the chip-row + search composition wasn't worth a round trip), so
+// the cloud-side sort here is just `detectedAt desc` — newest findings
+// at the top, matching the existing UI's "newest" default sort.
+//
+// Role-aware scoping (the manual triage flow): verification runs execute
+// as the MANAGER's session, so every row's CreatedBy is the manager — a
+// CreatedBy-only scope would leave testers and developers with an empty
+// tracker no matter what they're assigned. The gateway rules are open
+// (blocks/data/rules.json is empty), so:
+//   - manager  → wire-scoped to CreatedBy = me (their own runs' issues)
+//   - tester   → fetch unscoped, keep rows ASSIGNED to me (any approval
+//                state — this queue IS the work to re-test and approve)
+//   - developer→ fetch unscoped, keep rows assigned to me AND approved
+//                (a tester's approval is what admits an issue here)
+//   - other/unknown roles fall back to the CreatedBy scope.
+// The query key carries the roles signature alongside the userId:
+// `AuthProvider` sets `currentUser` the moment the session claims land
+// but fills `roles` one round-trip later (`iam.me()`), so a query keyed
+// on the userId alone would fire its queryFn with `roles: []` — the
+// CreatedBy branch — and cache an empty list that no later render ever
+// refetches (same key). Keying on the roles makes the hydration flip
+// `[] → ["developer"]` start a fresh query with the right branch. It is
+// appended AFTER the userId so the mutation invalidations, which use the
+// `queryKeys.issueTrackerIssues(userId)` prefix, still match every
+// variant.
+export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  const roles = currentUser?.roles ?? [];
+  const isTester = roles.includes("tester");
+  const isDeveloper = roles.includes("developer");
+  // Only these two roles need the cross-user fetch; manager keeps the
+  // tight wire filter.
+  const fetchUnscoped = isTester || isDeveloper;
+  return useQuery({
+    queryKey: [...queryKeys.issueTrackerIssues(userId), roles.join(",")],
+    enabled: Boolean(userId),
+    queryFn: async () => {
+      const raw = fetchUnscoped
+        ? await issuesCollection.list({
+            pageNo: 1,
+            pageSize: 200,
+            sort: { detectedAt: -1 },
+          })
+        : await issuesCollection.list({
+            filter: createdByFilter(userId),
+            pageNo: 1,
+            pageSize: 200,
+            sort: { detectedAt: -1 },
+          });
+      const rows = unwrapPaged<unknown>(raw).items.map((i) =>
+        toIssue(i as Parameters<typeof toIssue>[0]),
+      );
+      if (!fetchUnscoped) return rows;
+      const assignedToMe = rows.filter((i) =>
+        (i.assignedDeveloperIds ?? []).includes(userId),
+      );
+      return isTester ? assignedToMe : assignedToMe.filter((i) => !!i.approvedById);
+    },
+  });
+}
+
+// Add a configured URL + (optional) credential link. The mutation returns
+// the fresh `VerificationTarget` so the page can stamp UI state without a
+// refetch; on success we invalidate the per-user list cache so other
+// panels (e.g. the verification summary tile) refresh in place.
+//
+// `enabled` rides the wire as `"true"/"false"` — see `toVerificationTarget`
+// for the read-side coercion. The cloud schema marks it `requiredOn: 3`
+// so the server rejects an empty value; we default to `"true"` to match
+// the form's "always verify" convention.
+export function useCreateVerificationTarget(): UseMutationResult<
+  VerificationTarget,
+  Error,
+  Omit<VerificationTarget, "id" | "createdAt" | "updatedAt">
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      // Only forward fields that have values. Empty strings against
+      // `requiredOn: 0` fields are rejected by some gateway versions
+      // — better to omit than to send `""` for a brand-new row.
+      const created = await verificationTargetsCollection.create({
+        applicationName: input.applicationName,
+        url: input.url,
+        environment: input.environment,
+        // `enabled` is the only non-Cloud-native field — the cloud
+        // stores it as "true"/"false" because the schema field type is
+        // String. Coerce before sending so the cloud gets a real value
+        // (the schema marks it `requiredOn: 3`).
+        enabled: input.enabled ? "true" : "false",
+        ...(input.credentialId
+          ? { credentialId: input.credentialId }
+          : {}),
+        ...(input.lastVerifiedAt
+          ? { lastVerifiedAt: input.lastVerifiedAt }
+          : {}),
+        ...(input.lastStatus
+          ? { lastStatus: input.lastStatus }
+          : {}),
+      });
+      const itemId = extractInsertedItemId(created, "insertVerificationTarget");
+      if (!itemId) {
+        throw new Error(
+          "Could not create verification target — no itemId in response.",
+        );
+      }
+      const now = new Date().toISOString();
+      const item = {
+        ItemId: itemId,
+        ...input,
+        enabled: input.enabled ? "true" : "false",
+        CreatedDate: now,
+        LastUpdatedDate: now,
+      };
+      return toVerificationTarget(item as Parameters<typeof toVerificationTarget>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerTargets(userId),
+      });
+    },
+  });
+}
+
+// Delete one configured URL. The mutation returns void — TanStack fires
+// the onSuccess cleanup anyway, and we invalidate the list so the row
+// disappears from the panel.
+export function useDeleteVerificationTarget(): UseMutationResult<
+  void,
+  Error,
+  string
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (id) => {
+      await verificationTargetsCollection.delete(id);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerTargets(userId),
+      });
+    },
+  });
+}
+
+// Partial update — callers pass only the fields they're changing. The hook
+// echoes the unchanged required fields so the gateway accepts the partial
+// PATCH (the cloud schema marks `applicationName`, `url`, `environment`,
+// and `enabled` as `requiredOn: 3` — required on every update too, not
+// just on insert). Status flips from the verification panel use the same
+// hook with `{ lastStatus, lastVerifiedAt }`.
+export function useUpdateVerificationTarget(): UseMutationResult<
+  VerificationTarget,
+  Error,
+  { id: string; patch: Partial<VerificationTarget> }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, patch }) => {
+      // The VerificationTarget schema marks applicationName, url,
+      // environment, and enabled as `requiredOn: 3`, so every PATCH must
+      // include them or the gateway rejects with VALIDATION_ERROR. Read
+      // the row first and echo the stored values back, then let `patch`
+      // override them — same pattern `useUpdateIssueStatus` uses. The
+      // optional fields (credentialId / lastVerifiedAt / lastStatus) go
+      // straight from the patch, falling back to "" so a clear value
+      // doesn't accidentally keep a stale string in the cloud.
+      const rawExisting = await verificationTargetsCollection.get(id);
+      const existing = unwrapPaged<{
+        ItemId: string;
+        applicationName: string;
+        url: string;
+        environment: string;
+        enabled: string;
+        credentialId?: string;
+        lastVerifiedAt?: string;
+        lastStatus?: string;
+      }>(rawExisting).items[0];
+      const update: Record<string, unknown> = {
+        applicationName: patch.applicationName ?? existing?.applicationName ?? "",
+        url: patch.url ?? existing?.url ?? "",
+        environment: patch.environment ?? existing?.environment ?? "production",
+        enabled:
+          typeof patch.enabled === "boolean"
+            ? patch.enabled
+              ? "true"
+              : "false"
+            : (existing?.enabled ?? "true"),
+      };
+      if (patch.credentialId !== undefined) {
+        update.credentialId = patch.credentialId ?? "";
+      }
+      if (patch.lastVerifiedAt !== undefined) {
+        update.lastVerifiedAt = patch.lastVerifiedAt ?? "";
+      }
+      if (patch.lastStatus !== undefined) {
+        update.lastStatus = patch.lastStatus ?? "";
+      }
+      const updated = (await verificationTargetsCollection.update(
+        id,
+        update,
+      )) as {
+        data?: Parameters<typeof toVerificationTarget>[0];
+      } | Parameters<typeof toVerificationTarget>[0];
+      const raw =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as Parameters<typeof toVerificationTarget>[0]);
+      return toVerificationTarget(raw);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerTargets(userId),
+      });
+    },
+  });
+}
+
+// Add a credential row. Password is masked client-side before it leaves
+// the form — the cloud only ever stores the masked display string during
+// the frontend phase (see spec section 12.3).
+export function useCreateSecret(): UseMutationResult<
+  Secret,
+  Error,
+  { name: string; email: string; passwordMasked: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      const created = await secretsCollection.create({
+        name: input.name,
+        email: input.email,
+        passwordMasked: input.passwordMasked,
+      });
+      const itemId = extractInsertedItemId(created, "insertSecret");
+      if (!itemId) {
+        throw new Error("Could not create secret — no itemId in response.");
+      }
+      const now = new Date().toISOString();
+      const item = {
+        ItemId: itemId,
+        name: input.name,
+        email: input.email,
+        passwordMasked: input.passwordMasked,
+        CreatedDate: now,
+        LastUpdatedDate: now,
+      };
+      return toSecret(item as Parameters<typeof toSecret>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerSecrets(userId),
+      });
+    },
+  });
+}
+
+export function useDeleteSecret(): UseMutationResult<void, Error, string> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (id) => {
+      await secretsCollection.delete(id);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerSecrets(userId),
+      });
+    },
+  });
+}
+
+// Edit the credential label + login email. The Secret schema marks
+// `name`, `email`, and `passwordMasked` as `requiredOn: 3`, so every PATCH
+// must echo all three back. The password is intentionally NOT editable
+// from this hook — per spec section 12.3 the real password never reaches
+// the cloud during the frontend phase, only the masked display string. If
+// a credential's password needs to change, the user must delete the row
+// and add a fresh one (same flow that exists today). We therefore read the
+// existing row and echo `passwordMasked` back untouched, letting `name`
+// and `email` be overridden by the patch.
+export function useUpdateSecret(): UseMutationResult<
+  Secret,
+  Error,
+  { id: string; patch: { name?: string; email?: string } }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, patch }) => {
+      const rawExisting = await secretsCollection.get(id);
+      const existing = unwrapPaged<{
+        ItemId: string;
+        name: string;
+        email: string;
+        passwordMasked: string;
+      }>(rawExisting).items[0];
+      const updated = (await secretsCollection.update(id, {
+        name: patch.name ?? existing?.name ?? "",
+        email: patch.email ?? existing?.email ?? "",
+        // Always echo the stored masked value back — never blank it out,
+        // since we don't accept a new password from this codepath.
+        passwordMasked: existing?.passwordMasked ?? "",
+      })) as {
+        data?: Parameters<typeof toSecret>[0];
+      } | Parameters<typeof toSecret>[0];
+      const raw =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as Parameters<typeof toSecret>[0]);
+      return toSecret(raw);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerSecrets(userId),
+      });
+    },
+  });
+}
+
+// Issue insert + status updates. The status flip is the one hot path
+// (the chip on every IssueCard), so it gets its own hook — combining it
+// with the general-purpose create would force the IssueCard to thread
+// the entire row through the mutation payload.
+export function useCreateIssue(): UseMutationResult<
+  Issue,
+  Error,
+  Omit<Issue, "id">
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      const created = await issuesCollection.create({
+        title: input.title,
+        applicationName: input.applicationName,
+        url: input.url,
+        category: input.category,
+        severity: input.severity,
+        status: input.status,
+        // Optional content fields — only forward defined values so a
+        // legacy caller (or a synthetic issue from `driveMockRun`) doesn't
+        // collide with the cloud's "missing required field" rule on
+        // inserts that explicitly omit them.
+        ...(input.description !== undefined
+          ? { description: input.description }
+          : {}),
+        ...(input.expected !== undefined ? { expected: input.expected } : {}),
+        ...(input.actual !== undefined ? { actual: input.actual } : {}),
+        // JSON-encode the array fields before sending — the schema only
+        // supports primitive String fields.
+        reproductionStepsJson: input.reproductionSteps
+          ? JSON.stringify(input.reproductionSteps)
+          : "",
+        evidenceJson: input.evidence
+          ? JSON.stringify(input.evidence)
+          : "",
+        detectedAt: input.detectedAt,
+        ...(input.verificationRunId !== undefined
+          ? { verificationRunId: input.verificationRunId }
+          : {}),
+        // Fingerprint identity + recurrence stats — numeric values ride the
+        // wire as strings (primitive-only schema). Same "only if defined"
+        // spread as above so non-verification callers are unaffected.
+        ...(input.fingerprint !== undefined
+          ? { fingerprint: input.fingerprint }
+          : {}),
+        ...(input.occurrenceCount !== undefined
+          ? { occurrenceCount: String(input.occurrenceCount) }
+          : {}),
+        ...(input.lastSeenAt !== undefined
+          ? { lastSeenAt: input.lastSeenAt }
+          : {}),
+        seenInRunIdsJson: input.seenInRunIds
+          ? JSON.stringify(input.seenInRunIds)
+          : "",
+      });
+      const itemId = extractInsertedItemId(created, "insertIssue");
+      if (!itemId) {
+        throw new Error("Could not create issue — no itemId in response.");
+      }
+      const now = new Date().toISOString();
+      const item = {
+        ItemId: itemId,
+        ...input,
+        reproductionStepsJson: input.reproductionSteps
+          ? JSON.stringify(input.reproductionSteps)
+          : undefined,
+        evidenceJson: input.evidence
+          ? JSON.stringify(input.evidence)
+          : undefined,
+        // Same wire-shaping as above so the optimistic `toIssue` maps the
+        // recurrence fields instead of dropping them.
+        occurrenceCount:
+          input.occurrenceCount !== undefined
+            ? String(input.occurrenceCount)
+            : undefined,
+        seenInRunIdsJson: input.seenInRunIds
+          ? JSON.stringify(input.seenInRunIds)
+          : undefined,
+        CreatedDate: now,
+        LastUpdatedDate: now,
+      };
+      return toIssue(item as Parameters<typeof toIssue>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerIssues(userId),
+      });
+    },
+  });
+}
+
+export function useUpdateIssueStatus(): UseMutationResult<
+  Issue,
+  Error,
+  { id: string; status: IssueStatus }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, status }) => {
+      // Echo required fields so the partial PATCH doesn't bounce on
+      // "missing required field" — the Issue schema marks `title`,
+      // `applicationName`, `url`, `category`, `severity`, `status`, and
+      // `detectedAt` as `requiredOn: 3`. We read the row first to keep
+      // the echo honest; without the read the cloud would reject the
+      // call (the gateway echoes won't auto-fill from stored fields).
+      const raw = await issuesCollection.get(id);
+      const existing = unwrapPaged<{
+        ItemId: string;
+        title: string;
+        applicationName: string;
+        url: string;
+        category: string;
+        severity: string;
+        detectedAt: string;
+      }>(raw).items[0];
+      const updated = (await issuesCollection.update(id, {
+        title: existing?.title ?? "",
+        applicationName: existing?.applicationName ?? "",
+        url: existing?.url ?? "",
+        category: existing?.category ?? "other",
+        severity: existing?.severity ?? "low",
+        detectedAt: existing?.detectedAt ?? new Date().toISOString(),
+        status,
+      })) as {
+        data?: Parameters<typeof toIssue>[0];
+      } | Parameters<typeof toIssue>[0];
+      const data =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as Parameters<typeof toIssue>[0]);
+      return toIssue(data);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerIssues(userId),
+      });
+    },
+  });
+}
+
+// Partial issue update for the dedup/merge path (occurrence bumps, severity
+// escalations, reopen-on-regression). Follows the same read-echo contract as
+// `useUpdateIssueStatus`: the cloud PATCH bounces without the requiredOn:3
+// fields present, so we read the row first and echo whatever is stored.
+export function useUpdateIssue(): UseMutationResult<
+  Issue,
+  Error,
+  {
+    id: string;
+    patch: Partial<
+      Pick<
+        Issue,
+        | "status"
+        | "severity"
+        | "fingerprint"
+        | "occurrenceCount"
+        | "lastSeenAt"
+        | "seenInRunIds"
+        | "assignedDeveloperIds"
+        | "approvedById"
+      >
+    >;
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, patch }) => {
+      const raw = await issuesCollection.get(id);
+      const existing = unwrapPaged<{
+        ItemId: string;
+        title: string;
+        applicationName: string;
+        url: string;
+        category: string;
+        severity: string;
+        status: string;
+        detectedAt: string;
+        fingerprint?: string;
+        occurrenceCount?: string;
+        lastSeenAt?: string;
+        seenInRunIdsJson?: string;
+        assignedDeveloperIdsJson?: string;
+        approvedById?: string;
+      }>(raw).items[0];
+      if (!existing) {
+        throw new Error(`Could not update issue ${id} — row not found.`);
+      }
+      const updated = (await issuesCollection.update(id, {
+        // Required-field echo — always the stored values, never the patch's.
+        title: existing.title,
+        applicationName: existing.applicationName,
+        url: existing.url,
+        category: existing.category,
+        severity: patch.severity ?? existing.severity,
+        status: patch.status ?? existing.status,
+        detectedAt: existing.detectedAt,
+        // Patchable fields — fall back to stored so an omitted key is a
+        // no-op rather than a wipe.
+        fingerprint: patch.fingerprint ?? existing.fingerprint ?? "",
+        occurrenceCount: String(
+          patch.occurrenceCount ??
+            (existing.occurrenceCount ? Number(existing.occurrenceCount) : 1),
+        ),
+        lastSeenAt: patch.lastSeenAt ?? existing.lastSeenAt ?? "",
+        seenInRunIdsJson: patch.seenInRunIds
+          ? JSON.stringify(patch.seenInRunIds)
+          : (existing.seenInRunIdsJson ?? ""),
+        assignedDeveloperIdsJson: patch.assignedDeveloperIds
+          ? JSON.stringify(patch.assignedDeveloperIds)
+          : (existing.assignedDeveloperIdsJson ?? "[]"),
+        approvedById: patch.approvedById ?? existing.approvedById ?? "",
+      })) as {
+        data?: Parameters<typeof toIssue>[0];
+      } | Parameters<typeof toIssue>[0];
+      const data =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as Parameters<typeof toIssue>[0]);
+      return toIssue(data);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.issueTrackerIssues(userId),
+      });
+    },
+  });
+}
+// --- Profile pictures ---------------------------------------------------------
+//
+// The picture bytes live in Blocks Data Storage (files); the UserProfile
+// collection only maps userId → fileId (see data.ts). Reads are workspace-
+// wide so any member's avatar can render anywhere; writes are the signed-in
+// user's OWN row only — an upsert found by filtering on `userId`.
+
+export function useProfilePics(): UseQueryResult<Map<string, UserProfilePic>> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: [...queryKeys.profilePics(userId)],
+    enabled: Boolean(userId),
+    // Fresh uploads by OTHER members should appear on shared surfaces (chat
+    // roster, members grid) without a reload — a 30s poll mirrors the DM
+    // pattern's intent at a calmer cadence.
+    refetchInterval: 30_000,
+    queryFn: async () => {
+      const raw = await userProfilesCollection.list({
+        pageNo: 1,
+        pageSize: 200,
+      });
+      const rows = unwrapPaged<CloudUserProfile>(raw).items.map((row) =>
+        toUserProfilePic(row),
+      );
+      const byUser = new Map<string, UserProfilePic>();
+      for (const row of rows) {
+        if (row.userId) byUser.set(row.userId, row);
+      }
+      return byUser;
+    },
+  });
+}
+
+// Resolve one storage file id to a provider-signed download URL. Cached
+// per fileId and shared by every avatar that renders the same picture;
+// staleTime keeps the presigned URL from being re-requested on every mount.
+export function useFileDownloadUrl(
+  fileId: string | null | undefined,
+): UseQueryResult<string> {
+  return useQuery({
+    queryKey: queryKeys.fileDownloadUrl(fileId ?? ""),
+    enabled: Boolean(fileId),
+    staleTime: 5 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
+    retry: 1,
+    queryFn: () => fetchFileDownloadUrl(fileId as string),
+  });
+}
+
+export function useUploadProfilePic(): UseMutationResult<
+  { fileId: string },
+  Error,
+  { file: File }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ file }) => {
+      if (!userId) {
+        throw new Error("You must be signed in to upload a profile picture.");
+      }
+      if (!file.type.startsWith("image/")) {
+        throw new Error("Profile pictures must be image files.");
+      }
+      // Names must be unique within a directory — stamp user + time so a
+      // re-upload never collides with the previous picture.
+      const ext = (file.name.split(".").pop() ?? "").toLowerCase() ||
+        file.type.replace("image/", "") || "png";
+      const fileName = `profile-${userId}-${Date.now()}.${ext}`;
+
+      // Two-step cloud upload: presign (creates the file record), then PUT
+      // the bytes to the provider-direct URL. A PUT failure leaves metadata
+      // without bytes — surfaced as an error so the UI can say "try again".
+      const presign = await presignUpload({
+        fileName,
+        contentType: file.type,
+        tags: "profile-pic",
+      });
+      await uploadToPresignedUrl(presign.uploadUrl, file, file.type);
+
+      // Upsert the caller's OWN row: find by userId, update if present
+      // (full patch — `userId` is requiredOn 3), create otherwise.
+      const existingRaw = await userProfilesCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudUserProfile>(existingRaw).items[0];
+      if (existing) {
+        await userProfilesCollection.update(existing.ItemId, {
+          userId,
+          imageFileId: presign.fileId,
+        });
+      } else {
+        await userProfilesCollection.create({
+          userId,
+          imageFileId: presign.fileId,
+        });
+      }
+      return { fileId: presign.fileId };
+    },
+    onSuccess: ({ fileId }) => {
+      qc.invalidateQueries({ queryKey: queryKeys.profilePics(userId) });
+      // Prefill the URL cache so the new picture renders immediately.
+      qc.prefetchQuery({
+        queryKey: queryKeys.fileDownloadUrl(fileId),
+        queryFn: () => fetchFileDownloadUrl(fileId),
+      });
     },
   });
 }

@@ -1,22 +1,59 @@
 // Wrapper for the Secrets section (spec section 12): empty state, list of
 // saved credentials, and the add form.
+//
+// The form shows a target-binding dropdown so the user can pick exactly one
+// configured verification target to bind the credential to at creation time.
+// Binding is enforced server-side too — only one credential can be active
+// per target — so if the user picks an already-bound target, the existing
+// binding is replaced.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { SecretCard } from "./SecretCard";
 import { SecretForm } from "./SecretForm";
-import type { Secret } from "@/types/issue-tracker";
+import type { Secret, VerificationTarget } from "@/types/issue-tracker";
 
 interface Props {
   secrets: Secret[];
-  onAdd: (payload: { name: string; email: string; password: string }) => Promise<void>;
+  targets: VerificationTarget[];
+  onAdd: (payload: {
+    name: string;
+    email: string;
+    password: string;
+    targetId?: string;
+  }) => Promise<void>;
+  onEdit: (id: string, patch: { name: string; email: string }) => void;
   onDelete: (id: string) => void;
+  // Re-bind a saved secret to a different target (or clear the binding by
+  // passing empty string). Receives the secretId and the new targetId.
+  onBind: (secretId: string, targetId: string | null) => void;
 }
 
-export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
+export function SecretsPanel({
+  secrets,
+  targets,
+  onAdd,
+  onEdit,
+  onDelete,
+  onBind,
+}: Props) {
   const [formOpen, setFormOpen] = useState(false);
+
+  // Build a quick lookup of targetId → name of the secret currently bound
+  // to it. The form uses this to warn the user before they overwrite an
+  // existing binding.
+  const boundSecretByTargetId = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const t of targets) {
+      if (t.credentialId) {
+        const s = secrets.find((x) => x.id === t.credentialId);
+        if (s) map[t.id] = s.name;
+      }
+    }
+    return map;
+  }, [targets, secrets]);
 
   return (
     <Card>
@@ -28,6 +65,8 @@ export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
           </CardTitle>
           <CardDescription>
             Credentials the AI uses to sign into applications during verification.
+            Each credential is scoped to one target — it will not be passed to
+            any other URL.
           </CardDescription>
         </div>
         <Badge variant="muted">{secrets.length}</Badge>
@@ -46,7 +85,13 @@ export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
           <ul className="space-y-2">
             {secrets.map((s) => (
               <li key={s.id}>
-                <SecretCard secret={s} onDelete={onDelete} />
+                <SecretCard
+                  secret={s}
+                  targets={targets}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                  onBind={onBind}
+                />
               </li>
             ))}
           </ul>
@@ -54,6 +99,8 @@ export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
 
         {formOpen ? (
           <SecretForm
+            targets={targets}
+            boundSecretByTargetId={boundSecretByTargetId}
             onSubmit={async (payload) => {
               await onAdd(payload);
               setFormOpen(false);

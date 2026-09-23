@@ -55,10 +55,15 @@ interface RawUser {
   id?: string;
   userId?: string;
   sub?: string;
+  // The unfiltered tenant list (`iam.users.list` with no filter) returns
+  // rows keyed by `itemId` — the same field name the Data gateway uses.
+  itemId?: string;
   email?: string;
   firstName?: string;
   lastName?: string;
   name?: string;
+  /** IAM roles — shape varies by tenant (strings or objects). */
+  roles?: unknown;
 }
 
 interface RawUsersResponse {
@@ -96,6 +101,7 @@ function pickName(u: RawUser): string {
 function toUserOption(u: RawUser): UserOption | null {
   const id =
     (typeof u.id === "string" && u.id) ||
+    (typeof u.itemId === "string" && u.itemId) ||
     (typeof u.userId === "string" && u.userId) ||
     (typeof u.sub === "string" && u.sub) ||
     null;
@@ -162,6 +168,69 @@ export function useUsersByRole(role: string) {
       // has the role anymore), so we explicitly require `live.length
       // > 0` before declaring the live path succeeded.
       return [...(HARDCODED_USERS_BY_ROLE[role] ?? [])];
+    },
+  });
+}
+
+// --- All joined members (live-only) -----------------------------------------
+//
+// The member chat roster needs EVERY user who joined the workspace — not
+// a per-role slice, and never the hardcoded safety net (mock users in a
+// chat list would be undeliverable addresses). This hook lists the whole
+// tenant from IAM with no filter and no fallback; the live response is
+// the truth, even when it's empty.
+
+export interface JoinedMember extends UserOption {
+  /** First IAM role we can read off the record; "member" when none. */
+  role: string;
+}
+
+// IAM role payloads vary by tenant — this one returns
+// `roles: { default: ["developer"] }`, others return plain string arrays
+// or objects keyed by name. Recurse through any mix and take the first
+// readable role string.
+function firstRoleString(v: unknown): string | null {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (Array.isArray(v)) {
+    for (const entry of v) {
+      const found = firstRoleString(entry);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (v && typeof v === "object") {
+    for (const value of Object.values(v)) {
+      const found = firstRoleString(value);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function pickRole(u: RawUser): string {
+  return firstRoleString(u.roles) ?? "member";
+}
+
+export function useAllJoinedUsers() {
+  return useQuery<JoinedMember[]>({
+    queryKey: ["iam-users-all"] as const,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    queryFn: async () => {
+      // Unfiltered list = everyone who joined the workspace. Errors
+      // propagate to the query cache on purpose — the chat page shows
+      // its own empty state instead of silently pretending.
+      const raw = (await blocksClient.iam.users.list({
+        pageNo: 1,
+        pageSize: 200,
+      })) as unknown;
+      return unwrapUsers(raw)
+        .map((u) => {
+          const option = toUserOption(u);
+          return option ? { ...option, role: pickRole(u) } : null;
+        })
+        .filter((m): m is JoinedMember => m !== null)
+        .sort((a, b) => a.name.localeCompare(b.name));
     },
   });
 }
@@ -265,4 +334,19 @@ const HARDCODED_USER_BY_ID: Record<string, UserOption> =
 export function lookupUserById(id: string | undefined): UserOption | undefined {
   if (!id) return undefined;
   return HARDCODED_USER_BY_ID[id];
+}
+
+/**
+ * Resolve a user's IAM role from the master roster. Used where behavior
+ * (not just display) keys off a member's role — e.g. the developer-
+ * scoped tracker page gates on approval while a tester's page must show
+ * their queue in any approval state. Returns `undefined` for unknown
+ * ids; callers decide their own fallback. Live rosters should be
+ * preferred when available and this used only as the fallback.
+ */
+export function lookupRoleById(
+  id: string | undefined,
+): "developer" | "tester" | "manager" | undefined {
+  if (!id) return undefined;
+  return HARDCODED_USERS.find((u) => u.id === id)?.role;
 }

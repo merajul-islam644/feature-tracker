@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { Avatar } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useToast } from "@/hooks/useToast";
 import {
   Card,
@@ -44,7 +44,7 @@ export function ProfilePage() {
           </CardTitle>
           <CardContent>
             <div className="flex items-start gap-5">
-              <Avatar name={currentUser.name} size="lg" />
+              <UserAvatar userId={currentUser.id} name={currentUser.name} size="lg" />
               <div className="min-w-0 flex-1">
                 <h3 className="truncate text-lg font-semibold text-foreground">
                   {currentUser.name}

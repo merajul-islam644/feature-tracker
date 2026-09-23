@@ -4,6 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { useThemeStore, applyTheme, applyAccentColor } from "./store/themeStore";
 import { AuthProvider } from "@/components/blocks/AuthProvider";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { LocalizationProvider } from "@/lib/blocks/i18n";
 import { queryClient } from "@/lib/queryClient";
 import "./index.css";
@@ -24,7 +25,11 @@ createRoot(root).render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <LocalizationProvider>
-          <App />
+          {/* Outermost crash guard — see ErrorBoundary for why it wraps
+              the whole tree instead of per-route boundaries. */}
+          <ErrorBoundary>
+            <App />
+          </ErrorBoundary>
         </LocalizationProvider>
       </AuthProvider>
     </QueryClientProvider>

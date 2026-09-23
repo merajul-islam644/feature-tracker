@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { LogOut, User as UserIcon } from "lucide-react";
-import { Avatar } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/UserAvatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -67,7 +67,7 @@ export function Topbar() {
               aria-label="Open user menu"
               className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
-              <Avatar name={currentUser.name} size="md" />
+              <UserAvatar userId={currentUser.id} name={currentUser.name} size="md" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">

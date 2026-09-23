@@ -79,6 +79,14 @@ export function IssueDetailsDrawer({ issue, onClose, onChangeStatus, onVerifyAga
               <Badge className={severityTone[issue.severity]}>{issue.severity}</Badge>
               <Badge variant="muted">{issue.category.replace("_", " ")}</Badge>
               <span className="font-mono text-xs text-muted-foreground">{issue.id}</span>
+              {(issue.occurrenceCount ?? 1) > 1 && (
+                <Badge className="bg-violet-500/10 text-violet-600 dark:text-violet-400">
+                  Seen ×{issue.occurrenceCount}
+                  {issue.lastSeenAt
+                    ? ` · last ${new Date(issue.lastSeenAt).toLocaleDateString()}`
+                    : null}
+                </Badge>
+              )}
               <span className="ml-auto text-xs text-muted-foreground">
                 Detected {new Date(issue.detectedAt).toLocaleString()}
               </span>

@@ -8,6 +8,8 @@ import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectDetailPage } from "@/pages/ProjectDetailPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { MembersPage } from "@/pages/MembersPage";
+import { ChatPage } from "@/pages/ChatPage";
 import { IssueTrackerPage } from "@/pages/IssueTrackerPage";
 import { ProjectInfoPage } from "@/pages/ProjectInfoPage";
 import { NotificationDetailPage } from "@/pages/NotificationDetailPage";
@@ -54,6 +56,8 @@ export default function App() {
             />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/members" element={<MembersPage />} />
+            <Route path="/chat" element={<ChatPage />} />
             <Route path="/issue-tracker" element={<IssueTrackerPage />} />
             <Route
               path="/notifications/:notificationId"
