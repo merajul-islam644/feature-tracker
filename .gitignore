@@ -4,6 +4,11 @@ dist-ssr
 *.local
 .env
 .env.local
+# Per-environment dotenv files — keep secrets out of the repo. The matching
+# `.env.*.example` files are committed as documentation templates.
+.env.production
+.env.staging
+.env.development
 .vscode
 .idea
 .DS_Store
