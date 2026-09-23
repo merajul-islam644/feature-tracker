@@ -6,6 +6,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Skeleton } from "@/components/ui/skeleton";
 
 /*
  * StatCard — see DESIGN-APP-v1.md §7.24.
@@ -35,6 +36,10 @@ export interface StatCardProps extends React.HTMLAttributes<HTMLDivElement> {
   href?: string;
   /** Use rounded-2xl hero variant (larger padding). */
   hero?: boolean;
+  /** While the underlying data is still loading, render the metric slot as
+   *  a pulsing skeleton instead of the value. The label + icon stay so the
+   *  layout doesn't shift when the value arrives. */
+  loading?: boolean;
 }
 
 export const StatCard = React.forwardRef<HTMLDivElement, StatCardProps>(
@@ -49,6 +54,7 @@ export const StatCard = React.forwardRef<HTMLDivElement, StatCardProps>(
       trend,
       href,
       hero = false,
+      loading = false,
       ...props
     },
     ref
@@ -69,7 +75,11 @@ export const StatCard = React.forwardRef<HTMLDivElement, StatCardProps>(
               {label}
             </div>
             <div className="text-2xl font-semibold tabular-nums tracking-tight text-foreground">
-              {metric}
+              {loading ? (
+                <Skeleton className="mt-1 h-7 w-20" />
+              ) : (
+                metric
+              )}
             </div>
           </div>
           {Icon ? (

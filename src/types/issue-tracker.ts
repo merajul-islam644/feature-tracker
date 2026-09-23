@@ -139,6 +139,10 @@ export interface Issue {
   category: IssueCategory;
   severity: IssueSeverity;
   status: IssueStatus;
+  /** Deployment environment the issue was detected in (dev/staging/prod/…).
+   *  Populated by the issue tracker when synthesizing Issue rows from raw
+   *  evidence; older rows created before this field landed won't have it. */
+  environment?: string;
   description: string;
   expected?: string;
   actual?: string;
