@@ -45,6 +45,7 @@ docs/platform-bug-notifier-enumeration.md
 /roles.json
 
 # TypeScript incremental build cache — generated, never source of truth
+tsconfig.tsbuildinfo
 tsconfig.*.tsbuildinfo
 
 # MCP verification agent — secret material, runtime data, screenshots must not be checked in
@@ -60,3 +61,4 @@ mcp-server/*.jpg
 
 # Local MCP / verification scratch directories
 /.verify-monitor/
+/verify-dev-studio/
