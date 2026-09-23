@@ -1,3 +1,14 @@
+var __assign = (this && this.__assign) || function () {
+    __assign = Object.assign || function(t) {
+        for (var s, i = 1, n = arguments.length; i < n; i++) {
+            s = arguments[i];
+            for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
+                t[p] = s[p];
+        }
+        return t;
+    };
+    return __assign.apply(this, arguments);
+};
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -41,7 +52,16 @@ var __asyncValues = (this && this.__asyncValues) || function (o) {
     function verb(n) { i[n] = o[n] && function (v) { return new Promise(function (resolve, reject) { v = o[n](v), settle(resolve, reject, v.done, v.value); }); }; }
     function settle(resolve, reject, d, v) { Promise.resolve(v).then(function(v) { resolve({ value: v, done: d }); }, reject); }
 };
-import { defineConfig } from "vite";
+var __spreadArray = (this && this.__spreadArray) || function (to, from, pack) {
+    if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+        if (ar || !(i in from)) {
+            if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+            ar[i] = from[i];
+        }
+    }
+    return to.concat(ar || Array.prototype.slice.call(from));
+};
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 import fs from "fs";
@@ -55,18 +75,25 @@ import fs from "fs";
 // Falls back to the `ANTHROPIC_*` aliases (`ANTHROPIC_BASE_URL`,
 // `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`) when the canonical names are
 // unset, so `setx ANTHROPIC_AUTH_TOKEN "..."` on Windows Just Works.
-function aiChatProxy() {
+//
+// `env` is the loadEnv() record built in defineConfig — it merges .env file
+// values with the shell's process.env (process.env wins), so the server
+// picks up AI_GATEWAY_MODEL etc. from .env without the shell exporting them.
+// Without this, a dev server started from a shell without these vars fell
+// back to the default model and the gateway routed it to the wrong
+// (quota-exhausted) model group.
+function aiChatProxy(env) {
     var _a, _b, _c, _d, _e, _f;
-    var gatewayUrl = (_b = (_a = process.env.AI_GATEWAY_URL) !== null && _a !== void 0 ? _a : process.env.ANTHROPIC_BASE_URL) !== null && _b !== void 0 ? _b : "";
-    var token = (_d = (_c = process.env.AI_GATEWAY_TOKEN) !== null && _c !== void 0 ? _c : process.env.ANTHROPIC_AUTH_TOKEN) !== null && _d !== void 0 ? _d : "";
-    var model = (_f = (_e = process.env.AI_GATEWAY_MODEL) !== null && _e !== void 0 ? _e : process.env.ANTHROPIC_MODEL) !== null && _f !== void 0 ? _f : "claude-sonnet-4-5";
+    var gatewayUrl = (_b = (_a = env.AI_GATEWAY_URL) !== null && _a !== void 0 ? _a : env.ANTHROPIC_BASE_URL) !== null && _b !== void 0 ? _b : "";
+    var token = (_d = (_c = env.AI_GATEWAY_TOKEN) !== null && _c !== void 0 ? _c : env.ANTHROPIC_AUTH_TOKEN) !== null && _d !== void 0 ? _d : "";
+    var model = (_f = (_e = env.AI_GATEWAY_MODEL) !== null && _e !== void 0 ? _e : env.ANTHROPIC_MODEL) !== null && _f !== void 0 ? _f : "claude-sonnet-4-5";
     return {
         name: "feature-tracker:ai-chat-proxy",
         apply: "serve",
         configureServer: function (server) {
             var _this = this;
             server.middlewares.use("/api/ai/chat", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var chunks, chunk, e_1_1, raw, parsed, userText, systemPrompt, upstreamUrl, upstream, upstreamText, err_1;
+                var chunks, chunk, e_1_1, raw, parsed, userText, systemPrompt, tools, history_1, upstreamUrl, upstream, upstreamText, err_1;
                 var _a, req_1, req_1_1;
                 var _b, e_1, _c, _d;
                 var _e;
@@ -131,7 +158,24 @@ function aiChatProxy() {
                             userText = typeof (parsed === null || parsed === void 0 ? void 0 : parsed.text) === "string" ? parsed.text : "";
                             systemPrompt = typeof (parsed === null || parsed === void 0 ? void 0 : parsed.system) === "string"
                                 ? parsed.system
-                                : "You are the AI Assistant inside an Issue Tracker. Help the user understand their verification runs, issues, and configuration. Be concise.";
+                                : "You are the AI Assistant inside an Issue Tracker. Help the user understand their verification runs, issues, and configuration. Be concise. Two URL-handling paths exist: (1) if the user names a URL that is NOT in their configured targets and wants it VERIFIED (checks run, issues recorded), call verify_live_url; (2) if the user wants to SEE or INTERACT with a page live (open, show, click, snapshot, screenshot, inspect), call the browser_* tools — they drive a real headed Playwright browser through the official Playwright MCP server, and their results include element refs you can click next turn. When the user mentions Playwright explicitly, always prefer the browser_* tools.";
+                            tools = Array.isArray(parsed === null || parsed === void 0 ? void 0 : parsed.tools)
+                                ? parsed.tools
+                                : undefined;
+                            history_1 = Array.isArray(parsed === null || parsed === void 0 ? void 0 : parsed.history)
+                                ? parsed.history
+                                    .filter(function (m) {
+                                    return !!m &&
+                                        (m.role === "user" || m.role === "assistant") &&
+                                        typeof m.content === "string" &&
+                                        m.content.trim() !== "";
+                                })
+                                    .slice(-8)
+                                    .map(function (m) { return ({
+                                    role: m.role,
+                                    content: m.content.slice(0, 2000),
+                                }); })
+                                : [];
                             upstreamUrl = gatewayUrl.replace(/\/+$/, "") + "/v1/messages";
                             return [4 /*yield*/, fetch(upstreamUrl, {
                                     method: "POST",
@@ -140,12 +184,11 @@ function aiChatProxy() {
                                         authorization: "Bearer ".concat(token),
                                         "anthropic-version": "2023-06-01",
                                     },
-                                    body: JSON.stringify({
-                                        model: model,
-                                        max_tokens: 1024,
-                                        system: systemPrompt,
-                                        messages: [{ role: "user", content: userText }],
-                                    }),
+                                    body: JSON.stringify(__assign({ model: model,
+                                        // 4096 — agentic browser walkthroughs end with a long
+                                        // evidence report (findings tables + next-step narration),
+                                        // which overflowed the older 2048 cap mid-sentence.
+                                        max_tokens: 4096, system: systemPrompt, messages: __spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false) }, (tools ? { tools: tools } : {}))),
                                 })];
                         case 14:
                             upstream = _f.sent();
@@ -178,9 +221,15 @@ function aiChatProxy() {
 // keeps working in dev without a backend running. Today's flow (Test
 // Connection against a fake URL) is fully preserved when
 // `VITE_USE_REAL_VERIFY` is unset on the client.
-function verifyProxy() {
-    var _a;
-    var backendUrl = ((_a = process.env.VERIFY_BACKEND_URL) !== null && _a !== void 0 ? _a : "").replace(/\/+$/, "");
+function verifyProxy(env) {
+    // Default to the local MCP server (mcp-server/ sub-folder). When the
+    // env var is set to an empty string explicitly, the proxy keeps the
+    // previous in-process stub behaviour (503). Set it to any other URL
+    // to forward to that backend. `env` comes from loadEnv() so a value
+    // in .env works without the shell exporting it.
+    var backendUrl = (env.VERIFY_BACKEND_URL !== undefined
+        ? env.VERIFY_BACKEND_URL
+        : "http://localhost:8787").replace(/\/+$/, "");
     return {
         name: "feature-tracker:verify-proxy",
         apply: "serve",
@@ -286,14 +335,24 @@ function verifyProxy() {
             // returns a fake run id and emits a single run_completed SSE event
             // 5s later, just enough to prove the wire-up works. Real progress
             // emissions land in MCP step 5.
-            server.middlewares.use("/api/verify/runs", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var runId, chunks, chunk, e_3_1, raw, upstream, text, err_3;
+            //
+            // Note on Connect middleware prefix matching: `/api/verify/runs`
+            // matches BOTH the bare path AND `/api/verify/runs/<id>/events`.
+            // When the prefix matches a sub-path, we call `next()` so the
+            // trailing-slash handler below can take over. Without this the
+            // GET SSE stream would hit the bare handler's 405 fallback.
+            server.middlewares.use("/api/verify/runs", function (req, res, next) { return __awaiter(_this, void 0, void 0, function () {
+                var url, runId, chunks, chunk, e_3_1, raw, upstream, text, err_3;
                 var _a, req_3, req_3_1;
                 var _b, e_3, _c, _d;
-                var _e;
-                return __generator(this, function (_f) {
-                    switch (_f.label) {
+                var _e, _f;
+                return __generator(this, function (_g) {
+                    switch (_g.label) {
                         case 0:
+                            url = (_e = req.url) !== null && _e !== void 0 ? _e : "/";
+                            if (url !== "/" && url !== "") {
+                                return [2 /*return*/, next === null || next === void 0 ? void 0 : next()];
+                            }
                             if (!(req.method === "POST")) return [3 /*break*/, 18];
                             if (!backendUrl) {
                                 runId = "run-".concat(Math.random().toString(36).slice(2, 10));
@@ -312,38 +371,38 @@ function verifyProxy() {
                                 }));
                                 return [2 /*return*/];
                             }
-                            _f.label = 1;
+                            _g.label = 1;
                         case 1:
-                            _f.trys.push([1, 16, , 17]);
+                            _g.trys.push([1, 16, , 17]);
                             chunks = [];
-                            _f.label = 2;
+                            _g.label = 2;
                         case 2:
-                            _f.trys.push([2, 7, 8, 13]);
+                            _g.trys.push([2, 7, 8, 13]);
                             _a = true, req_3 = __asyncValues(req);
-                            _f.label = 3;
+                            _g.label = 3;
                         case 3: return [4 /*yield*/, req_3.next()];
                         case 4:
-                            if (!(req_3_1 = _f.sent(), _b = req_3_1.done, !_b)) return [3 /*break*/, 6];
+                            if (!(req_3_1 = _g.sent(), _b = req_3_1.done, !_b)) return [3 /*break*/, 6];
                             _d = req_3_1.value;
                             _a = false;
                             chunk = _d;
                             chunks.push(chunk);
-                            _f.label = 5;
+                            _g.label = 5;
                         case 5:
                             _a = true;
                             return [3 /*break*/, 3];
                         case 6: return [3 /*break*/, 13];
                         case 7:
-                            e_3_1 = _f.sent();
+                            e_3_1 = _g.sent();
                             e_3 = { error: e_3_1 };
                             return [3 /*break*/, 13];
                         case 8:
-                            _f.trys.push([8, , 11, 12]);
+                            _g.trys.push([8, , 11, 12]);
                             if (!(!_a && !_b && (_c = req_3.return))) return [3 /*break*/, 10];
                             return [4 /*yield*/, _c.call(req_3)];
                         case 9:
-                            _f.sent();
-                            _f.label = 10;
+                            _g.sent();
+                            _g.label = 10;
                         case 10: return [3 /*break*/, 12];
                         case 11:
                             if (e_3) throw e_3.error;
@@ -357,16 +416,16 @@ function verifyProxy() {
                                     body: raw,
                                 })];
                         case 14:
-                            upstream = _f.sent();
+                            upstream = _g.sent();
                             return [4 /*yield*/, upstream.text()];
                         case 15:
-                            text = _f.sent();
+                            text = _g.sent();
                             res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_e = upstream.headers.get("content-type")) !== null && _e !== void 0 ? _e : "application/json");
+                            res.setHeader("content-type", (_f = upstream.headers.get("content-type")) !== null && _f !== void 0 ? _f : "application/json");
                             res.end(text);
                             return [3 /*break*/, 17];
                         case 16:
-                            err_3 = _f.sent();
+                            err_3 = _g.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
@@ -387,20 +446,25 @@ function verifyProxy() {
             // Stub behaviour (no backend): write the standard SSE preamble,
             // schedule a run_completed event 5s later, then close. Real
             // behaviour: pipe the upstream SSE response straight through.
+            //
+            // The in-app preview overlay was removed — the headed Playwright
+            // browser window is the only preview surface, so there is no
+            // `/interact` forwarding endpoint any more.
             server.middlewares.use("/api/verify/runs/", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var runId, writeEvent_1, timer_1, upstream, reader_1, pump, err_4;
+                var pathAfterPrefix, runId, writeEvent_1, timer_1, upstream, reader_1, pump, err_4;
                 var _this = this;
-                var _a, _b, _c;
-                return __generator(this, function (_d) {
-                    switch (_d.label) {
+                var _a, _b, _c, _d;
+                return __generator(this, function (_e) {
+                    switch (_e.label) {
                         case 0:
-                            if (req.method !== "GET" || !((_a = req.url) === null || _a === void 0 ? void 0 : _a.includes("/events"))) {
+                            pathAfterPrefix = (_b = ((_a = req.url) !== null && _a !== void 0 ? _a : "/").split("?")[0]) !== null && _b !== void 0 ? _b : "/";
+                            if (req.method !== "GET" || !pathAfterPrefix.includes("/events")) {
                                 res.statusCode = 404;
                                 res.setHeader("content-type", "application/json");
                                 res.end(JSON.stringify({ error: "not_found" }));
                                 return [2 /*return*/];
                             }
-                            runId = decodeURIComponent(req.url.split("?")[0].replace("/api/verify/runs/", "").replace("/events", ""));
+                            runId = decodeURIComponent(pathAfterPrefix.replace(/^\//, "").replace(/\/events$/, ""));
                             if (!backendUrl) {
                                 // Stub SSE: declare the stream, then emit one event after a
                                 // delay. EventSource on the client side auto-reconnects on
@@ -411,7 +475,7 @@ function verifyProxy() {
                                 res.setHeader("cache-control", "no-cache");
                                 res.setHeader("connection", "keep-alive");
                                 res.setHeader("x-accel-buffering", "no");
-                                (_b = res.flushHeaders) === null || _b === void 0 ? void 0 : _b.call(res);
+                                (_c = res.flushHeaders) === null || _c === void 0 ? void 0 : _c.call(res);
                                 writeEvent_1 = function (event) {
                                     res.write("data: ".concat(JSON.stringify(event), "\n\n"));
                                 };
@@ -436,14 +500,14 @@ function verifyProxy() {
                                 req.on("close", function () { return clearTimeout(timer_1); });
                                 return [2 /*return*/];
                             }
-                            _d.label = 1;
+                            _e.label = 1;
                         case 1:
-                            _d.trys.push([1, 3, , 4]);
+                            _e.trys.push([1, 3, , 4]);
                             return [4 /*yield*/, fetch("".concat(backendUrl, "/verify/runs/").concat(encodeURIComponent(runId), "/events"), { headers: { accept: "text/event-stream" } })];
                         case 2:
-                            upstream = _d.sent();
+                            upstream = _e.sent();
                             res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_c = upstream.headers.get("content-type")) !== null && _c !== void 0 ? _c : "text/event-stream");
+                            res.setHeader("content-type", (_d = upstream.headers.get("content-type")) !== null && _d !== void 0 ? _d : "text/event-stream");
                             res.setHeader("cache-control", "no-cache");
                             res.setHeader("connection", "keep-alive");
                             if (upstream.body) {
@@ -482,7 +546,7 @@ function verifyProxy() {
                             }
                             return [3 /*break*/, 4];
                         case 3:
-                            err_4 = _d.sent();
+                            err_4 = _e.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
@@ -580,8 +644,74 @@ function verifyProxy() {
                     }
                 });
             }); });
+            // ──────────────────────────────────────────────────────────────────
+            //  /api/playwright — bridge to the OFFICIAL Playwright MCP server.
+            //  GET  /api/playwright/tools → tool catalog (spawned via the
+            //                             mcp-server backend on :8787)
+            //  POST /api/playwright/call  → forward one browser tool call.
+            //  The catalog is read live from `npx @playwright/mcp@latest`, so
+            //  the chatbot's browser tools always match the official server.
+            // ──────────────────────────────────────────────────────────────────
+            server.middlewares.use("/api/playwright", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
+                var upstreamPath, upstream, _a, _b, _c, _d, _e, err_6;
+                var _f;
+                var _g, _h;
+                return __generator(this, function (_j) {
+                    switch (_j.label) {
+                        case 0:
+                            if (!backendUrl) {
+                                res.statusCode = 503;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({
+                                    error: "verify_not_configured",
+                                    message: "VERIFY_BACKEND_URL is not set — the Playwright MCP bridge is unavailable.",
+                                }));
+                                return [2 /*return*/];
+                            }
+                            _j.label = 1;
+                        case 1:
+                            _j.trys.push([1, 7, , 8]);
+                            upstreamPath = ((_g = req.url) !== null && _g !== void 0 ? _g : "/").replace(/^\/api/, "");
+                            _a = fetch;
+                            _b = ["".concat(backendUrl, "/playwright").concat(upstreamPath)];
+                            _f = {
+                                method: req.method,
+                                headers: { "content-type": "application/json" }
+                            };
+                            if (!(req.method === "POST")) return [3 /*break*/, 3];
+                            return [4 /*yield*/, readBody(req)];
+                        case 2:
+                            _c = _j.sent();
+                            return [3 /*break*/, 4];
+                        case 3:
+                            _c = undefined;
+                            _j.label = 4;
+                        case 4: return [4 /*yield*/, _a.apply(void 0, _b.concat([(_f.body = _c,
+                                    _f)]))];
+                        case 5:
+                            upstream = _j.sent();
+                            res.statusCode = upstream.status;
+                            res.setHeader("content-type", (_h = upstream.headers.get("content-type")) !== null && _h !== void 0 ? _h : "application/json");
+                            _e = (_d = res).end;
+                            return [4 /*yield*/, upstream.text()];
+                        case 6:
+                            _e.apply(_d, [_j.sent()]);
+                            return [3 /*break*/, 8];
+                        case 7:
+                            err_6 = _j.sent();
+                            res.statusCode = 502;
+                            res.setHeader("content-type", "application/json");
+                            res.end(JSON.stringify({
+                                error: "upstream_failure",
+                                message: err_6 instanceof Error ? err_6.message : String(err_6),
+                            }));
+                            return [3 /*break*/, 8];
+                        case 8: return [2 /*return*/];
+                    }
+                });
+            }); });
             server.middlewares.use("/api/secrets", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var isDelete, targetPath, upstream, _a, _b, _c, raw, parsed, stripPassword, _i, _d, s, text, err_6;
+                var isDelete, targetPath, upstream, _a, _b, _c, raw, parsed, stripPassword, _i, _d, s, text, err_7;
                 var _e;
                 var _f, _g, _h;
                 return __generator(this, function (_j) {
@@ -661,12 +791,12 @@ function verifyProxy() {
                             res.end(text);
                             return [3 /*break*/, 10];
                         case 9:
-                            err_6 = _j.sent();
+                            err_7 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_6 instanceof Error ? err_6.message : String(err_6),
+                                message: err_7 instanceof Error ? err_7.message : String(err_7),
                             }));
                             return [3 /*break*/, 10];
                         case 10: return [2 /*return*/];
@@ -686,38 +816,48 @@ function readBody(req) {
         req.on("error", function () { return resolve(""); });
     });
 }
-export default defineConfig({
-    plugins: [
-        react(),
-        aiChatProxy(),
-        verifyProxy(),
-        customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
-    ],
-    resolve: {
-        alias: {
-            "@": path.resolve(__dirname, "./src"),
+export default defineConfig(function (_a) {
+    var mode = _a.mode;
+    // Load .env (all vars, not just VITE_* — the prefixes arg "" disables
+    // prefix filtering) merged with process.env (process.env wins), so the
+    // proxy plugins below see AI_GATEWAY_* / VERIFY_BACKEND_URL from .env
+    // without the shell exporting them. Server-side secrets like
+    // AI_GATEWAY_TOKEN still never reach the client bundle — they're only
+    // read here in config-land; VITE_* exposure rules are unchanged.
+    var env = loadEnv(mode, process.cwd(), "");
+    return {
+        plugins: [
+            react(),
+            aiChatProxy(env),
+            verifyProxy(env),
+            customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
+        ],
+        resolve: {
+            alias: {
+                "@": path.resolve(__dirname, "./src"),
+            },
         },
-    },
-    server: {
-        port: 5173,
-        strictPort: true,
-        // Bind to the registered Blocks dev domain (not `host: true`) so
-        // Vite's banner prints https://dbeegi.slsblx.com:5173/ and the OIDC
-        // session cookie IAM sets on /login/callback lands on the same host
-        // that initiated the redirect. `localhost` (which resolves to a
-        // different cookie origin) is no longer served, intentionally.
-        host: "dbeegi.slsblx.com",
-        // Without `allowedHosts`, Vite's DNS-rebinding guard 404s requests to
-        // hosts other than localhost with "Blocked request. This host is not
-        // allowed." — fatal when serving on a custom Blocks dev domain.
-        allowedHosts: ["dbeegi.slsblx.com", "localhost"],
-        https: {
-            // mkcert-generated: SAN covers dbeegi.slsblx.com, localhost, 127.0.0.1
-            // (CA is already trusted on this machine — see `mkcert -install`).
-            key: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2-key.pem")),
-            cert: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem")),
+        server: {
+            port: 5173,
+            strictPort: true,
+            // Bind to the registered Blocks dev domain (not `host: true`) so
+            // Vite's banner prints https://dbeegi.slsblx.com:5173/ and the OIDC
+            // session cookie IAM sets on /login/callback lands on the same host
+            // that initiated the redirect. `localhost` (which resolves to a
+            // different cookie origin) is no longer served, intentionally.
+            host: "dbeegi.slsblx.com",
+            // Without `allowedHosts`, Vite's DNS-rebinding guard 404s requests to
+            // hosts other than localhost with "Blocked request. This host is not
+            // allowed." — fatal when serving on a custom Blocks dev domain.
+            allowedHosts: ["dbeegi.slsblx.com", "localhost"],
+            https: {
+                // mkcert-generated: SAN covers dbeegi.slsblx.com, localhost, 127.0.0.1
+                // (CA is already trusted on this machine — see `mkcert -install`).
+                key: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2-key.pem")),
+                cert: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem")),
+            },
         },
-    },
+    };
 });
 // Vite's banner always prints `https://localhost:5173/` because it
 // detects the loopback bind. Since we run on the registered Blocks

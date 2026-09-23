@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 import fs from "fs";
@@ -14,15 +14,17 @@ import type { ServerResponse } from "http";
 // Falls back to the `ANTHROPIC_*` aliases (`ANTHROPIC_BASE_URL`,
 // `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`) when the canonical names are
 // unset, so `setx ANTHROPIC_AUTH_TOKEN "..."` on Windows Just Works.
-function aiChatProxy(): Plugin {
-  const gatewayUrl =
-    process.env.AI_GATEWAY_URL ?? process.env.ANTHROPIC_BASE_URL ?? "";
-  const token =
-    process.env.AI_GATEWAY_TOKEN ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
-  const model =
-    process.env.AI_GATEWAY_MODEL ??
-    process.env.ANTHROPIC_MODEL ??
-    "claude-sonnet-4-5";
+//
+// `env` is the loadEnv() record built in defineConfig — it merges .env file
+// values with the shell's process.env (process.env wins), so the server
+// picks up AI_GATEWAY_MODEL etc. from .env without the shell exporting them.
+// Without this, a dev server started from a shell without these vars fell
+// back to the default model and the gateway routed it to the wrong
+// (quota-exhausted) model group.
+function aiChatProxy(env: Record<string, string>): Plugin {
+  const gatewayUrl = env.AI_GATEWAY_URL ?? env.ANTHROPIC_BASE_URL ?? "";
+  const token = env.AI_GATEWAY_TOKEN ?? env.ANTHROPIC_AUTH_TOKEN ?? "";
+  const model = env.AI_GATEWAY_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
 
   return {
     name: "feature-tracker:ai-chat-proxy",
@@ -58,7 +60,38 @@ function aiChatProxy(): Plugin {
           const systemPrompt =
             typeof parsed?.system === "string"
               ? parsed.system
-              : "You are the AI Assistant inside an Issue Tracker. Help the user understand their verification runs, issues, and configuration. Be concise.";
+              : "You are the AI Assistant inside an Issue Tracker. Help the user understand their verification runs, issues, and configuration. Be concise. Two URL-handling paths exist: (1) if the user names a URL that is NOT in their configured targets and wants it VERIFIED (checks run, issues recorded), call verify_live_url; (2) if the user wants to SEE or INTERACT with a page live (open, show, click, snapshot, screenshot, inspect), call the browser_* tools — they drive a real headed Playwright browser through the official Playwright MCP server, and their results include element refs you can click next turn. When the user mentions Playwright explicitly, always prefer the browser_* tools.";
+          // Forward the client-supplied tool definitions so the model can
+          // emit `tool_use` blocks. Anthropic expects a JSON-serialisable
+          // `tools` array; we re-shape to drop anything non-essential.
+          const tools = Array.isArray(parsed?.tools)
+            ? parsed.tools
+            : undefined;
+          // Optional short conversation history (the AI call is stateless
+          // per message). The Playwright MCP workflow is a cycle —
+          // navigate → snapshot → interact with a ref → re-snapshot — so
+          // the model needs the last few turns to know which refs it saw
+          // and what it already did. Entries are {role, content} strings;
+          // anything else is dropped. The params carry explicit shapes
+          // because the array arrives as `any` from JSON.parse — without
+          // them tsc -b flags the callbacks as implicit any.
+          type HistoryEntry = { role?: unknown; content?: unknown };
+          const history: Array<{ role: "user" | "assistant"; content: string }> =
+            Array.isArray(parsed?.history)
+              ? (parsed.history as HistoryEntry[])
+                  .filter(
+                    (m): m is { role: unknown; content: string } =>
+                      !!m &&
+                      (m.role === "user" || m.role === "assistant") &&
+                      typeof m.content === "string" &&
+                      m.content.trim() !== "",
+                  )
+                  .slice(-8)
+                  .map((m) => ({
+                    role: m.role as "user" | "assistant",
+                    content: m.content.slice(0, 2000),
+                  }))
+              : [];
 
           const upstreamUrl =
             gatewayUrl.replace(/\/+$/, "") + "/v1/messages";
@@ -71,9 +104,13 @@ function aiChatProxy(): Plugin {
             },
             body: JSON.stringify({
               model,
-              max_tokens: 1024,
+              // 4096 — agentic browser walkthroughs end with a long
+              // evidence report (findings tables + next-step narration),
+              // which overflowed the older 2048 cap mid-sentence.
+              max_tokens: 4096,
               system: systemPrompt,
-              messages: [{ role: "user", content: userText }],
+              messages: [...history, { role: "user", content: userText }],
+              ...(tools ? { tools } : {}),
             }),
           });
 
@@ -105,8 +142,17 @@ function aiChatProxy(): Plugin {
 // keeps working in dev without a backend running. Today's flow (Test
 // Connection against a fake URL) is fully preserved when
 // `VITE_USE_REAL_VERIFY` is unset on the client.
-function verifyProxy(): Plugin {
-  const backendUrl = (process.env.VERIFY_BACKEND_URL ?? "").replace(/\/+$/, "");
+function verifyProxy(env: Record<string, string>): Plugin {
+  // Default to the local MCP server (mcp-server/ sub-folder). When the
+  // env var is set to an empty string explicitly, the proxy keeps the
+  // previous in-process stub behaviour (503). Set it to any other URL
+  // to forward to that backend. `env` comes from loadEnv() so a value
+  // in .env works without the shell exporting it.
+  const backendUrl = (
+    env.VERIFY_BACKEND_URL !== undefined
+      ? env.VERIFY_BACKEND_URL
+      : "http://localhost:8787"
+  ).replace(/\/+$/, "");
 
   return {
     name: "feature-tracker:verify-proxy",
@@ -171,7 +217,23 @@ function verifyProxy(): Plugin {
       // returns a fake run id and emits a single run_completed SSE event
       // 5s later, just enough to prove the wire-up works. Real progress
       // emissions land in MCP step 5.
-      server.middlewares.use("/api/verify/runs", async (req, res) => {
+      //
+      // Note on Connect middleware prefix matching: `/api/verify/runs`
+      // matches BOTH the bare path AND `/api/verify/runs/<id>/events`.
+      // When the prefix matches a sub-path, we call `next()` so the
+      // trailing-slash handler below can take over. Without this the
+      // GET SSE stream would hit the bare handler's 405 fallback.
+      server.middlewares.use("/api/verify/runs", async (req, res, next) => {
+        // Sub-path (`/api/verify/runs/<id>/...`) belongs to the
+        // trailing-slash handler — defer. Compare the path WITHOUT the
+        // query string: Connect leaves `?...` on req.url, and a bare
+        // `/?limit=10` used to slip past this check into the sub-path
+        // handler (404).
+        const pathOnly = (req.url ?? "/").split("?")[0];
+        const qs = (req.url ?? "").split("?")[1];
+        if (pathOnly !== "/" && pathOnly !== "") {
+          return (next as (err?: unknown) => void)?.();
+        }
         if (req.method === "POST") {
           if (!backendUrl) {
             // Stub: synthesize a run id, ignore the request body. The
@@ -224,6 +286,37 @@ function verifyProxy(): Plugin {
           }
           return;
         }
+        // GET /api/verify/runs?limit=N — run history listing. Forwards the
+        // query so the cap is respected upstream.
+        if (req.method === "GET") {
+          if (!backendUrl) {
+            notConfigured(res);
+            return;
+          }
+          try {
+            const upstream = await fetch(
+              `${backendUrl}/verify/runs${qs ? `?${qs}` : ""}`,
+              { headers: { accept: "application/json" } },
+            );
+            const text = await upstream.text();
+            res.statusCode = upstream.status;
+            res.setHeader(
+              "content-type",
+              upstream.headers.get("content-type") ?? "application/json",
+            );
+            res.end(text);
+          } catch (err) {
+            res.statusCode = 502;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message: err instanceof Error ? err.message : String(err),
+              }),
+            );
+          }
+          return;
+        }
         res.statusCode = 405;
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ error: "method_not_allowed" }));
@@ -233,15 +326,31 @@ function verifyProxy(): Plugin {
       // Stub behaviour (no backend): write the standard SSE preamble,
       // schedule a run_completed event 5s later, then close. Real
       // behaviour: pipe the upstream SSE response straight through.
+      //
+      // The in-app preview overlay was removed — the headed Playwright
+      // browser window is the only preview surface, so there is no
+      // `/interact` forwarding endpoint any more.
       server.middlewares.use("/api/verify/runs/", async (req, res) => {
-        if (req.method !== "GET" || !req.url?.includes("/events")) {
+        const pathAfterPrefix = (req.url ?? "/").split("?")[0] ?? "/";
+        // Forward the query string (notably `since=<cursor>`) so the
+        // client's SSE reconnect can resume from where it dropped —
+        // without it the upstream replays the whole run and every event
+        // re-fires on the client.
+        const qs = (req.url ?? "").split("?")[1];
+
+        if (req.method !== "GET" || !pathAfterPrefix.includes("/events")) {
           res.statusCode = 404;
           res.setHeader("content-type", "application/json");
           res.end(JSON.stringify({ error: "not_found" }));
           return;
         }
+        // req.url here is `/<runId>/events` — Connect already stripped
+        // the `/api/verify/runs/` mount prefix before this middleware saw
+        // the request, so the only surgery needed is to peel off the
+        // leading `/` and the trailing `/events`. `pathAfterPrefix` was
+        // already extracted at the top of the handler.
         const runId = decodeURIComponent(
-          req.url.split("?")[0]!.replace("/api/verify/runs/", "").replace("/events", ""),
+          pathAfterPrefix.replace(/^\//, "").replace(/\/events$/, ""),
         );
         if (!backendUrl) {
           // Stub SSE: declare the stream, then emit one event after a
@@ -280,7 +389,7 @@ function verifyProxy(): Plugin {
         }
         try {
           const upstream = await fetch(
-            `${backendUrl}/verify/runs/${encodeURIComponent(runId)}/events`,
+            `${backendUrl}/verify/runs/${encodeURIComponent(runId)}/events${qs ? `?${qs}` : ""}`,
             { headers: { accept: "text/event-stream" } },
           );
           res.statusCode = upstream.status;
@@ -374,6 +483,54 @@ function verifyProxy(): Plugin {
           if (cc) res.setHeader("cache-control", cc);
           const buf = Buffer.from(await upstream.arrayBuffer());
           res.end(buf);
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "upstream_failure",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      });
+
+      // ──────────────────────────────────────────────────────────────────
+      //  /api/playwright — bridge to the OFFICIAL Playwright MCP server.
+      //  GET  /api/playwright/tools → tool catalog (spawned via the
+      //                             mcp-server backend on :8787)
+      //  POST /api/playwright/call  → forward one browser tool call.
+      //  The catalog is read live from `npx @playwright/mcp@latest`, so
+      //  the chatbot's browser tools always match the official server.
+      // ──────────────────────────────────────────────────────────────────
+      server.middlewares.use("/api/playwright", async (req, res) => {
+        if (!backendUrl) {
+          res.statusCode = 503;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "verify_not_configured",
+              message: "VERIFY_BACKEND_URL is not set — the Playwright MCP bridge is unavailable.",
+            }),
+          );
+          return;
+        }
+        try {
+          const upstreamPath = (req.url ?? "/").replace(/^\/api/, "");
+          const upstream = await fetch(`${backendUrl}/playwright${upstreamPath}`, {
+            method: req.method,
+            headers: { "content-type": "application/json" },
+            body:
+              req.method === "POST"
+                ? await readBody(req)
+                : undefined,
+          });
+          res.statusCode = upstream.status;
+          res.setHeader(
+            "content-type",
+            upstream.headers.get("content-type") ?? "application/json",
+          );
+          res.end(await upstream.text());
         } catch (err) {
           res.statusCode = 502;
           res.setHeader("content-type", "application/json");
@@ -483,11 +640,20 @@ function readBody(req: import("http").IncomingMessage): Promise<string> {
   });
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // Load .env (all vars, not just VITE_* — the prefixes arg "" disables
+  // prefix filtering) merged with process.env (process.env wins), so the
+  // proxy plugins below see AI_GATEWAY_* / VERIFY_BACKEND_URL from .env
+  // without the shell exporting them. Server-side secrets like
+  // AI_GATEWAY_TOKEN still never reach the client bundle — they're only
+  // read here in config-land; VITE_* exposure rules are unchanged.
+  const env = loadEnv(mode, process.cwd(), "");
+
+  return {
   plugins: [
     react(),
-    aiChatProxy(),
-    verifyProxy(),
+    aiChatProxy(env),
+    verifyProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],
   resolve: {
@@ -515,6 +681,7 @@ export default defineConfig({
       cert: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem")),
     },
   },
+  };
 });
 
 // Vite's banner always prints `https://localhost:5173/` because it

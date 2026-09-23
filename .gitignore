@@ -18,6 +18,10 @@ prompt/
 
 # Root-level debug screenshots and ad-hoc state dumps from local sessions
 /*.png
+/*.jpeg
+/*.jpg
+/*.gif
+/*.mp4
 /dryrun-*
 /current-*
 /fresh-*
@@ -26,3 +30,33 @@ prompt/
 /env-workflow-arrow-state.json
 /vite.config.js.bak
 docs/platform-bug-notifier-enumeration.md
+
+# One-off debug JSON / text dumps from local probes and agent advice
+/*.json~?
+/chatgpt-*.txt
+/test-connection-response.txt
+/data-perm.json
+/file-perm.json
+/all-data-perms.json
+/issues-response.json
+/p.json
+/p2.json
+/perm.json
+/roles.json
+
+# TypeScript incremental build cache — generated, never source of truth
+tsconfig.*.tsbuildinfo
+
+# MCP verification agent — secret material, runtime data, screenshots must not be checked in
+mcp-server/node_modules/
+mcp-server/dist/
+mcp-server/data/secrets.enc
+mcp-server/data/.master.key
+mcp-server/data/evidence/
+mcp-server/runs-store.json
+mcp-server/*.png
+mcp-server/*.jpeg
+mcp-server/*.jpg
+
+# Local MCP / verification scratch directories
+/.verify-monitor/
