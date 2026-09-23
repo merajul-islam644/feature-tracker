@@ -44,10 +44,16 @@ node_modules
 .env.local
 *.local
 
-# Docker / CI plumbing
+# Docker / CI plumbing — kept out of the image itself (Docker still finds
+# them in the build context to do its job).
 Dockerfile
 .dockerignore
-nginx.conf
+# nginx.conf MUST stay in the build context: the runtime stage does
+# `COPY nginx.conf /etc/nginx/conf.d/default.conf` and breaks silently
+# with "no source files specified" if .dockerignore filters it out.
+# `Dockerfile` and `.dockerignore` themselves are excluded from `COPY . .`
+# so they don't bloat the build stage, but they're metadata and don't
+# get explicitly COPY'd anyway.
 
 # The build context for `npm ci` only needs package*.json — keep the rest
 # out until COPY . . runs in the build stage.
