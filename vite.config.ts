@@ -640,7 +640,7 @@ function readBody(req: import("http").IncomingMessage): Promise<string> {
   });
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
   // Load .env (all vars, not just VITE_* — the prefixes arg "" disables
   // prefix filtering) merged with process.env (process.env wins), so the
   // proxy plugins below see AI_GATEWAY_* / VERIFY_BACKEND_URL from .env
@@ -648,6 +648,12 @@ export default defineConfig(({ mode }) => {
   // AI_GATEWAY_TOKEN still never reach the client bundle — they're only
   // read here in config-land; VITE_* exposure rules are unchanged.
   const env = loadEnv(mode, process.cwd(), "");
+  // Skip reading the local mkcert TLS files when building for production —
+  // the Docker build context doesn't carry `./cert/`, and Vite still
+  // evaluates the entire config object (including the `server.https`
+  // block) during `vite build`. Without this guard the build fails with
+  // `ENOENT: no such file or directory, open '.../cert/...-key.pem'`.
+  const isDev = command !== "build";
 
   return {
   plugins: [
@@ -674,12 +680,20 @@ export default defineConfig(({ mode }) => {
     // hosts other than localhost with "Blocked request. This host is not
     // allowed." — fatal when serving on a custom Blocks dev domain.
     allowedHosts: ["dbeegi.slsblx.com", "localhost"],
-    https: {
-      // mkcert-generated: SAN covers dbeegi.slsblx.com, localhost, 127.0.0.1
-      // (CA is already trusted on this machine — see `mkcert -install`).
-      key: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2-key.pem")),
-      cert: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem")),
-    },
+    ...(isDev
+      ? {
+          // mkcert-generated: SAN covers dbeegi.slsblx.com, localhost, 127.0.0.1
+          // (CA is already trusted on this machine — see `mkcert -install`).
+          https: {
+            key: fs.readFileSync(
+              path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2-key.pem"),
+            ),
+            cert: fs.readFileSync(
+              path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem"),
+            ),
+          },
+        }
+      : {}),
   },
   };
 });

@@ -184,7 +184,7 @@ function aiChatProxy(env) {
                                         authorization: "Bearer ".concat(token),
                                         "anthropic-version": "2023-06-01",
                                     },
-                                    body: JSON.stringify(__assign({ model: model,
+                                    body: JSON.stringify(__assign({ model: model, 
                                         // 4096 — agentic browser walkthroughs end with a long
                                         // evidence report (findings tables + next-step narration),
                                         // which overflowed the older 2048 cap mid-sentence.
@@ -342,15 +342,16 @@ function verifyProxy(env) {
             // trailing-slash handler below can take over. Without this the
             // GET SSE stream would hit the bare handler's 405 fallback.
             server.middlewares.use("/api/verify/runs", function (req, res, next) { return __awaiter(_this, void 0, void 0, function () {
-                var url, runId, chunks, chunk, e_3_1, raw, upstream, text, err_3;
+                var pathOnly, qs, runId, chunks, chunk, e_3_1, raw, upstream, text, err_3, upstream, text, err_4;
                 var _a, req_3, req_3_1;
                 var _b, e_3, _c, _d;
-                var _e, _f;
-                return __generator(this, function (_g) {
-                    switch (_g.label) {
+                var _e, _f, _g, _h;
+                return __generator(this, function (_j) {
+                    switch (_j.label) {
                         case 0:
-                            url = (_e = req.url) !== null && _e !== void 0 ? _e : "/";
-                            if (url !== "/" && url !== "") {
+                            pathOnly = ((_e = req.url) !== null && _e !== void 0 ? _e : "/").split("?")[0];
+                            qs = ((_f = req.url) !== null && _f !== void 0 ? _f : "").split("?")[1];
+                            if (pathOnly !== "/" && pathOnly !== "") {
                                 return [2 /*return*/, next === null || next === void 0 ? void 0 : next()];
                             }
                             if (!(req.method === "POST")) return [3 /*break*/, 18];
@@ -371,38 +372,38 @@ function verifyProxy(env) {
                                 }));
                                 return [2 /*return*/];
                             }
-                            _g.label = 1;
+                            _j.label = 1;
                         case 1:
-                            _g.trys.push([1, 16, , 17]);
+                            _j.trys.push([1, 16, , 17]);
                             chunks = [];
-                            _g.label = 2;
+                            _j.label = 2;
                         case 2:
-                            _g.trys.push([2, 7, 8, 13]);
+                            _j.trys.push([2, 7, 8, 13]);
                             _a = true, req_3 = __asyncValues(req);
-                            _g.label = 3;
+                            _j.label = 3;
                         case 3: return [4 /*yield*/, req_3.next()];
                         case 4:
-                            if (!(req_3_1 = _g.sent(), _b = req_3_1.done, !_b)) return [3 /*break*/, 6];
+                            if (!(req_3_1 = _j.sent(), _b = req_3_1.done, !_b)) return [3 /*break*/, 6];
                             _d = req_3_1.value;
                             _a = false;
                             chunk = _d;
                             chunks.push(chunk);
-                            _g.label = 5;
+                            _j.label = 5;
                         case 5:
                             _a = true;
                             return [3 /*break*/, 3];
                         case 6: return [3 /*break*/, 13];
                         case 7:
-                            e_3_1 = _g.sent();
+                            e_3_1 = _j.sent();
                             e_3 = { error: e_3_1 };
                             return [3 /*break*/, 13];
                         case 8:
-                            _g.trys.push([8, , 11, 12]);
+                            _j.trys.push([8, , 11, 12]);
                             if (!(!_a && !_b && (_c = req_3.return))) return [3 /*break*/, 10];
                             return [4 /*yield*/, _c.call(req_3)];
                         case 9:
-                            _g.sent();
-                            _g.label = 10;
+                            _j.sent();
+                            _j.label = 10;
                         case 10: return [3 /*break*/, 12];
                         case 11:
                             if (e_3) throw e_3.error;
@@ -416,16 +417,16 @@ function verifyProxy(env) {
                                     body: raw,
                                 })];
                         case 14:
-                            upstream = _g.sent();
+                            upstream = _j.sent();
                             return [4 /*yield*/, upstream.text()];
                         case 15:
-                            text = _g.sent();
+                            text = _j.sent();
                             res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_f = upstream.headers.get("content-type")) !== null && _f !== void 0 ? _f : "application/json");
+                            res.setHeader("content-type", (_g = upstream.headers.get("content-type")) !== null && _g !== void 0 ? _g : "application/json");
                             res.end(text);
                             return [3 /*break*/, 17];
                         case 16:
-                            err_3 = _g.sent();
+                            err_3 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
@@ -435,6 +436,35 @@ function verifyProxy(env) {
                             return [3 /*break*/, 17];
                         case 17: return [2 /*return*/];
                         case 18:
+                            if (!(req.method === "GET")) return [3 /*break*/, 24];
+                            if (!backendUrl) {
+                                notConfigured(res);
+                                return [2 /*return*/];
+                            }
+                            _j.label = 19;
+                        case 19:
+                            _j.trys.push([19, 22, , 23]);
+                            return [4 /*yield*/, fetch("".concat(backendUrl, "/verify/runs").concat(qs ? "?".concat(qs) : ""), { headers: { accept: "application/json" } })];
+                        case 20:
+                            upstream = _j.sent();
+                            return [4 /*yield*/, upstream.text()];
+                        case 21:
+                            text = _j.sent();
+                            res.statusCode = upstream.status;
+                            res.setHeader("content-type", (_h = upstream.headers.get("content-type")) !== null && _h !== void 0 ? _h : "application/json");
+                            res.end(text);
+                            return [3 /*break*/, 23];
+                        case 22:
+                            err_4 = _j.sent();
+                            res.statusCode = 502;
+                            res.setHeader("content-type", "application/json");
+                            res.end(JSON.stringify({
+                                error: "upstream_failure",
+                                message: err_4 instanceof Error ? err_4.message : String(err_4),
+                            }));
+                            return [3 /*break*/, 23];
+                        case 23: return [2 /*return*/];
+                        case 24:
                             res.statusCode = 405;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({ error: "method_not_allowed" }));
@@ -451,13 +481,14 @@ function verifyProxy(env) {
             // browser window is the only preview surface, so there is no
             // `/interact` forwarding endpoint any more.
             server.middlewares.use("/api/verify/runs/", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var pathAfterPrefix, runId, writeEvent_1, timer_1, upstream, reader_1, pump, err_4;
+                var pathAfterPrefix, qs, runId, writeEvent_1, timer_1, upstream, reader_1, pump, err_5;
                 var _this = this;
-                var _a, _b, _c, _d;
-                return __generator(this, function (_e) {
-                    switch (_e.label) {
+                var _a, _b, _c, _d, _e;
+                return __generator(this, function (_f) {
+                    switch (_f.label) {
                         case 0:
                             pathAfterPrefix = (_b = ((_a = req.url) !== null && _a !== void 0 ? _a : "/").split("?")[0]) !== null && _b !== void 0 ? _b : "/";
+                            qs = ((_c = req.url) !== null && _c !== void 0 ? _c : "").split("?")[1];
                             if (req.method !== "GET" || !pathAfterPrefix.includes("/events")) {
                                 res.statusCode = 404;
                                 res.setHeader("content-type", "application/json");
@@ -475,7 +506,7 @@ function verifyProxy(env) {
                                 res.setHeader("cache-control", "no-cache");
                                 res.setHeader("connection", "keep-alive");
                                 res.setHeader("x-accel-buffering", "no");
-                                (_c = res.flushHeaders) === null || _c === void 0 ? void 0 : _c.call(res);
+                                (_d = res.flushHeaders) === null || _d === void 0 ? void 0 : _d.call(res);
                                 writeEvent_1 = function (event) {
                                     res.write("data: ".concat(JSON.stringify(event), "\n\n"));
                                 };
@@ -500,14 +531,14 @@ function verifyProxy(env) {
                                 req.on("close", function () { return clearTimeout(timer_1); });
                                 return [2 /*return*/];
                             }
-                            _e.label = 1;
+                            _f.label = 1;
                         case 1:
-                            _e.trys.push([1, 3, , 4]);
-                            return [4 /*yield*/, fetch("".concat(backendUrl, "/verify/runs/").concat(encodeURIComponent(runId), "/events"), { headers: { accept: "text/event-stream" } })];
+                            _f.trys.push([1, 3, , 4]);
+                            return [4 /*yield*/, fetch("".concat(backendUrl, "/verify/runs/").concat(encodeURIComponent(runId), "/events").concat(qs ? "?".concat(qs) : ""), { headers: { accept: "text/event-stream" } })];
                         case 2:
-                            upstream = _e.sent();
+                            upstream = _f.sent();
                             res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_d = upstream.headers.get("content-type")) !== null && _d !== void 0 ? _d : "text/event-stream");
+                            res.setHeader("content-type", (_e = upstream.headers.get("content-type")) !== null && _e !== void 0 ? _e : "text/event-stream");
                             res.setHeader("cache-control", "no-cache");
                             res.setHeader("connection", "keep-alive");
                             if (upstream.body) {
@@ -546,12 +577,12 @@ function verifyProxy(env) {
                             }
                             return [3 /*break*/, 4];
                         case 3:
-                            err_4 = _e.sent();
+                            err_5 = _f.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_4 instanceof Error ? err_4.message : String(err_4),
+                                message: err_5 instanceof Error ? err_5.message : String(err_5),
                             }));
                             return [3 /*break*/, 4];
                         case 4: return [2 /*return*/];
@@ -578,7 +609,7 @@ function verifyProxy(env) {
             //  <img> tag without being re-encoded as JSON.
             // ──────────────────────────────────────────────────────────────────
             server.middlewares.use("/api/evidence", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var upstreamPath, upstream, _a, _b, _c, ct, cc, buf, _d, _e, err_5;
+                var upstreamPath, upstream, _a, _b, _c, ct, cc, buf, _d, _e, err_6;
                 var _f;
                 var _g;
                 return __generator(this, function (_h) {
@@ -632,12 +663,12 @@ function verifyProxy(env) {
                             res.end(buf);
                             return [3 /*break*/, 8];
                         case 7:
-                            err_5 = _h.sent();
+                            err_6 = _h.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_5 instanceof Error ? err_5.message : String(err_5),
+                                message: err_6 instanceof Error ? err_6.message : String(err_6),
                             }));
                             return [3 /*break*/, 8];
                         case 8: return [2 /*return*/];
@@ -653,7 +684,7 @@ function verifyProxy(env) {
             //  the chatbot's browser tools always match the official server.
             // ──────────────────────────────────────────────────────────────────
             server.middlewares.use("/api/playwright", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var upstreamPath, upstream, _a, _b, _c, _d, _e, err_6;
+                var upstreamPath, upstream, _a, _b, _c, _d, _e, err_7;
                 var _f;
                 var _g, _h;
                 return __generator(this, function (_j) {
@@ -698,12 +729,12 @@ function verifyProxy(env) {
                             _e.apply(_d, [_j.sent()]);
                             return [3 /*break*/, 8];
                         case 7:
-                            err_6 = _j.sent();
+                            err_7 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_6 instanceof Error ? err_6.message : String(err_6),
+                                message: err_7 instanceof Error ? err_7.message : String(err_7),
                             }));
                             return [3 /*break*/, 8];
                         case 8: return [2 /*return*/];
@@ -711,7 +742,7 @@ function verifyProxy(env) {
                 });
             }); });
             server.middlewares.use("/api/secrets", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var isDelete, targetPath, upstream, _a, _b, _c, raw, parsed, stripPassword, _i, _d, s, text, err_7;
+                var isDelete, targetPath, upstream, _a, _b, _c, raw, parsed, stripPassword, _i, _d, s, text, err_8;
                 var _e;
                 var _f, _g, _h;
                 return __generator(this, function (_j) {
@@ -791,12 +822,12 @@ function verifyProxy(env) {
                             res.end(text);
                             return [3 /*break*/, 10];
                         case 9:
-                            err_7 = _j.sent();
+                            err_8 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_7 instanceof Error ? err_7.message : String(err_7),
+                                message: err_8 instanceof Error ? err_8.message : String(err_8),
                             }));
                             return [3 /*break*/, 10];
                         case 10: return [2 /*return*/];
@@ -817,7 +848,7 @@ function readBody(req) {
     });
 }
 export default defineConfig(function (_a) {
-    var mode = _a.mode;
+    var mode = _a.mode, command = _a.command;
     // Load .env (all vars, not just VITE_* — the prefixes arg "" disables
     // prefix filtering) merged with process.env (process.env wins), so the
     // proxy plugins below see AI_GATEWAY_* / VERIFY_BACKEND_URL from .env
@@ -825,6 +856,12 @@ export default defineConfig(function (_a) {
     // AI_GATEWAY_TOKEN still never reach the client bundle — they're only
     // read here in config-land; VITE_* exposure rules are unchanged.
     var env = loadEnv(mode, process.cwd(), "");
+    // Skip reading the local mkcert TLS files when building for production —
+    // the Docker build context doesn't carry `./cert/`, and Vite still
+    // evaluates the entire config object (including the `server.https`
+    // block) during `vite build`. Without this guard the build fails with
+    // `ENOENT: no such file or directory, open '.../cert/...-key.pem'`.
+    var isDev = command !== "build";
     return {
         plugins: [
             react(),
@@ -837,26 +874,26 @@ export default defineConfig(function (_a) {
                 "@": path.resolve(__dirname, "./src"),
             },
         },
-        server: {
-            port: 5173,
-            strictPort: true,
+        server: __assign({ port: 5173, strictPort: true, 
             // Bind to the registered Blocks dev domain (not `host: true`) so
             // Vite's banner prints https://dbeegi.slsblx.com:5173/ and the OIDC
             // session cookie IAM sets on /login/callback lands on the same host
             // that initiated the redirect. `localhost` (which resolves to a
             // different cookie origin) is no longer served, intentionally.
-            host: "dbeegi.slsblx.com",
+            host: "dbeegi.slsblx.com", 
             // Without `allowedHosts`, Vite's DNS-rebinding guard 404s requests to
             // hosts other than localhost with "Blocked request. This host is not
             // allowed." — fatal when serving on a custom Blocks dev domain.
-            allowedHosts: ["dbeegi.slsblx.com", "localhost"],
-            https: {
+            allowedHosts: ["dbeegi.slsblx.com", "localhost"] }, (isDev
+            ? {
                 // mkcert-generated: SAN covers dbeegi.slsblx.com, localhost, 127.0.0.1
                 // (CA is already trusted on this machine — see `mkcert -install`).
-                key: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2-key.pem")),
-                cert: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem")),
-            },
-        },
+                https: {
+                    key: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2-key.pem")),
+                    cert: fs.readFileSync(path.resolve(__dirname, "./cert/dbeegi.slsblx.com+2.pem")),
+                },
+            }
+            : {})),
     };
 });
 // Vite's banner always prints `https://localhost:5173/` because it
