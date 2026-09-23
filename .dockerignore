@@ -18,7 +18,10 @@
 .playwright-mcp
 cert
 npm-cache
-server
+# NOTE: `server/` is intentionally NOT ignored. The Dockerfile runtime
+# stage `COPY server/prod-backend.mjs /app/server/prod-backend.mjs` and
+# needs the file in the build context. dev-only artifacts inside server/
+# are excluded below (`server/*.bak`, etc.).
 prompt
 
 # Build outputs that the image rebuilds itself
@@ -48,12 +51,20 @@ node_modules
 # them in the build context to do its job).
 Dockerfile
 .dockerignore
-# nginx.conf MUST stay in the build context: the runtime stage does
-# `COPY nginx.conf /etc/nginx/conf.d/default.conf` and breaks silently
-# with "no source files specified" if .dockerignore filters it out.
-# `Dockerfile` and `.dockerignore` themselves are excluded from `COPY . .`
-# so they don't bloat the build stage, but they're metadata and don't
-# get explicitly COPY'd anyway.
+# server/prod-backend.mjs MUST stay in the build context: the runtime
+# stage does `COPY server/prod-backend.mjs /app/server/prod-backend.mjs`
+# and breaks silently with "no source files specified" if .dockerignore
+# filters it out. Same lesson as the old nginx.conf — exclude from the
+# final image's `COPY . .` (via the per-file path below) but not from
+# the build context.
 
 # The build context for `npm ci` only needs package*.json — keep the rest
 # out until COPY . . runs in the build stage.
+
+# dev-only server-side files — never bake these in (kept in the build
+# context so the COPY step can find them, but excluded from COPY . . in
+# the build stage). Add new dev-only server files here as they appear.
+server/*.bak
+server/*.local
+server/.master.key
+server/.env.*

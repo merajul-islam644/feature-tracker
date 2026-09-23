@@ -3,9 +3,11 @@
 # Stage 1 (deps): install all dependencies in a single layer so a package.json
 #   change re-uses the cache for the (larger) node_modules download.
 # Stage 2 (build): tsc -b && vite build — produces a static SPA in dist/.
-# Stage 3 (runtime): serve dist/ with nginx on port 8080 (the conventional
-#   Cloud Run / distroless-friendly port). Nginx config rewrites unknown
-#   paths to /index.html so client-side routing works on a refresh.
+# Stage 3 (runtime): serve dist/ + /api/* via `server/prod-backend.mjs`
+#   (vanilla node:http). Replaces the previous nginx-only runtime so AI
+#   Chat and /api/verify/* work in production. Node built-ins only
+#   (http/fs/path/zlib/crypto/stream/url) — no package.json / npm ci needed
+#   at runtime; final image is ~70 MB on node:20-alpine.
 #
 # Build context: project root.
 #
@@ -40,8 +42,11 @@
 #     - ...
 #
 # AI gateway and verification backend use server-only (no VITE_ prefix)
-# env vars and are NOT baked into the bundle; set them on the runtime
-# service (Cloud Run) if needed.
+# env vars. They are NOT baked into the image; they are injected at
+# deploy time via `blocks release deploy --with-secrets .env.production`
+# (the dotenv file must define AI_GATEWAY_URL, AI_GATEWAY_TOKEN, and
+# optionally AI_GATEWAY_MODEL and VERIFY_BACKEND_URL). See
+# `.env.production.example` for the expected shape.
 
 # ---------- 1. Dependencies ----------
 FROM node:20-alpine AS deps
@@ -84,23 +89,23 @@ ENV VITE_BLOCKS_API_URL=$VITE_BLOCKS_API_URL \
 
 RUN npm run build
 
-# ---------- 3. Runtime (nginx, static SPA) ----------
-FROM nginx:1.27-alpine AS runtime
+# ---------- 3. Runtime (Node, SPA + API proxies) ----------
+FROM node:20-alpine AS runtime
 
-# Replace the default nginx site with one that:
-#   * serves /usr/share/nginx/html on port 8080
-#   * falls back to /index.html for unknown paths (SPA client routing —
-#     a hard refresh on /projects/:id/dev would otherwise 404)
-#   * never lets nginx cache index.html (so deploys pick up new bundles)
-#   * gzip-serves text assets
-RUN rm /etc/nginx/conf.d/default.conf
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# prod-backend.mjs uses only node built-ins (http, fs, path, zlib, stream,
+# url, crypto) — no package.json / npm ci needed at runtime. ~70 MB final
+# image (vs ~45 MB for nginx:1.27-alpine, but the Node process is what
+# makes /api/ai/chat work — without it production AI Chat returns 405).
+COPY server/prod-backend.mjs /app/server/prod-backend.mjs
+COPY --from=build /app/dist /app/dist
 
-# Static assets only — no source, no node_modules.
-COPY --from=build /app/dist /usr/share/nginx/html
-
+ENV PORT=8080
 EXPOSE 8080
 
-# nginx's stock entrypoint is fine; it reads the default.conf we copied in.
+# /api/health returns a fixed JSON 200, so the probe is unambiguously
+# tied to this service (a GET / probe would return index.html and tell
+# you nothing about which process answered).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget -q -O- http://127.0.0.1:8080/ > /dev/null || exit 1
+  CMD wget -q -O- http://127.0.0.1:8080/api/health > /dev/null || exit 1
+
+CMD ["node", "/app/server/prod-backend.mjs"]
