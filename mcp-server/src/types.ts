@@ -16,7 +16,8 @@ export type VerificationCheckId =
   | "network_errors"
   | "authentication"
   | "accessibility"
-  | "performance";
+  | "performance"
+  | "all_functionality";
 
 export type IssueSeverity = "critical" | "high" | "medium" | "low";
 
@@ -97,6 +98,28 @@ export type RunEvent =
       completedAt: string;
       failedTargets: number;
     }
+  | {
+      // Emitted once per run, right after the run starts: the concrete
+      // matrix of checks × targets the agent is about to execute. Gives
+      // the UI (and the export report) a "test plan" artifact even
+      // though the plan is derived from the check catalog rather than
+      // an LLM.
+      kind: "test_plan";
+      runId: string;
+      checks: string[];
+      targets: Array<{ targetId: string; applicationName: string; url: string }>;
+    }
+  | {
+      // Emitted at the end of a target's deep walk: every page visited
+      // mapped to the same-origin pages discovered from it. This is the
+      // application map the UI renders as a tree and the chat AI can
+      // reason over for follow-ups ("only test the Users pages").
+      kind: "app_map";
+      runId: string;
+      targetId: string;
+      applicationName: string;
+      pages: Record<string, string[]>;
+    }
   | { kind: "run_failed"; runId: string; reason: string };
 
 // Shapes posted in by the frontend (see issueTrackerApi.ts:startVerification).
@@ -111,6 +134,10 @@ export interface StartVerificationRequest {
     credentialId?: string | null;
   }>;
   scope: VerificationCheckId[];
+  // Optional device emulation for the run's browser context. Defaults
+  // to desktop. Mobile/tablet set viewport + touch so responsive
+  // layouts actually get exercised differently.
+  device?: "desktop" | "mobile" | "tablet";
 }
 
 export interface TestConnectionRequest {

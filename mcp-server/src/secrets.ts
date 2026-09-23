@@ -139,21 +139,31 @@ export function listSecrets() {
 }
 
 export function createSecret(input: {
+  id?: string;
   name: string;
   email: string;
   password: string;
 }) {
   const now = new Date().toISOString();
   const secrets = readFile();
-  const id = hashId(`${input.name}:${input.email}:${now}`);
-  secrets.push({
+  const id = input.id ?? hashId(`${input.name}:${input.email}:${now}`);
+  // Upsert — if a secret with this id already exists, replace its
+  // password/email/name and bump updatedAt. Lets the frontend keep the
+  // Blocks Data ItemId and the MCP-server secret id in sync.
+  const existingIdx = secrets.findIndex((s) => s.id === id);
+  const record = {
     id,
     name: input.name,
     email: input.email,
     password: input.password,
-    createdAt: now,
+    createdAt: existingIdx >= 0 ? secrets[existingIdx].createdAt : now,
     updatedAt: now,
-  });
+  };
+  if (existingIdx >= 0) {
+    secrets[existingIdx] = record;
+  } else {
+    secrets.push(record);
+  }
   writeFile(secrets);
   return {
     id,
@@ -162,8 +172,8 @@ export function createSecret(input: {
     hasPassword: true,
     passwordLength: input.password.length,
     passwordMasked: mask(input.password),
-    createdAt: now,
-    updatedAt: now,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
   };
 }
 

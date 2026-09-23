@@ -8,19 +8,22 @@
 //   GET    /secrets                    → list masked secrets
 //   POST   /secrets                    → create encrypted secret
 //   DELETE /secrets/:id                → delete secret
+//   GET    /playwright/tools           → official Playwright MCP tool catalog
+//   POST   /playwright/call            → forward a tool call to Playwright MCP
 //   GET    /evidence/:filename         → stream artifact
 //
-// Run ownership check (`requireRunOwnership`) is enforced on /evidence
-// so a user with a leaked filename can't read another tenant's
-// screenshot. The check is intentionally loose in dev — a real prod
-// binding to a JWT user id is left as infra work.
+// The verification agent runs in headed mode (a real visible Chrome
+// window on the host). The browser window is the preview — there is
+// no in-app mirror and no `/interact` endpoint, so the user sees the
+// same browser the agent is driving.
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { z } from "zod";
-import { appendEvent, eventsAfter, getRun, setStatus, startRun, waitForEvents } from "./runs.js";
+import { appendEvent, eventsAfter, getRun, listRuns, requestStop, setStatus, startRun, waitForEvents } from "./runs.js";
 import { runAgent, testConnection } from "./agent.js";
 import { listSecrets, createSecret, deleteSecret } from "./secrets.js";
+import { listPlaywrightTools, callPlaywrightTool } from "./playwrightMcp.js";
 import { resolveEvidence } from "./evidence.js";
 import type { StartVerificationRequest } from "./types.js";
 
@@ -73,6 +76,8 @@ const StartBody = z.object({
   targets: z.array(TargetSchema).min(1),
   scope: z
     .array(
+      // Keep in sync with VerificationCheckId in mcp-server/src/types.ts —
+      // a new check id must be added to BOTH or /verify/runs rejects it.
       z.enum([
         "page_load",
         "navigation",
@@ -84,9 +89,20 @@ const StartBody = z.object({
         "authentication",
         "accessibility",
         "performance",
+        "all_functionality",
       ]),
     )
     .min(1),
+  // Device emulation preset for the run's browser context.
+  device: z.enum(["desktop", "mobile", "tablet"]).optional(),
+});
+
+// Run history — persisted records survive server restarts (see
+// runs.ts), so this lists past runs newest-first without their event
+// logs (those replay via /verify/runs/:id/events).
+app.get("/verify/runs", async (req) => {
+  const limit = Math.min(Number((req.query as { limit?: string }).limit ?? 25) || 25, 100);
+  return { runs: listRuns(limit) };
 });
 
 app.post("/verify/runs", async (req, reply) => {
@@ -129,6 +145,10 @@ app.post<{ Params: { id: string } }>("/verify/runs/:id/resume", async (req, repl
 app.post<{ Params: { id: string } }>("/verify/runs/:id/stop", async (req, reply) => {
   const r = getRun(req.params.id);
   if (!r) return reply.code(404).send({ error: "not found" });
+  // Flip the cooperative flag too — without it the agent loop keeps
+  // driving Playwright to completion invisibly after the UI already
+  // reported the run as cancelled.
+  requestStop(req.params.id);
   setStatus(req.params.id, "cancelled");
   appendEvent(req.params.id, {
     kind: "run_failed",
@@ -177,11 +197,22 @@ app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
       if (finished && cursor === r.cursor) {
         write({ type: "done" });
         cleanup();
+        // End the raw response too — the handler hijacked it from
+        // Fastify, so returning alone leaves the socket open with no
+        // heartbeat. Every subscriber to a finished run would otherwise
+        // hold a dead connection until ITS side times out.
+        reply.raw.end();
         break;
       }
       const newEvents = await waitForEvents(req.params.id, cursor, 1_500);
       for (const ev of newEvents) writeEvent(ev);
-      cursor = r.cursor;
+      // Advance by what this connection actually delivered — NOT to
+      // r.cursor. Events appended between the waiter's slice snapshot and
+      // this assignment (a run's final burst: watch-done →
+      // target_completed → run_completed lands in one synchronous block)
+      // would otherwise be skipped forever, so the client never sees the
+      // last target_completed and the run summary reads "0/N done".
+      if (newEvents.length > 0) cursor += newEvents.length;
     }
     cleanup();
   },
@@ -192,6 +223,11 @@ app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
 // ────────────────────────────────────────────────────────────────────────────
 
 const CreateSecretBody = z.object({
+  // Optional explicit id — when provided, the secret is upserted under that
+  // id so the frontend's Blocks Data ItemId and the MCP server's secret id
+  // match (the frontend binds VerificationTarget.credentialId to the same
+  // value the agent looks up at verify-time).
+  id: z.string().min(1).max(64).optional(),
   name: z.string().min(1).max(120),
   email: z.string().email(),
   password: z.string().min(1).max(512),
@@ -210,6 +246,42 @@ app.delete<{ Params: { id: string } }>("/secrets/:id", async (req, reply) => {
   const ok = deleteSecret(req.params.id);
   if (!ok) return reply.code(404).send({ error: "not found" });
   return { ok: true };
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Official Playwright MCP bridge — the chatbot's browser tools.
+//  GET  /playwright/tools → live tool catalog from `npx @playwright/mcp@latest`
+//  POST /playwright/call  → forward one tool call to the official server
+// ────────────────────────────────────────────────────────────────────────────
+
+app.get("/playwright/tools", async (_req, reply) => {
+  try {
+    return { tools: await listPlaywrightTools() };
+  } catch (err) {
+    app.log.error({ err }, "playwright tools/list failed");
+    return reply
+      .code(502)
+      .send({ error: "playwright_mcp_unavailable", message: (err as Error).message });
+  }
+});
+
+const PlaywrightCallBody = z.object({
+  tool: z.string().min(1),
+  arguments: z.record(z.unknown()).default({}),
+});
+
+app.post("/playwright/call", async (req, reply) => {
+  const parsed = PlaywrightCallBody.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+  try {
+    const result = await callPlaywrightTool(parsed.data.tool, parsed.data.arguments);
+    return { tool: parsed.data.tool, result };
+  } catch (err) {
+    app.log.error({ err, tool: parsed.data.tool }, "playwright tool call failed");
+    return reply
+      .code(502)
+      .send({ error: "playwright_tool_failed", message: (err as Error).message });
+  }
 });
 
 // ────────────────────────────────────────────────────────────────────────────

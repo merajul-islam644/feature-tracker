@@ -7,6 +7,8 @@
 // agent loop on the same browser context.
 
 import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { RunEvent, StartVerificationRequest, VerificationCheckId } from "./types.js";
 
 export interface RunRecord {
@@ -23,9 +25,145 @@ export interface RunRecord {
   cursor: number;
   // Subscribers waiting for new events.
   waiters: Array<() => void>;
+  // Cooperative cancellation. The /stop endpoint sets this so the agent
+  // loop can bail out at its next check boundary instead of walking the
+  // whole target list as a zombie after the UI already said "cancelled".
+  stopRequested: boolean;
 }
 
 const runs = new Map<string, RunRecord>();
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Persistence — run history survives restarts.
+//
+//  The store used to be purely in-memory, so a server restart lost every
+//  run record: SSE replay 404'd, the UI's "last run" state had nothing to
+//  reconnect to, and run history was gone. Records now persist to a JSON
+//  file (debounced while a run is streaming events, synchronous when a
+//  run settles) and reload on boot. Only the most recent MAX_PERSISTED
+//  runs are kept so the file can't grow unbounded.
+// ────────────────────────────────────────────────────────────────────────────
+
+const STORE_PATH = process.env.RUNS_STORE_PATH ?? join(process.cwd(), "runs-store.json");
+const MAX_PERSISTED_RUNS = 50;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+type PersistedRun = Omit<RunRecord, "waiters" | "stopRequested">;
+
+function serialize(): string {
+  // Most recent runs only — keeps the file bounded and the pruning
+  // below deterministic.
+  const recs = [...runs.values()].slice(-MAX_PERSISTED_RUNS);
+  const persisted: PersistedRun[] = recs.map(({ waiters: _w, stopRequested: _s, ...rest }) => rest);
+  return JSON.stringify({ version: 1, runs: persisted });
+}
+
+function pruneToCap(): void {
+  if (runs.size <= MAX_PERSISTED_RUNS) return;
+  // Drop the OLDEST settled runs first; never drop an active one to
+  // satisfy the cap (an active run is always the newest anyway).
+  const ids = [...runs.keys()];
+  for (const id of ids) {
+    if (runs.size <= MAX_PERSISTED_RUNS) break;
+    const r = runs.get(id);
+    if (!r) continue;
+    if (r.status === "queued" || r.status === "running" || r.status === "paused") continue;
+    runs.delete(id);
+  }
+}
+
+function saveStoreNow(): void {
+  pruneToCap();
+  try {
+    writeFileSync(STORE_PATH, serialize(), "utf8");
+  } catch {
+    // Unwritable path / disk full — history is best-effort, never let
+    // it take a live run down.
+  }
+}
+
+function scheduleSave(): void {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveStoreNow();
+  }, 1_500);
+}
+
+function loadStore(): void {
+  try {
+    const raw = readFileSync(STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw) as { runs?: PersistedRun[] };
+    if (!Array.isArray(parsed?.runs)) return;
+    for (const p of parsed.runs) {
+      if (!p?.id || !Array.isArray(p.events)) continue;
+      const settled =
+        p.status === "completed" || p.status === "failed" || p.status === "cancelled";
+      runs.set(p.id, {
+        ...p,
+        waiters: [],
+        // A run that was mid-flight when the process died can never
+        // finish — mark it failed so SSE clients get a terminal event
+        // instead of a stream that never ends.
+        stopRequested: false,
+        status: settled ? p.status : "failed",
+        ...(settled
+          ? {}
+          : {
+              completedAt: new Date().toISOString(),
+              events: [
+                ...p.events,
+                {
+                  kind: "run_failed" as const,
+                  runId: p.id,
+                  reason:
+                    "The verification server restarted mid-run. Start a fresh run to re-verify.",
+                },
+              ],
+              cursor: p.events.length + 1,
+            }),
+      });
+    }
+  } catch {
+    // Missing file on first boot, or corrupted content — start empty.
+  }
+}
+
+loadStore();
+
+// List runs for the history endpoint — newest first, without the event
+// log (that's what /verify/runs/:id/events replays).
+export function listRuns(limit = 25): Array<
+  Pick<RunRecord, "id" | "userId" | "status" | "scope" | "startedAt" | "completedAt"> & {
+    targetNames: RunRecord["targetNames"];
+    eventCount: number;
+  }
+> {
+  return [...runs.values()]
+    .sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))
+    .slice(0, limit)
+    .map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      status: r.status,
+      scope: r.scope,
+      targetNames: r.targetNames,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      eventCount: r.events.length,
+    }));
+}
+
+// Flush pending history on shutdown so the last run's settled state
+// isn't lost to the debounce window.
+process.on("SIGINT", () => {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveStoreNow();
+  }
+  process.exit(0);
+});
 
 // Idempotency map: hash(enabledTargets + scope) -> existing runId.
 // Capped so it doesn't grow unbounded — only the most recent 16 keys
@@ -49,6 +187,13 @@ export function startRun(req: StartVerificationRequest): { id: string; replay: b
     if (rec && (rec.status === "running" || rec.status === "queued" || rec.status === "paused")) {
       return { id: existing, replay: true };
     }
+    // Existing run is already settled (completed/failed/cancelled). Treat
+    // this Start as a fresh one — fall through and allocate a new id, and
+    // overwrite the idempotency key so the next Start with the same shape
+    // also gets a fresh run.
+    idempotency.delete(hash);
+    const idx = idempotencyOrder.indexOf(hash);
+    if (idx >= 0) idempotencyOrder.splice(idx, 1);
   }
 
   const id = req.runId || `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -66,8 +211,10 @@ export function startRun(req: StartVerificationRequest): { id: string; replay: b
     events: [],
     cursor: 0,
     waiters: [],
+    stopRequested: false,
   };
   runs.set(id, rec);
+  scheduleSave();
 
   idempotency.set(hash, id);
   idempotencyOrder.push(hash);
@@ -82,6 +229,19 @@ export function getRun(id: string): RunRecord | undefined {
   return runs.get(id);
 }
 
+// Ask the agent loop for this run to stop at its next check boundary.
+// The /stop endpoint still emits its own terminal event + status flip
+// immediately (so SSE clients end promptly); this flag is what actually
+// interrupts the Playwright work instead of letting it run to completion
+// invisibly.
+export function requestStop(id: string): void {
+  const r = runs.get(id);
+  if (!r) return;
+  r.stopRequested = true;
+  notifyWaiters(id);
+  scheduleSave();
+}
+
 export function setStatus(
   id: string,
   status: RunRecord["status"],
@@ -92,6 +252,11 @@ export function setStatus(
   r.status = status;
   if (extras?.completedAt) r.completedAt = extras.completedAt;
   notifyWaiters(id);
+  // Terminal statuses flush synchronously — the debounce window is fine
+  // mid-run, but a settled run should be on disk before the process
+  // could go away.
+  if (status === "completed" || status === "failed" || status === "cancelled") saveStoreNow();
+  else scheduleSave();
 }
 
 export function appendEvent(id: string, event: RunEvent): void {
@@ -100,6 +265,9 @@ export function appendEvent(id: string, event: RunEvent): void {
   r.events.push(event);
   r.cursor++;
   notifyWaiters(id);
+  // Events stream at high cadence during a run — debounced so the
+  // write cost stays flat instead of one fsync per event.
+  scheduleSave();
 }
 
 function notifyWaiters(id: string) {
