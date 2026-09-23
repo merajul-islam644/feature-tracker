@@ -106,10 +106,12 @@ export function ChatMessage({
       )}
       <div
         className={cn(
-          "relative max-w-[85%] rounded-lg border px-3 py-2 text-sm leading-relaxed shadow-sm",
+          "relative px-3.5 py-2.5 text-sm leading-relaxed",
+          // User: indigo bubble, asymmetric rounded corners per §9.3.
           isUser
-            ? "border-primary/30 bg-primary text-primary-foreground"
-            : "border-border bg-card text-foreground",
+            ? "max-w-[82%] rounded-2xl rounded-br-md bg-indigo-500 text-white"
+            : // Assistant: muted bubble.
+              "max-w-[88%] rounded-2xl rounded-bl-md bg-muted text-foreground",
         )}
       >
         <p className="whitespace-pre-wrap">{message.content}</p>
@@ -202,11 +204,7 @@ export function ChatMessage({
           aria-label={`Copy message: ${truncate(message.content, 60)}`}
           title={justCopied ? "Copied" : "Copy"}
           className={cn(
-            "absolute -right-2 -top-2 h-6 w-6 rounded-full border shadow-sm transition-opacity",
-            isUser
-              ? "border-primary/30 bg-primary text-primary-foreground hover:bg-primary/90"
-              : "border-border bg-background text-muted-foreground hover:text-foreground",
-            // Hidden by default, shown on hover / focus / right after copy.
+            "absolute -right-2 -top-2 h-6 w-6 rounded-full bg-card/90 text-muted-foreground shadow-sm transition-opacity hover:text-foreground",
             justCopied
               ? "opacity-100"
               : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",

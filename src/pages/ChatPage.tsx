@@ -131,10 +131,14 @@ export function ChatPage() {
             (fixed the composer falling below the fold on short screens). */}
         <div className="flex h-[calc(100dvh_-_15rem)] min-h-[22rem]">
           {/* Roster pane — hidden on phones once a thread is open (the
-              thread takes the full width, with a back button). */}
+              thread takes the full width, with a back button). Width
+              narrowed to `w-72` (was `w-80`) to match the apps-website
+              ChatMockup reference — the roster rows are tighter, so
+              the 2-pane split can trade pixels to the thread stream
+              on every screen. */}
           <div
             className={cn(
-              "w-full flex-col border-r border-border md:flex md:w-80 md:shrink-0",
+              "w-full flex-col border-r border-border md:flex md:w-72 md:shrink-0",
               selectedId ? "hidden" : "flex",
             )}
           >

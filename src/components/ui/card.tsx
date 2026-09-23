@@ -1,15 +1,29 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+/*
+ * Card — see DESIGN-APP-v1.md §7.2.
+ *
+ * Default: rounded-xl, bg-card, shadow-card.
+ * Interactive: add `card-interactive` (hover lift + shadow-card-hover).
+ * Variants:
+ *   - default  : rounded-xl border bg-card shadow-card
+ *   - flat     : rounded-xl bg-card border (no shadow)
+ *   - elevated : rounded-xl bg-card shadow-elevated
+ */
 const Card = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
+  React.HTMLAttributes<HTMLDivElement> & {
+    variant?: "default" | "flat" | "elevated";
+  }
+>(({ className, variant = "default", ...props }, ref) => (
   <div
     ref={ref}
     className={cn(
-      "rounded-lg border border-border bg-card text-card-foreground shadow-sm",
-      className
+      "rounded-lg border bg-card text-card-foreground",
+      variant === "default" && "shadow-card",
+      variant === "elevated" && "shadow-elevated",
+      className,
     )}
     {...props}
   />
@@ -30,13 +44,13 @@ CardHeader.displayName = "CardHeader";
 
 const CardTitle = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
+  React.HTMLAttributes<HTMLHeadingElement>
 >(({ className, ...props }, ref) => (
   <h3
-    ref={ref as React.Ref<HTMLHeadingElement>}
+    ref={ref}
     className={cn(
-      "text-lg font-semibold leading-none tracking-tight",
-      className
+      "text-lg font-semibold leading-tight tracking-tight",
+      className,
     )}
     {...props}
   />
@@ -45,10 +59,10 @@ CardTitle.displayName = "CardTitle";
 
 const CardDescription = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
+  React.HTMLAttributes<HTMLParagraphElement>
 >(({ className, ...props }, ref) => (
   <p
-    ref={ref as React.Ref<HTMLParagraphElement>}
+    ref={ref}
     className={cn("text-sm text-muted-foreground", className)}
     {...props}
   />

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Layers, Plus } from "lucide-react";
+import { FolderKanban, Layers, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProjectList } from "@/components/project/ProjectList";
 import { ProjectEmptyState } from "@/components/project/ProjectEmptyState";
@@ -22,12 +22,29 @@ export function ProjectsPage() {
 
   return (
     <div className="space-y-6">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">
-            {t("projects.title", "Projects")}
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+      {/* Header — icon badge + title + subtitle, matching the issue
+          tracker / dashboard treatment. The icon badge is the small
+          indigo-tinted square that the design system uses to anchor a
+          page title; without it the heading floats untethered. */}
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              aria-hidden="true"
+              className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300"
+            >
+              <FolderKanban className="h-4 w-4" />
+            </span>
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+              {t("projects.title", "Projects")}
+            </h1>
+            {list.length > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                {list.length}
+              </span>
+            )}
+          </div>
+          <p className="max-w-2xl text-sm text-muted-foreground">
             {t(
               "projects.subtitle",
               "Manage your projects, features, and flows.",
@@ -43,8 +60,8 @@ export function ProjectsPage() {
               <Button
                 variant="outline"
                 onClick={() => setAddEnvOpen(true)}
-                leftIcon={<Layers className="h-4 w-4" />}
               >
+                <Layers className="mr-1.5 h-4 w-4" aria-hidden="true" />
                 {t("addEnvironment.cta", "Add Environment")}
               </Button>
             )}
@@ -55,10 +72,8 @@ export function ProjectsPage() {
                 empty. We gate that component the same way so testers
                 can't author a project through the empty state either. */}
             {!isTester && (
-              <Button
-                onClick={() => setCreateOpen(true)}
-                leftIcon={<Plus className="h-4 w-4" />}
-              >
+              <Button onClick={() => setCreateOpen(true)}>
+                <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" />
                 {t("projects.createCta", "Create Project")}
               </Button>
             )}
@@ -67,12 +82,14 @@ export function ProjectsPage() {
       </header>
 
       {isLoading ? (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div
+          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+          aria-hidden="true"
+        >
           {Array.from({ length: 3 }).map((_, i) => (
             <div
               key={i}
-              className="h-32 animate-pulse rounded-lg border border-border bg-muted"
-              aria-hidden="true"
+              className="h-32 animate-pulse rounded-xl border border-border bg-muted/40"
             />
           ))}
         </div>

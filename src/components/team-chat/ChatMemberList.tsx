@@ -1,12 +1,18 @@
-// Left pane of the member chat page — the WhatsApp-style contact list.
-// Each row shows the member's avatar, name, the last message exchanged
-// (with a "You: " prefix when I sent it), a timestamp, and an unread
-// badge fed from the polling query. Rows sort by most recent message,
-// then alphabetically, so silent contacts don't crowd out live ones.
+// Left pane of the member chat page — the WhatsApp/Messenger-style
+// contact list. Each row is a tight 56-60px tall cell: avatar +
+// name + last-message preview on the left, time + unread badge
+// on the right. The active member gets a 2px primary left-bar +
+// accent background so the selection reads at a glance — mirrors
+// the apps-website ChatMockup reference UI, not the Members-page
+// card pattern.
+//
+// Rows sort by most recent message, then alphabetically, so silent
+// contacts don't crowd out live ones.
 
 import { useMemo, useState } from "react";
-import { Image as ImageIcon, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
+import { Badge } from "@/components/ui/badge";
 import { useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 import type { DirectMessage } from "@/lib/blocks/data";
@@ -25,6 +31,24 @@ function previewTime(iso: string): string {
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+// Compute the roster preview line for one conversation. Branches on
+// `messageType === "call_log"` so a call-log row renders the localized
+// outcome string ("Voice call · 0:32", "Missed voice call") instead of
+// the empty `content` fallback ("Image"). System rows are NOT prefixed
+// with "You: " — they're conversation events, not one side speaking.
+function previewLabel(
+  last: DirectMessage,
+  memberId: string,
+  t: ReturnType<typeof useT>,
+): string {
+  if (last.messageType === "call_log" && last.callSummary) {
+    return last.callSummary;
+  }
+  return `${
+    last.senderId === memberId ? "" : `${t("chat.you", "You")}: `
+  }${last.content || t("chat.attachPreview", "Image")}`;
+}
+
 interface ChatMemberListProps {
   members: ChatMember[];
   lastByMember: Map<string, DirectMessage>;
@@ -34,6 +58,12 @@ interface ChatMemberListProps {
   loading: boolean;
   error: boolean;
 }
+
+// Cap the row at 64px. The previous version's `py-2.5` + multi-line
+// preview meant long last-message text could blow the row out; capping
+// at 64px plus `truncate` on every text node keeps the list scannable
+// when many rows are visible at once.
+const ROW_HEIGHT = "min-h-[3.5rem]";
 
 export function ChatMemberList({
   members,
@@ -68,10 +98,17 @@ export function ChatMemberList({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* Search header. h2 + search input — matches the
+          "Direct messages" heading in the apps-website ChatMockup
+          reference. Section heading helps orient anyone landing on
+          the page cold (a bare list reads as ambiguous). */}
       <div className="border-b border-border p-3">
+        <h2 className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wider text-foreground">
+          {t("chat.directMessages", "Direct messages")}
+        </h2>
         <div className="relative">
           <Search
-            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+            className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
             aria-hidden="true"
           />
           <input
@@ -80,25 +117,25 @@ export function ChatMemberList({
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("chat.searchPlaceholder", "Search members")}
             aria-label={t("chat.searchPlaceholder", "Search members")}
-            className="h-9 w-full rounded-lg border border-input bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-8 w-full rounded-md border border-input bg-muted/40 pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus-visible:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {loading ? (
-          <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+          <p className="px-4 py-6 text-center text-xs text-muted-foreground">
             {t("chat.loadingMembers", "Loading members…")}
           </p>
         ) : error ? (
-          <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+          <p className="px-4 py-6 text-center text-xs text-muted-foreground">
             {t(
               "chat.membersError",
               "Couldn't load the member list. Please try again.",
             )}
           </p>
         ) : visible.length === 0 ? (
-          <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+          <p className="px-4 py-6 text-center text-xs text-muted-foreground">
             {t("chat.noMatches", "No members match your search.")}
           </p>
         ) : (
@@ -109,67 +146,91 @@ export function ChatMemberList({
               const isSelected = member.id === selectedId;
               return (
                 <li key={member.id}>
+                  {/* The row design matches the apps-website
+                      ChatMockup reference:
+                      • Avatar on the left (smaller than the Members
+                        page card)
+                      • Name + last-message preview stacked, both
+                        truncating so the row height stays bounded
+                      • Right column carries timestamp + unread
+                        badge — vertical compactness lets the user
+                        scan 4-5 rows without scrolling
+                      • Active row gets the `border-l-2` accent bar
+                        + tinted bg; inactive rows get a transparent
+                        border of the same width so the row heights
+                        stay aligned (no 2px shift on selection) */}
                   <button
                     type="button"
                     role="option"
                     aria-selected={isSelected}
                     onClick={() => onSelect(member.id)}
                     className={cn(
-                      "flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors",
-                      "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                      isSelected && "bg-accent",
+                      "flex w-full items-center gap-2 px-3 py-2 text-left transition-colors",
+                      // `border-l-2` on every row (transparent when
+                      // inactive) keeps the inner content aligned
+                      // across selected/unselected — otherwise the
+                      // selected row's content shifts 2px right.
+                      "border-l-2",
+                      isSelected
+                        ? "border-primary bg-accent"
+                        : "border-transparent hover:bg-accent/60",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                      ROW_HEIGHT,
                     )}
                   >
-                    <UserAvatar userId={member.id} name={member.name} size="md" />
+                    <UserAvatar
+                      userId={member.id}
+                      name={member.name}
+                      size="sm"
+                      className="h-8 w-8 text-[11px]"
+                    />
                     <span className="min-w-0 flex-1">
-                      <span className="flex items-baseline justify-between gap-2">
-                        <span
+                      <div className="flex items-baseline justify-between gap-2">
+                        <p
                           className={cn(
-                            "truncate text-sm text-foreground",
-                            unread > 0 ? "font-semibold" : "font-medium",
+                            "truncate text-xs",
+                            unread > 0
+                              ? "font-semibold text-foreground"
+                              : "font-medium text-foreground",
                           )}
                         >
                           {member.name}
-                        </span>
+                        </p>
                         {last && (
-                          <span className="shrink-0 text-[11px] text-muted-foreground">
+                          <span
+                            className={cn(
+                              "shrink-0 text-[10px]",
+                              unread > 0
+                                ? "font-medium text-foreground"
+                                : "text-muted-foreground",
+                            )}
+                          >
                             {previewTime(last.sentAt)}
                           </span>
                         )}
-                      </span>
-                      <span className="mt-0.5 flex items-center justify-between gap-2">
-                        <span
-                          className={cn(
-                            "flex min-w-0 items-center gap-1 text-xs",
-                            unread > 0
-                              ? "font-medium text-foreground"
-                              : "text-muted-foreground",
-                          )}
-                        >
-                          {last?.attachmentFileId && (
-                            <ImageIcon
-                              className="h-3 w-3 shrink-0"
-                              aria-label={t("chat.attachPreview", "Image")}
-                            />
-                          )}
-                          <span className="truncate">
-                            {last
-                              ? `${
-                                  last.senderId === member.id ? "" : `${t("chat.you", "You")}: `
-                                }${last.content || t("chat.attachPreview", "Image")}`
-                              : member.email}
-                          </span>
-                        </span>
-                        {unread > 0 && (
-                          <span
-                            className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground"
-                            aria-label={`${unread} unread`}
-                          >
-                            {unread}
-                          </span>
+                      </div>
+                      <p
+                        className={cn(
+                          "mt-0.5 truncate text-[11px]",
+                          unread > 0
+                            ? "font-medium text-foreground"
+                            : "text-muted-foreground",
                         )}
-                      </span>
+                      >
+                        {last
+                          ? previewLabel(last, member.id, t)
+                          : member.email}
+                      </p>
                     </span>
+                    {unread > 0 && (
+                      <Badge
+                        variant="default"
+                        className="ml-auto h-4 min-w-4 shrink-0 justify-center rounded-full px-1.5 py-0 text-[10px] font-semibold"
+                        aria-label={`${unread} unread`}
+                      >
+                        {unread}
+                      </Badge>
+                    )}
                   </button>
                 </li>
               );

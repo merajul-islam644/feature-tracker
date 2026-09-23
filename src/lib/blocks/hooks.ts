@@ -7,6 +7,13 @@
 // session, so callers never have to pass `userId` themselves.
 
 import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
+import {
   useMutation,
   useQuery,
   useQueryClient,
@@ -14,6 +21,7 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
+import { blocksClient } from "./client";
 import {
   createdByFilter,
   featuresCollection,
@@ -21,26 +29,34 @@ import {
   projectsCollection,
   chatMessagesCollection,
   directMessagesCollection,
+  callSignalsCollection,
   announcementsCollection,
   issuesCollection,
   secretsCollection,
   userProfilesCollection,
+  memberProjectsCollection,
   verificationTargetsCollection,
   toAnnouncement,
+  toCallSignal,
   toChatMessage,
   toDirectMessage,
   toFeature,
   toFlow,
   toIssue,
+  toMemberProjectAssignment,
   toProject,
   toSecret,
   toUserProfilePic,
   toVerificationTarget,
   type Announcement,
+  type CallSignal,
+  type CallSignalIceCandidate,
   type CloudAnnouncement,
+  type CloudCallSignal,
   type CloudDirectMessage,
   type CloudFeature,
   type CloudFlow,
+  type CloudMemberProject,
   type CloudProject,
   type CloudUserProfile,
   type DirectMessage,
@@ -49,6 +65,7 @@ import {
   type FlowStack,
   type FlowStatus,
   type FlowTestStatus,
+  type MemberProjectAssignment,
   type PersistedChatMessage,
   type Project,
   type ProjectCustomEnv,
@@ -60,6 +77,10 @@ import {
   uploadToPresignedUrl,
 } from "./files";
 import { notifyAssignedFeature, notifyRole } from "./notifier";
+import {
+  useHiddenAnnouncementIds,
+  useUnhideAnnouncement,
+} from "./hiddenAnnouncements";
 import type {
   ChatSessionSummary,
   Issue,
@@ -284,8 +305,16 @@ export const queryKeys = {
   chatSessions: (userId: string) => ["chat-sessions", userId] as const,
   // Member-to-member direct messages — the /chat page's inbox+outbox feed.
   directMessages: (userId: string) => ["direct-messages", userId] as const,
+  // WebRTC call signaling rows addressed to/from the current user. Two-call
+  // read (callerId outbox + recipientId inbox) — same OR-filter workaround
+  // the directMessages query uses. Rows are kept until the call terminates
+  // (status flips to ended/declined/missed + endedAt is stamped), so the
+  // key is per-user, not per-call.
+  callSignals: (userId: string) => ["call-signals", userId] as const,
   // Manager announcements — workspace-wide, so no user scoping in the key.
   announcements: ["announcements"] as const,
+  // Per-member project assignments — workspace-wide read; one row per user.
+  memberProjects: ["member-projects"] as const,
   // Profile pictures — the userId → fileId map is workspace-wide (every
   // member's row, so any avatar can render); the caller id in the key only
   // keeps one session's cache from bleeding into the next.
@@ -444,6 +473,40 @@ export function useFeatureFlows(
 // `useProjectFlows` — the gateway filter parser drops operator objects
 // like `{ in: [...] }`, so `projectId: { in: [...] }` is silently ignored
 // and the query would return empty.
+// Most recent features across the workspace, narrowed to alive projects
+// so a deleted project's features stop appearing in the dashboard.
+// Mirrors `useRecentFlows` (just below) — same scope gate, same sort,
+// same slicing. Used by the dashboard's "Recent Features" card; the
+// stats card already counts the same set via `useWorkspaceTotals`.
+export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  const scopeQuery = useAliveScope(userId);
+  return useQuery({
+    queryKey: [...queryKeys.dashboard(userId), "features", limit] as const,
+    enabled: Boolean(userId) && scopeQuery.data !== undefined,
+    queryFn: async () => {
+      const scope = scopeQuery.data;
+      if (!scope) return [];
+      if (scope.projectIds.size === 0) return [];
+      const featuresRaw = await featuresCollection.list({
+        pageNo: 1,
+        pageSize: 1000,
+        sort: { CreatedDate: -1 },
+      });
+      return unwrapPaged<unknown>(featuresRaw).items
+        .filter((f) => {
+          const pid = (f as { projectId?: string }).projectId;
+          return pid !== undefined && scope.projectIds.has(pid);
+        })
+        .slice(0, limit)
+        .map((f) =>
+          toFeature(f as Parameters<typeof toFeature>[0], ""),
+        );
+    },
+  });
+}
+
 export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
@@ -1156,6 +1219,630 @@ export function useSendChatAttachment(): UseMutationResult<
   });
 }
 
+// --- Direct message: edit / delete / react ------------------------------------
+//
+// The composer handles "send new" (useSendDirectMessage +
+// useSendChatAttachment above). These three hooks cover the per-row
+// lifecycle after a message exists:
+//
+//   useEditDirectMessage      — sender-only. Updates `content` and
+//                              stamps `editedAt`. Permission check is
+//                              client-side (the message's `senderId`
+//                              must equal the current user).
+//   useDeleteDirectMessage    — sender-only. Soft delete: stamps
+//                              `deletedAt` and blanks the content +
+//                              attachment. The bubble renders a
+//                              tombstone instead of the original.
+//   useToggleDirectMessageReaction — open to BOTH sender and recipient
+//                              (any workspace member can react to any
+//                              message they're a party to). Toggles
+//                              one `{userId, emoji}` pair: adds it if
+//                              missing, removes it if already present.
+//
+// All three invalidate the same `directMessages` query so the roster
+// previews + thread + unread badges all refresh in lockstep.
+
+export function useEditDirectMessage(): UseMutationResult<
+  DirectMessage,
+  Error,
+  { id: string; senderId: string; recipientId: string; content: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, senderId, recipientId, content }) => {
+      const now = new Date().toISOString();
+      const updated = (await directMessagesCollection.update(id, {
+        senderId,
+        recipientId,
+        content,
+        editedAt: now,
+      })) as { data?: CloudDirectMessage } | CloudDirectMessage;
+      const item =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as CloudDirectMessage);
+      return toDirectMessage(item as Parameters<typeof toDirectMessage>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+    },
+  });
+}
+
+export function useDeleteDirectMessage(): UseMutationResult<
+  void,
+  Error,
+  { id: string; senderId: string; recipientId: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, senderId, recipientId }) => {
+      const now = new Date().toISOString();
+      // Soft delete: blank content + attachment, stamp deletedAt.
+      // `reactions` is also wiped so the tombstone doesn't show ghost
+      // emojis. The row stays so the recipient's read/unread state
+      // remains auditable.
+      await directMessagesCollection.update(id, {
+        senderId,
+        recipientId,
+        content: "",
+        attachmentFileId: "",
+        reactions: "[]",
+        editedAt: "",
+        deletedAt: now,
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+    },
+  });
+}
+
+export function useToggleDirectMessageReaction(): UseMutationResult<
+  void,
+  Error,
+  { id: string; senderId: string; recipientId: string; reactions: { userId: string; emoji: string }[] }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ id, senderId, recipientId, reactions }) => {
+      await directMessagesCollection.update(id, {
+        senderId,
+        recipientId,
+        reactions: JSON.stringify(reactions),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+    },
+  });
+}
+
+// --- Call-log system message ------------------------------------------------
+//
+// Writes a DirectMessage row whose `messageType === "call_log"` and whose
+// `callSummary` is the localized human-readable string the thread pill +
+// roster preview render (e.g. "Voice call · 0:32", "Missed voice call").
+// The row's `senderId` is me (the side that ended the call) and
+// `recipientId` is the peer — both sides see it via the same two-call
+// `useDirectMessages` read because each side is named in one of the two
+// filters.
+//
+// The "who writes the row" rule is "the side whose user action ended the
+// call" — caller for hangup/missed/ICE-failure, recipient for decline. A
+// double-fire is rare but possible (e.g. both sides hit End within the
+// 5s poll window); the dedupe key `callSignalId` (passed in via
+// `endedAtIso`'s shape — caller-supplied) gives both sides a stable
+// token to check before writing. For v1 we trust the caller/recipient
+// asymmetry to keep double-writes rare and accept the occasional
+// duplicate pill if it ever happens.
+//
+// No retry — if the log mutation fails, the closing toast already
+// covered the outcome; the thread just won't have the system row.
+export function useLogCallOutcome(): UseMutationResult<
+  DirectMessage,
+  Error,
+  {
+    recipientId: string;
+    kind: "voice" | "video";
+    outcome: "ended" | "missed" | "declined" | "error";
+    durationSec?: number;
+    /** ISO timestamp from CallSignal.endedAt — the row's `sentAt`. */
+    endedAtIso: string;
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      // Build the localized summary client-side so a single `callSummary`
+      // string rides the row (the renderer doesn't have to know about the
+      // outcome/kind/durationSec tuple). Reuses the chat.* translation
+      // keys the in-call dialog already defines.
+      const kindLabel =
+        input.kind === "video"
+          ? blocksClient.localization.t("chat.callVideo", "video")
+          : blocksClient.localization.t("chat.callVoice", "voice");
+      let summary: string;
+      if (input.outcome === "ended") {
+        const baseLabel =
+          input.kind === "video"
+            ? blocksClient.localization.t("chat.callVideo", "video call")
+            : blocksClient.localization.t("chat.callVoice", "voice call");
+        if (input.durationSec && input.durationSec > 0) {
+          const formatted = formatCallDuration(input.durationSec);
+          summary = `${baseLabel} · ${formatted}`;
+        } else {
+          summary = baseLabel;
+        }
+      } else if (input.outcome === "missed") {
+        summary = blocksClient.localization.t(
+          "chat.callLogMissed",
+          `Missed ${kindLabel} call`,
+        );
+      } else if (input.outcome === "declined") {
+        summary = blocksClient.localization.t(
+          "chat.callLogDeclined",
+          `Declined ${kindLabel} call`,
+        );
+      } else {
+        summary = blocksClient.localization.t(
+          "chat.callLogError",
+          "Call failed to connect",
+        );
+      }
+      const created = (await directMessagesCollection.create({
+        senderId: userId,
+        recipientId: input.recipientId,
+        content: "",
+        readAt: "",
+        messageType: "call_log",
+        callSummary: summary,
+      })) as { data?: CloudDirectMessage } | CloudDirectMessage;
+      const item =
+        "data" in created && created.data
+          ? created.data
+          : (created as CloudDirectMessage);
+      return toDirectMessage(item as Parameters<typeof toDirectMessage>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.directMessages(userId) });
+    },
+  });
+}
+
+// Format a duration in seconds as `M:SS` (or `H:MM:SS` past 60 minutes).
+// Pure math — no locale dependency because the `M:SS` shape is the same
+// universal compact format WhatsApp/Telegram/iMessage use for call
+// durations. Centralized so the thread pill + roster preview produce
+// identical strings.
+function formatCallDuration(sec: number): string {
+  const safe = Math.max(0, Math.round(sec));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return h > 0
+    ? `${h}:${pad(m)}:${pad(s)}`
+    : `${m}:${pad(s)}`;
+}
+
+// --- WebRTC call signaling ---------------------------------------------------
+//
+// One CallSignal row per call attempt — caller writes it with status='ringing'
+// and the SDP offer, both sides mutate it as the call progresses (SDP
+// answer from the recipient, ICE candidates trickled by both via a 2s poll,
+// status transitions to accepted/declined/ended/missed). Workspace-readable
+// so both peers read the same row, matching the DirectMessage "no rules.json
+// gate" precedent.
+//
+// All reads are scoped to "me as caller OR me as recipient" — the gateway's
+// flat-key filter can't express that OR in one query, so we issue two list
+// calls (outbox + inbox) and dedupe by ItemId, mirroring useDirectMessages.
+//
+// Polling cadence:
+//   - 5s when no live row, matching useDirectMessages.
+//   - 2s when a call is `ringing` / `accepted` so ICE candidates trickle
+//     responsively. Implemented as a function-form `refetchInterval` so
+//     TanStack Query re-evaluates on every data change.
+
+// Read every CallSignal row where `callerId === me` OR `recipientId === me`,
+// then return the one that's currently active (not yet in a terminal state).
+// `null` when there's no live call against `counterpartId`.
+export function useActiveCallSignal(
+  counterpartId: string | undefined,
+): UseQueryResult<CallSignal | null> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: [...queryKeys.callSignals(userId), counterpartId ?? "_none"],
+    enabled: Boolean(userId && counterpartId),
+    refetchInterval: (query) => {
+      const data = query.state.data as CallSignal | null | undefined;
+      const live = data && data.status !== "ended" && data.status !== "declined" && data.status !== "missed";
+      return live ? 2_000 : 5_000;
+    },
+    queryFn: async () => {
+      // Two-call read: caller-side outbox + recipient-side inbox. The
+      // gateway filter is flat key/value, so an OR has to be expressed
+      // as two queries merged + deduped client-side.
+      const [asCaller, asRecipient] = await Promise.all([
+        callSignalsCollection.list({
+          filter: { callerId: userId, recipientId: counterpartId },
+          pageNo: 1,
+          pageSize: 50,
+          sort: { LastUpdatedDate: -1 },
+        }),
+        callSignalsCollection.list({
+          filter: { callerId: counterpartId, recipientId: userId },
+          pageNo: 1,
+          pageSize: 50,
+          sort: { LastUpdatedDate: -1 },
+        }),
+      ]);
+      const merged = new Map<string, CallSignal>();
+      for (const raw of [
+        ...unwrapPaged<CloudCallSignal>(asCaller).items,
+        ...unwrapPaged<CloudCallSignal>(asRecipient).items,
+      ]) {
+        merged.set(raw.ItemId, toCallSignal(raw));
+      }
+      // Pick the most-recently-updated row that isn't terminal. If no
+      // live row exists, fall back to the most recent terminal row so
+      // the caller can still read the endReason for the closing toast.
+      const all = [...merged.values()].sort((a, b) =>
+        b.updatedAt.localeCompare(a.updatedAt),
+      );
+      const live = all.find(
+        (s) => s.status !== "ended" && s.status !== "declined" && s.status !== "missed",
+      );
+      if (live) return live;
+      return all[0] ?? null;
+    },
+  });
+}
+
+// Subscribe to every CallSignal where `recipientId === me` so the global
+// IncomingCallDialog can auto-pop on a fresh ringing call. The shape +
+// baseline-capture pattern mirrors useAnnouncementsAutoOpen — capture every
+// (id → updatedAt) on first resolve, then surface a new id whose caller is
+// not me. The seen map key is `updatedAt` (not `createdAt`) because the
+// row mutates many times during a call (accepted, ICE appends, ended) and
+// any of those transitions is a meaningful "fresh" signal for the dialog.
+export function useIncomingCallSignals(): UseQueryResult<CallSignal[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: [...queryKeys.callSignals(userId), "incoming"],
+    enabled: Boolean(userId),
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
+    queryFn: async () => {
+      const raw = await callSignalsCollection.list({
+        filter: { recipientId: userId },
+        pageNo: 1,
+        pageSize: 50,
+        sort: { LastUpdatedDate: -1 },
+      });
+      return unwrapPaged<CloudCallSignal>(raw).items.map((c) =>
+        toCallSignal(c),
+      );
+    },
+  });
+}
+
+// Auto-pop the IncomingCallDialog when a fresh ringing call arrives for
+// the current user. Same `seenRef` baseline pattern as
+// useAnnouncementsAutoOpen — pre-existing rows on first resolve are not
+// considered fresh arrivals. Returns the standard [open, setOpen] pair
+// so the dialog owns its visibility state but the auto-open effect lives
+// here.
+export function useIncomingCallAutoOpen(): [
+  boolean,
+  Dispatch<SetStateAction<boolean>>,
+] {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  const incoming = useIncomingCallSignals();
+  const [open, setOpen] = useState(false);
+
+  // Per-session baseline of `(id → updatedAt)`. Rebuilt when the user
+  // changes so a logout/login cycle doesn't replay the previous
+  // session's history as fresh arrivals.
+  const seenRef = useRef<Map<string, string> | null>(null);
+  const lastUserIdRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (incoming.data === undefined) return;
+    const rows = incoming.data;
+
+    // First resolution: snapshot everything; nothing is "fresh".
+    if (seenRef.current === null) {
+      seenRef.current = new Map(rows.map((r) => [r.id, r.updatedAt]));
+      lastUserIdRef.current = userId;
+      return;
+    }
+    // Identity change: rebuild baseline.
+    if (lastUserIdRef.current !== userId) {
+      seenRef.current = new Map(rows.map((r) => [r.id, r.updatedAt]));
+      lastUserIdRef.current = userId;
+      return;
+    }
+
+    // Fresh delivery = new id, OR known id whose `updatedAt` advanced.
+    // Skip rows where I'm the caller (those are my own outbound calls —
+    // the caller-side CallDialog already handles them) and skip rows in
+    // terminal states (no point auto-popping a call that's already
+    // ended/declined/missed).
+    const seen = seenRef.current;
+    let shouldOpen = false;
+    for (const r of rows) {
+      const prev = seen.get(r.id);
+      if (prev === r.updatedAt) continue;
+      seen.set(r.id, r.updatedAt);
+      if (r.callerId === userId) continue;
+      if (
+        r.status === "ended" ||
+        r.status === "declined" ||
+        r.status === "missed"
+      ) {
+        continue;
+      }
+      shouldOpen = true;
+    }
+    if (shouldOpen) setOpen(true);
+  }, [incoming.data, userId]);
+
+  return [open, setOpen];
+}
+
+// Read a single CallSignal row by id. Used by useAcceptCall / useEndCall /
+// useAppendIceCandidates to refresh the row before mutating (so the new
+// PATCH has fresh sdpAnswer / iceCandidates / endedAt to merge in).
+export function useCallSignalById(
+  signalId: string | undefined,
+): UseQueryResult<CallSignal | null> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: [...queryKeys.callSignals(userId), "id", signalId ?? "_none"],
+    enabled: Boolean(userId && signalId),
+    refetchInterval: 2_000,
+    queryFn: async () => {
+      if (!signalId) return null;
+      const raw = await callSignalsCollection.list({
+        filter: { ItemId: signalId } as Record<string, string>,
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const items = unwrapPaged<CloudCallSignal>(raw).items;
+      return items[0] ? toCallSignal(items[0]) : null;
+    },
+  });
+}
+
+// Insert a new CallSignal row in `ringing` with the caller's SDP offer.
+// Caller side of `useStartCall`. Returns the created row so the caller's
+// CallDialog can store `signalId` and start polling.
+export function useStartCall(): UseMutationResult<
+  CallSignal,
+  Error,
+  {
+    recipientId: string;
+    kind: "voice" | "video";
+    sdpOffer: RTCSessionDescriptionInit;
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ recipientId, kind, sdpOffer }) => {
+      const response = await callSignalsCollection.create({
+        callerId: userId,
+        recipientId,
+        kind,
+        status: "ringing",
+        sdpOffer: JSON.stringify(sdpOffer),
+        sdpAnswer: "",
+        iceCandidatesJson: "[]",
+        endedAt: "",
+        endReason: "",
+      });
+      const id = extractInsertedItemId(response, "insertCallSignal");
+      if (!id) throw new Error("Failed to create call signal");
+      // Read back the row we just inserted so the caller has the full
+      // UI shape (id, createdAt, updatedAt, etc.) populated.
+      const fresh = await callSignalsCollection.list({
+        filter: { ItemId: id } as Record<string, string>,
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const items = unwrapPaged<CloudCallSignal>(fresh).items;
+      if (!items[0]) throw new Error("Call signal not found after insert");
+      return toCallSignal(items[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.callSignals(userId) });
+    },
+  });
+}
+
+// Recipient side of accept. PATCHes the row with status='accepted' + the
+// recipient's SDP answer. Every requiredOn:3 field rides the patch.
+export function useAcceptCall(): UseMutationResult<
+  CallSignal,
+  Error,
+  {
+    signalId: string;
+    callerId: string;
+    recipientId: string;
+    kind: "voice" | "video";
+    sdpAnswer: RTCSessionDescriptionInit;
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ signalId, callerId, recipientId, kind, sdpAnswer }) => {
+      const updated = (await callSignalsCollection.update(signalId, {
+        callerId,
+        recipientId,
+        kind,
+        status: "accepted",
+        sdpAnswer: JSON.stringify(sdpAnswer),
+        endedAt: "",
+        endReason: "",
+      })) as { data?: CloudCallSignal } | CloudCallSignal;
+      const item =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as CloudCallSignal);
+      return toCallSignal(item as Parameters<typeof toCallSignal>[0]);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.callSignals(userId) });
+    },
+  });
+}
+
+// Recipient declines. PATCHes status='declined' + endedAt + endReason.
+export function useDeclineCall(): UseMutationResult<
+  void,
+  Error,
+  { signalId: string; callerId: string; recipientId: string; kind: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ signalId, callerId, recipientId, kind }) => {
+      const now = new Date().toISOString();
+      await callSignalsCollection.update(signalId, {
+        callerId,
+        recipientId,
+        kind,
+        status: "declined",
+        endedAt: now,
+        endReason: "declined",
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.callSignals(userId) });
+    },
+  });
+}
+
+// Either side ends the call. Idempotent — a second useEndCall against an
+// already-terminal row is a no-op (the row's endedAt is already non-empty).
+export function useEndCall(): UseMutationResult<
+  void,
+  Error,
+  {
+    signalId: string;
+    callerId: string;
+    recipientId: string;
+    kind: string;
+    reason?: "hangup" | "error" | "missed";
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ signalId, callerId, recipientId, kind, reason = "hangup" }) => {
+      const now = new Date().toISOString();
+      await callSignalsCollection.update(signalId, {
+        callerId,
+        recipientId,
+        kind,
+        status: "ended",
+        endedAt: now,
+        endReason: reason,
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.callSignals(userId) });
+    },
+  });
+}
+
+// Append newly-generated local ICE candidates to the shared JSON blob.
+// Read-then-write so the dedupe happens against the latest blob (the
+// other side may have appended their own candidates since our last
+// read). The merge set is bounded by the small number of ICE candidates
+// per peer (typically <20), so the read-then-write is cheap.
+export function useAppendIceCandidates(): UseMutationResult<
+  void,
+  Error,
+  {
+    signalId: string;
+    callerId: string;
+    recipientId: string;
+    kind: string;
+    newCandidates: CallSignalIceCandidate[];
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ signalId, callerId, recipientId, kind, newCandidates }) => {
+      if (newCandidates.length === 0) return;
+      // Read the latest blob so the merge dedupes against both sides' latest.
+      const fresh = await callSignalsCollection.list({
+        filter: { ItemId: signalId } as Record<string, string>,
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const items = unwrapPaged<CloudCallSignal>(fresh).items;
+      const existing = items[0];
+      let merged: CallSignalIceCandidate[] = [];
+      if (existing?.iceCandidatesJson) {
+        try {
+          const parsed = JSON.parse(existing.iceCandidatesJson);
+          if (Array.isArray(parsed)) {
+            merged = parsed.filter(
+              (c): c is CallSignalIceCandidate =>
+                c &&
+                typeof c === "object" &&
+                typeof c.candidate === "string",
+            );
+          }
+        } catch {
+          // Corrupt blob — replace with just our new ones.
+        }
+      }
+      for (const c of newCandidates) {
+        if (!merged.some((existing) => existing.candidate === c.candidate)) {
+          merged.push(c);
+        }
+      }
+      // Echo requiredOn:3 fields with the current status so we don't
+      // accidentally clobber an `accepted` flip with the default `ringing`.
+      await callSignalsCollection.update(signalId, {
+        callerId,
+        recipientId,
+        kind,
+        status: existing?.status ?? "accepted",
+        iceCandidatesJson: JSON.stringify(merged),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.callSignals(userId) });
+    },
+  });
+}
+
 // --- Announcements (manager broadcast) ---------------------------------------
 //
 // Dashboard section: a manager posts a workspace-wide message ("today we
@@ -1174,14 +1861,27 @@ export function useAnnouncements(): UseQueryResult<Announcement[]> {
     // workspace-wide.
     queryKey: [...queryKeys.announcements, userId],
     enabled: Boolean(userId),
-    // Announcements are rare — a slow poll keeps a freshly posted
-    // message appearing on other members' dashboards within a minute.
-    refetchInterval: 60_000,
+    // Polls every 5 s, matching `useDirectMessages` so a freshly posted
+    // announcement surfaces on other members' dashboards with the same
+    // WhatsApp-ish liveness as a chat message. The query is mounted by
+    // `useAnnouncementsAutoOpen` in `Topbar`, so this fires on every
+    // authenticated page — no need to navigate back to /dashboard for
+    // the cache to catch up. `refetchIntervalInBackground: true` keeps
+    // the poll running even when the tab is hidden, so a member who
+    // parked the app in a background tab still sees the announcement
+    // surface (and the auto-open dialog pop) when they refocus.
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
     queryFn: async () => {
       const raw = await announcementsCollection.list({
         pageNo: 1,
         pageSize: 50,
-        sort: { CreatedDate: -1 },
+        // Sort by `LastUpdatedDate` (NOT `CreatedDate`) so a Repost or
+        // Edit bubbles the row back to "Latest" without creating a
+        // duplicate. The platform auto-stamps both timestamps on
+        // create, so a brand-new row has the same value for both
+        // and still appears first.
+        sort: { LastUpdatedDate: -1 },
       });
       return unwrapPaged<CloudAnnouncement>(raw).items.map((a) =>
         toAnnouncement(a),
@@ -1253,25 +1953,262 @@ export function useUpdateAnnouncement(): UseMutationResult<
   });
 }
 
-export function useDeleteAnnouncement(): UseMutationResult<
-  void,
+// Repost an existing announcement — bumps the SAME row back to the
+// top of the list. We `update` (not `create`) so the platform's
+// auto-managed `LastUpdatedDate` advances and the announcement
+// surfaces as "Latest" again, with no duplicate row added to the
+// collection. `authorId` rides along because requiredOn:3 fields
+// must all ride the update patch (same full-patch shape as
+// `useUpdateAnnouncement`).
+export function useRepostAnnouncement(): UseMutationResult<
+  Announcement,
   Error,
-  string
+  Announcement
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const isManager = currentUser?.roles?.includes("manager") ?? false;
   return useMutation({
-    mutationFn: async (id) => {
+    mutationFn: async (source) => {
       if (!isManager) {
-        throw new Error("Only managers can delete announcements.");
+        throw new Error("Only managers can repost announcements.");
       }
-      await announcementsCollection.delete(id);
+      const updated = (await announcementsCollection.update(source.id, {
+        authorId: source.authorId,
+        content: source.content,
+      })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      const item =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as CloudAnnouncement);
+      return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.announcements });
     },
   });
+}
+
+// --- Member ↔ Project assignment (Members page multi-select) ---------------
+//
+// One row per user (`userId` is the upsert key). The dropdown in
+// `MembersPage` reads via `useMemberProjectAssignments()` and writes via
+// `useSetMemberProjectAssignments()` — manager-only writes, every role
+// reads. The shape mirrors `Issue.assignedDeveloperIdsJson` (a JSON-
+// encoded list of ids stored in a primitive-string field) so the same
+// `JSON.parse` / `JSON.stringify` boundary stays the only place list
+// serialization lives in this codebase.
+
+// Workspace-wide list. Roster changes are infrequent, so the 5-minute
+// `staleTime` matches the rest of the user-adjacent queries and avoids
+// re-fetching on every dropdown open.
+export function useMemberProjectAssignments(): UseQueryResult<
+  MemberProjectAssignment[]
+> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery<MemberProjectAssignment[]>({
+    queryKey: queryKeys.memberProjects,
+    enabled: Boolean(userId),
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    queryFn: async () => {
+      const raw = await memberProjectsCollection.list({
+        pageNo: 1,
+        pageSize: 200,
+      });
+      return unwrapPaged<CloudMemberProject>(raw).items.map(
+        toMemberProjectAssignment,
+      );
+    },
+  });
+}
+
+// Manager-only upsert: find the member's existing row by `userId`,
+// `update` if present (full patch — `userId` is `requiredOn: 3` and
+// must ride along) or `create` otherwise. An empty `projectIds` saves
+// as `"[]"`, distinguishing "manager cleared this member" from
+// "no row exists for this member yet" — the same shape a fresh row
+// takes on first save.
+//
+// `useMemberProjectAssignments` is also gated indirectly: the dropdown
+// renders for managers only, so non-managers can't ship a mutation from
+// the UI. The runtime `isManager` check below is the belt; the UI gate
+// is the suspenders — necessary because anyone with browser devtools
+// could otherwise call the mutation.
+export function useSetMemberProjectAssignments(): UseMutationResult<
+  { userId: string; projectIds: string[] },
+  Error,
+  { userId: string; projectIds: string[] }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const actorId = currentUser?.id ?? "";
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!isManager) {
+        throw new Error("Only managers can assign members to projects.");
+      }
+      const listRaw = await memberProjectsCollection.list({
+        filter: { userId: input.userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudMemberProject>(listRaw).items[0];
+      const projectIdsJson = JSON.stringify(input.projectIds);
+      if (existing) {
+        await memberProjectsCollection.update(existing.ItemId, {
+          userId: input.userId,
+          projectIdsJson,
+          updatedBy: actorId,
+        });
+      } else {
+        await memberProjectsCollection.create({
+          userId: input.userId,
+          projectIdsJson,
+          updatedBy: actorId,
+        });
+      }
+      return input;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.memberProjects });
+    },
+  });
+}
+
+/**
+ * Auto-open the announcements dialog whenever a fresh delivery arrives.
+ *
+ * Returns `[open, setOpen]` so the caller can wire the Radix Dialog in
+ * controlled mode. The hook subscribes to the same `useAnnouncements`
+ * query key the rest of the app uses (React Query deduplicates, so
+ * this costs nothing extra over the existing dashboard subscription).
+ *
+ * "Fresh delivery" is broader than just "new id":
+ *
+ *   1. A brand-new id (a manager just posted an announcement).
+ *   2. An existing id whose `postedAt` (`LastUpdatedDate`) has
+ *      advanced — i.e. another manager Reposted it.
+ *
+ * Both cases should pop the modal for every other member, since the
+ * spec is "announcements should reach members quickly". A Repost keeps
+ * the same row id (we `update` rather than `create` so no duplicate
+ * appears), so the old id-only trigger silently missed it — members
+ * saw their card's "just now" timestamp flip but the dialog didn't
+ * surface. Tracking (id → postedAt) instead of just id fixes that.
+ *
+ * Baseline capture avoids firing on first load: a member signing in
+ * sees existing rows already on screen, not as fresh arrivals. A
+ * sign-out/sign-in cycle rebuilds the baseline so the new session
+ * doesn't compare against the previous user's history.
+ *
+ * Announcements authored by the current user are not treated as a
+ * trigger for the modal: the poster just hit Post, having the dialog
+ * pop right back is noise. The baseline still records the row, so a
+ * Repost by the same user on a row they originally authored also
+ * doesn't double-fire.
+ */
+export function useAnnouncementsAutoOpen(): [
+  boolean,
+  Dispatch<SetStateAction<boolean>>,
+] {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id;
+  const announcementsQuery = useAnnouncements();
+  const [open, setOpen] = useState(false);
+
+  // Per-user hide set + the helper to remove an id from it. The
+  // auto-open flow un-hides a row when a fresh delivery arrives for
+  // an id the user had previously hidden: a Repost is a fresh
+  // delivery, the user's old "I'm done with this" intent shouldn't
+  // silence the new arrival, and the panel's filter would otherwise
+  // exclude the row from the auto-opened dialog. Without this, the
+  // dialog pops on the bump but the panel inside shows nothing new.
+  const hiddenIds = useHiddenAnnouncementIds();
+  const unhideAnnouncement = useUnhideAnnouncement();
+
+  // `seenRef` snapshots the (id → postedAt) pairs already on screen;
+  // `lastUserId` lets us rebuild the baseline when the user changes
+  // (logout/login mid-session) so the new identity doesn't see the
+  // old session's history as fresh arrivals.
+  //
+  // The Map (not Set) is the whole point of this hook's revision: a
+  // Repost keeps the same id but advances `postedAt`, and we need to
+  // detect that. Tracking only the id would silently miss every bump.
+  const seenRef = useRef<Map<string, string> | null>(null);
+  const lastUserIdRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!userId) return;
+
+    // Wait for the first successful query resolution before locking
+    // in a baseline. Auth resolves faster than the data fetch on
+    // cold load — if we captured an empty baseline on the auth
+    // render, every existing row would look "fresh" the moment data
+    // lands, auto-popping the modal on every page refresh.
+    if (announcementsQuery.data === undefined) return;
+    const announcements = announcementsQuery.data;
+
+    // First successful capture: snapshot every (id → postedAt) currently
+    // visible and bail. Pre-existing rows are not considered fresh.
+    if (seenRef.current === null) {
+      seenRef.current = new Map(
+        announcements.map((a) => [a.id, a.postedAt]),
+      );
+      lastUserIdRef.current = userId;
+      return;
+    }
+
+    // Identity change: rebuild the baseline so we don't compare the
+    // new session against the previous one (sign-out/sign-in cycle,
+    // or tab left open while another user signed in elsewhere).
+    if (lastUserIdRef.current !== userId) {
+      seenRef.current = new Map(
+        announcements.map((a) => [a.id, a.postedAt]),
+      );
+      lastUserIdRef.current = userId;
+      return;
+    }
+
+    // Same identity, same session: a row counts as a fresh delivery
+    // if either (a) we haven't seen its id before, or (b) we have, but
+    // its `postedAt` has advanced past what we recorded. Strict
+    // inequality protects against identical-timestamp refetches firing
+    // the modal twice — TanStack Query re-emits the same array
+    // reference when no row has actually moved, and a clock that
+    // hasn't ticked at all should never be considered "new".
+    //
+    // We update `seen` for every fresh row before deciding whether
+    // to open, so a single batched refetch (e.g. polling during a
+    // manager's Post + Repost back-to-back) is treated as one event,
+    // not two — even if both bumps are visible in the same payload.
+    //
+    // For each fresh delivery authored by someone else, also un-hide
+    // the row if it was in the user's hide set — a Repost is a fresh
+    // delivery and the panel's filter would otherwise strip it from
+    // the auto-opened dialog. We collect ids first and apply the
+    // un-hides after the loop so React 18 can batch the resulting
+    // state updates (one re-render, not N) when several rows are
+    // bumped in the same poll.
+    let shouldOpen = false;
+    const seen = seenRef.current;
+    const toUnhide: string[] = [];
+    for (const a of announcements) {
+      const prev = seen.get(a.id);
+      if (prev === a.postedAt) continue;
+      seen.set(a.id, a.postedAt);
+      if (a.authorId !== userId) {
+        if (!shouldOpen) shouldOpen = true;
+        if (hiddenIds.has(a.id)) toUnhide.push(a.id);
+      }
+    }
+    for (const id of toUnhide) unhideAnnouncement(id);
+    if (shouldOpen) setOpen(true);
+  }, [announcementsQuery.data, userId, hiddenIds, unhideAnnouncement]);
+
+  return [open, setOpen];
 }
 
 // --- Mutations --------------------------------------------------------------

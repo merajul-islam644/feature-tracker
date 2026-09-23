@@ -6,6 +6,7 @@ import { Topbar } from "./Topbar";
 import { Toaster } from "@/components/ui/sonner";
 import { IssueTrackerStoreProvider } from "@/hooks/issueTrackerStore";
 import { GlobalChatAssistant } from "@/components/issue-tracker/GlobalChatAssistant";
+import { IncomingCallDialog } from "@/components/team-chat/IncomingCallDialog";
 
 export function AppLayout() {
   return (
@@ -25,6 +26,11 @@ export function AppLayout() {
               position, so DOM placement inside the layout is irrelevant;
               it renders on top of whatever page the Outlet shows). */}
           <GlobalChatAssistant />
+          {/* Global incoming-call ring prompt — mounts once at the layout
+              level so it pops regardless of which page the user is on.
+              Fixed-position Dialog; sibling placement with Toaster keeps
+              the "global overlays" cluster obvious to readers. */}
+          <IncomingCallDialog />
           <Toaster richColors position="bottom-right" />
         </SidebarProvider>
       </TooltipProvider>
