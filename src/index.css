@@ -2,68 +2,125 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens — see DESIGN-APP-v1.md §2.
+ * Indigo = identity. Violet = AI. Cyan = environment.
+ * Red is reserved for actual failures. No decorative red.
+ */
 @layer base {
   :root {
     --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.5rem;
+    --foreground: 222 47% 11%;
 
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* Indigo signature */
+    --primary: 239 84% 67%;             /* #6366F1 */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+
+    --accent: 220 14% 96%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --success: 160 84% 39%;
+    --success-foreground: 210 40% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 222 47% 11%;
+    --info: 199 89% 48%;
+    --info-foreground: 210 40% 98%;
+    --error: 0 72% 51%;
+    --error-foreground: 210 40% 98%;
+    --ai: 258 90% 66%;                  /* #8B5CF6 */
+    --ai-foreground: 210 40% 98%;
+    --environment: 189 94% 43%;         /* #06B6D4 */
+    --environment-foreground: 210 40% 98%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 239 84% 67%;
+
+    --radius: 0.625rem;                 /* 10px */
+
+    /* Sidebar keeps its own palette so it can stay light while the app goes dark. */
     --sidebar-background: 0 0% 100%;
-    --sidebar-foreground: 222.2 84% 4.9%;
-    --sidebar-primary: 221.2 83.2% 53.3%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-primary: 239 84% 67%;
     --sidebar-primary-foreground: 210 40% 98%;
-    --sidebar-accent: 210 40% 96.1%;
-    --sidebar-accent-foreground: 222.2 47.4% 11.2%;
-    --sidebar-border: 214.3 31.8% 91.4%;
-    --sidebar-ring: 221.2 83.2% 53.3%;
+    --sidebar-accent: 239 100% 96%;     /* indigo-50 */
+    --sidebar-accent-foreground: 239 84% 30%;  /* indigo-900-ish, stays high-contrast on light bg */
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 239 84% 67%;
+
+    /* Highlight color for selected rows, search hits, etc. */
+    --highlight: 239 100% 96%;
+    --highlight-foreground: 239 84% 30%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 222 47% 6%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
 
-    --sidebar-background: 222.2 84% 4.9%;
+    --card: 222 47% 9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 239 84% 74%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 63% 50%;
+    --destructive-foreground: 210 40% 98%;
+
+    --success: 160 84% 45%;
+    --success-foreground: 222 47% 6%;
+    --warning: 38 92% 60%;
+    --warning-foreground: 222 47% 11%;
+    --info: 199 89% 60%;
+    --info-foreground: 222 47% 11%;
+    --error: 0 63% 50%;
+    --error-foreground: 210 40% 98%;
+    --ai: 258 90% 74%;
+    --ai-foreground: 222 47% 11%;
+    --environment: 189 94% 55%;
+    --environment-foreground: 222 47% 11%;
+
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 239 84% 74%;
+
+    --sidebar-background: 222 47% 9%;
     --sidebar-foreground: 210 40% 98%;
-    --sidebar-primary: 217.2 91.2% 59.8%;
-    --sidebar-primary-foreground: 222.2 47.4% 11.2%;
-    --sidebar-accent: 217.2 32.6% 17.5%;
+    --sidebar-primary: 239 84% 74%;
+    --sidebar-primary-foreground: 222 47% 11%;
+    --sidebar-accent: 239 50% 25%;
     --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 217.2 32.6% 17.5%;
-    --sidebar-ring: 224.3 76.3% 48%;
+    --sidebar-border: 217 33% 20%;
+    --sidebar-ring: 239 84% 74%;
+
+    --highlight: 239 50% 25%;
+    --highlight-foreground: 210 40% 98%;
   }
 }
 
@@ -71,6 +128,7 @@
   * {
     @apply border-border;
   }
+
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -80,6 +138,12 @@
     font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
       Roboto, sans-serif;
     @apply bg-background text-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.18);
+    color: hsl(var(--foreground));
   }
 
   :focus-visible {
@@ -88,6 +152,41 @@
 
   * {
     scroll-behavior: smooth;
+  }
+
+  /* Heading defaults — see DESIGN-APP-v1.md §3.3 */
+  h1 {
+    @apply text-2xl font-semibold tracking-tight;
+  }
+  h2 {
+    @apply text-xl font-semibold tracking-tight;
+  }
+  h3 {
+    @apply text-lg font-semibold;
+  }
+  h4 {
+    @apply text-base font-semibold;
+  }
+
+  /* Mono defaults for technical text */
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo,
+      Monaco, Consolas, monospace;
+  }
+}
+
+/* Reduced-motion — see DESIGN-APP-v1.md §10.5 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -100,25 +199,7 @@
     animation: sidebar-close 0.2s ease-out;
   }
 
-  /* Feature row collapse/expand. The wrapper reads its target
-     height from the `--feature-content-height` CSS variable, which
-     the React effect in FeatureItem writes from the inner
-     scrollHeight. Two keyframes (one per direction) so the
-     transition reads naturally both ways — when the user opens the
-     row from a previously known height, the height snaps to that
-     variable on next render and `feature-expand` plays from 0 →
-     that pixel value. Conversely on close, the wrapper holds the
-     last measured height for one frame so `feature-collapse` can
-     play from pixels → 0 instead of jumping to 0 first and never
-     animating. The 200ms ease-out mirrors the sidebar and Radix
-     accordion timings so the app's motion language stays uniform.
-     `animation-fill-mode: forwards` keeps the end state stuck —
-     without it the height reverts to its intrinsic value (208px of
-     content) after the animation finishes, leaving the panel open
-     while looking collapsed because the 30% muted background
-     barely shows on white. The closed-state rule also hard-sets
-     `height: 0` so the wrapper is genuinely collapsed before the
-     first animation tick (or if animations are disabled). */
+  /* Feature row collapse/expand. */
   .feature-collapse-wrapper[data-state="open"] {
     animation: feature-expand 0.2s ease-out forwards;
   }
@@ -137,6 +218,32 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border-width: 0;
+  }
+
+  /* Subtle indigo highlight rail used by announcement + featured cards. */
+  .accent-rail-indigo {
+    @apply w-1 self-stretch rounded-full bg-indigo-500;
+  }
+
+  /* Verification severity rails */
+  .severity-rail-error {
+    @apply w-[3px] self-stretch rounded-full bg-red-500;
+  }
+  .severity-rail-warning {
+    @apply w-[3px] self-stretch rounded-full bg-amber-500;
+  }
+  .severity-rail-info {
+    @apply w-[3px] self-stretch rounded-full bg-sky-500;
+  }
+
+  /* Card hover lift utility — used by interactive cards. */
+  .card-interactive {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover;
+  }
+
+  /* Dot indicator for status chips */
+  .status-dot {
+    @apply h-2 w-2 shrink-0 rounded-full;
   }
 }
 

@@ -4,12 +4,22 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/*
+ * Button — see DESIGN-APP-v1.md §7.1.
+ *
+ * Variants: default | destructive | outline | secondary | ghost | link | danger | ai
+ *   ai = indigo → violet gradient; reserved for AI surfaces.
+ *
+ * Sizes mirror the spec: sm (h-8), default (h-9), lg (h-10), xl (h-11),
+ * icon (h-9 w-9), icon-sm (h-8 w-8).
+ */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        default:
+          "bg-primary text-primary-foreground hover:bg-indigo-600 dark:hover:bg-indigo-500",
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive/90",
         outline:
@@ -19,12 +29,15 @@ const buttonVariants = cva(
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
         danger: "bg-red-600 text-white hover:bg-red-700 active:bg-red-800",
+        ai: "bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-ai hover:shadow-elevated hover:from-indigo-600 hover:to-violet-700",
       },
       size: {
-        default: "h-10 px-4 py-2",
+        default: "h-9 px-4 text-sm",
         sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-11 rounded-md px-8",
-        icon: "h-10 w-10",
+        lg: "h-10 rounded-lg px-5 text-sm",
+        xl: "h-11 rounded-xl px-6 text-sm",
+        icon: "h-9 w-9",
+        "icon-sm": "h-8 w-8",
       },
     },
     defaultVariants: {
@@ -70,12 +83,6 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     );
 
     if (asChild) {
-      // When asChild is true, Radix Slot requires exactly one React element
-      // child. Icons / loading / rightIcon would have to be siblings, which
-      // Slot refuses. Following the canonical shadcn Button contract, those
-      // visual extras are mutually exclusive with asChild — consumers that
-      // need an icon on an asChild button should place it inside their own
-      // child element (e.g. wrap a Link with an inline icon).
       return (
         <Comp ref={ref} className={classes} {...props}>
           {children}
@@ -96,11 +103,6 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         ) : (
           leftIcon
         )}
-        {/* Flex, not a plain span: call sites pass icon + text as children
-            (e.g. IssueTrackerHeader's Start button), and without this the
-            icon and text collapse into one inline run — no gap, baseline
-            alignment, icon visually off-center. Mirrors the button's own
-            items-center/gap-2 so nested content aligns identically. */}
         <span className="inline-flex items-center gap-2">{children}</span>
         {!loading && rightIcon}
       </button>

@@ -9,17 +9,31 @@
 // lifetime of the session, and `refetchOnMount: false` keeps the second
 // modal mount from triggering a redundant network call.
 //
-// Tenant caveat (resolved 2026-09-19 for the manager role):
-// `iam.users.list({ filter: { roles } })` historically returned 403
-// from a browser session because `iam:users:read` (the "View Users"
-// permission, resource `blocks-iam::iam::users`) was admin-only. We
-// now grant that permission to the `manager` role so the SDK call
-// succeeds from the signed-in manager's browser session — new
-// invitations show up in the dropdown without a rebuild. The
-// hardcoded roster below is kept as a SAFETY-NET fallback only: it
-// kicks in if the SDK call ever errors (network blip, role
-// misconfiguration, permission revoked) so the modal still renders a
-// usable picker.
+// Tenant caveat (resolved for all app roles, manager on 2026-09-19,
+// developer + tester on 2026-09-23):
+// `iam.users.list(...)` historically returned 403 from a browser
+// session because `iam:users:read` (the "View Users" permission,
+// resource `blocks-iam::iam::users`, itemId
+// `63016e4c-39d7-4ee0-8a64-4fb01e0dff59`) was admin-only. The
+// 2026-09-19 grant unlocked it for `manager`; the 2026-09-23 grant
+// extended it to `developer` and `tester` so the Members page
+// (`/members`) and the Members stat card on `/dashboard` render for
+// every role, not just managers — without these grants, the
+// developer + tester sessions hit the page-level error state with
+// `Members: 0` on the dashboard.
+//
+// `clouduser` (the system-default role, 146 users) already holds the
+// permission by default, so no further grant was needed for it.
+//
+// Re-check before future role additions: `blocks iam permissions list
+// --resources blocks-iam::iam::users --json` prints the `roles[]`
+// array — every role that needs `useAllJoinedUsers()` /
+// `useUsersByRole()` to work from the browser must show up there.
+//
+// The hardcoded roster below is kept as a SAFETY-NET fallback only:
+// it kicks in if the SDK call ever errors (network blip, role
+// misconfiguration, permission revoked) so the modal still renders
+// a usable picker.
 //
 // Maintenance when the hardcoded roster drifts from IAM (rare —
 // the live call is the source of truth now):

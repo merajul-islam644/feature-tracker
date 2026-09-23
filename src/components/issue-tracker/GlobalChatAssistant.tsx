@@ -4,6 +4,9 @@
 // to the app-wide store (see hooks/issueTrackerStore.tsx) — one chat
 // thread, one session list, one live activity feed, reachable from the
 // Dashboard, Projects, Members, Settings, anywhere.
+// Visual design: see DESIGN-APP-v1.md §6.7 — closed launcher shows
+// "Verifying · N%" while a run is in flight, so the launcher doubles as
+// a verification status portal.
 
 import { useState } from "react";
 import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
@@ -30,6 +33,14 @@ export function GlobalChatAssistant() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
 
+  const runProgressPct =
+    run.status === "running" && run.totalTargets > 0
+      ? Math.min(
+          100,
+          Math.round((run.completedTargets / run.totalTargets) * 100),
+        )
+      : undefined;
+
   return (
     <ChatLauncher
       messages={chat}
@@ -40,6 +51,7 @@ export function GlobalChatAssistant() {
       targets={targets}
       activityLog={runActivityLog}
       runActive={run.status === "running"}
+      runProgressPct={runProgressPct}
       sessions={sessions}
       sessionsLoading={sessionsLoading}
       currentSessionId={currentSessionId}

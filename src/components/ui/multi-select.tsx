@@ -40,6 +40,15 @@ export interface MultiSelectProps {
   /** Optional id passthrough for the trigger button. */
   id?: string;
   className?: string;
+  /**
+   * Single-line trigger with overflow hidden. When a card grid wants
+   * all cards at uniform height (Members page), chips that don't fit
+   * on one line are clipped — the "+N more" badge already covers
+   * >3 selections, and the popover always shows the full list. The
+   * full multi-line trigger is the default; pass `true` here only
+   * when the trigger lives in a height-sensitive row.
+   */
+  compact?: boolean;
 }
 
 // Wrap the rendered labels in this many chips before switching to a
@@ -67,6 +76,7 @@ export function MultiSelect({
   disabled,
   id,
   className,
+  compact = false,
 }: MultiSelectProps) {
   const triggerId = id ?? React.useId();
   const labelId = `${triggerId}-label`;
@@ -130,7 +140,14 @@ export function MultiSelect({
             aria-haspopup="listbox"
             disabled={effectivelyDisabled}
             className={cn(
-              "flex min-h-10 w-full flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-colors",
+              // `flex-wrap` lets long chip lists wrap to a second
+              // row; `flex-nowrap overflow-hidden` (set when
+              // `compact`) clamps the trigger to one row so cards
+              // sharing a grid row don't desync their heights as
+              // chips are added.
+              compact
+                ? "flex min-h-10 max-h-10 w-full flex-nowrap items-center gap-1.5 overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-colors"
+                : "flex min-h-10 w-full flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-colors",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
               "disabled:cursor-not-allowed disabled:opacity-50",
               // Right-side chevron mirrors the single-value Select's

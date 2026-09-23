@@ -123,6 +123,11 @@ export interface CloudChatMessage {
 // `recipientId` columns instead of the platform's CreatedBy. `readAt` rides
 // as a plain string ("" while unread) because Blocks Data fields are
 // primitives.
+//
+// Reactions + edit + delete are all in-band on the row itself: each is a
+// String field carrying either an empty string or the relevant payload.
+// The client-side `DirectMessageReaction` type widens `reactions` into a
+// real `MessageReaction[]` array for type safety.
 export interface CloudDirectMessage {
   ItemId: string;
   senderId: string;
@@ -130,9 +135,83 @@ export interface CloudDirectMessage {
   content: string;
   readAt?: string;
   attachmentFileId?: string;
+  reactions?: string;
+  editedAt?: string;
+  deletedAt?: string;
+  /** `'call_log'` for system rows that summarize a voice/video call; empty
+   * string for regular text/attachment rows. Renderer branches on this to
+   * swap the bubble for a centered pill. See `messageType` on the UI side
+   * for the narrowing. */
+  messageType?: string;
+  /** Localized human-readable summary string the thread pill + roster
+   * preview render (e.g. "Voice call · 5:32", "Missed voice call"). Empty
+   * string for regular messages. */
+  callSummary?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
+}
+
+// --- Call signaling (WebRTC) --------------------------------------------------
+//
+// One row per WebRTC call attempt. Created by the caller with status
+// 'ringing' and the SDP offer; mutated by both sides as the call
+// progresses (SDP answer from the recipient, ICE candidates trickled by
+// both via the 2s poll, status transitioning through the lifecycle).
+// Workspace-readable so both peers can read the same row — matches the
+// DirectMessage precedent (no per-row rules.json gate).
+export interface CloudCallSignal {
+  ItemId: string;
+  callerId: string;
+  recipientId: string;
+  kind: string;
+  status: string;
+  sdpOffer?: string;
+  sdpAnswer?: string;
+  iceCandidatesJson?: string;
+  endedAt?: string;
+  endReason?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+// One ICE candidate as it rides the wire (JSON-string column) and as it
+// surfaces on the RTCPeerConnection's icecandidate event. Matches the
+// standard RTCIceCandidateInit shape (sdpMid/sdpMLineIndex may be null
+// for some candidates).
+export interface CallSignalIceCandidate {
+  candidate: string;
+  sdpMid: string | null;
+  sdpMLineIndex: number | null;
+}
+
+// UI-facing shape: status narrowed to the state-machine union, SDP
+// blobs parsed into RTCSessionDescriptionInit, ICE candidates parsed
+// into a real array. The on-wire `requiredOn: 3` columns (callerId /
+// recipientId / kind / status) are echoed as required strings here
+// because every PATCH has to send them — narrowing them to optional
+// would let a sloppy mutation silently drop them.
+export interface CallSignal {
+  id: string;
+  callerId: string;
+  recipientId: string;
+  kind: "voice" | "video";
+  status: "ringing" | "accepted" | "declined" | "ended" | "missed";
+  /** Caller's SDP offer (parsed from the JSON-encoded `sdpOffer` column). */
+  sdpOffer: RTCSessionDescriptionInit | null;
+  /** Recipient's SDP answer (parsed from the JSON-encoded `sdpAnswer` column). */
+  sdpAnswer: RTCSessionDescriptionInit | null;
+  /** Trickled ICE candidates accumulated from both sides. Deduped by the
+   * `candidate` string so a 2s poll that re-reads the same blob doesn't
+   * apply the same candidate twice. */
+  iceCandidates: CallSignalIceCandidate[];
+  /** ISO timestamp set by whichever side ended the call; null while live. */
+  endedAt: string | null;
+  /** Why the call ended — drives the localized closing toast. */
+  endReason: "hangup" | "declined" | "missed" | "error" | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // Manager announcements shown on the Dashboard. Written by a manager,
@@ -725,6 +804,35 @@ export interface DirectMessage {
    * the message is text-only — receivers render an inline thumb via
    * useFileDownloadUrl(fileId) only when this is a non-empty string. */
   attachmentFileId: string | null;
+  /** Decoded reactions payload (was JSON in the cloud row's `reactions`
+   * field). Empty array when nobody has reacted. Each reaction is one
+   * `{userId, emoji}` pair; the same user reacting twice with the same
+   * emoji is deduped on the way out so the bubble pill renders "👍 ×1"
+   * not "👍 ×2". */
+  reactions: MessageReaction[];
+  /** ISO timestamp set by the sender the last time they edited
+   * `content`; null while the message is unedited. The bubble appends
+   * "(edited)" to the footer when this is non-null. */
+  editedAt: string | null;
+  /** ISO timestamp set by the sender when they soft-deleted the
+   * message; null while live. The bubble renders a tombstone in that
+   * state (no text, no attachment, no reactions, no footer). */
+  deletedAt: string | null;
+  /** `'call_log'` for system rows that summarize a voice/video call;
+   * `null` for regular text/attachment rows. The renderer branches on
+   * this to swap the bubble for a centered pill. Mirrors the
+   * empty-string → null coercion that `editedAt` / `deletedAt` use so
+   * the type is exact (no "undefined" leaks from the cloud row). */
+  messageType: "call_log" | null;
+  /** Localized human-readable summary rendered by the thread pill and
+   * the roster preview (`"Voice call · 5:32"`, `"Missed voice call"`,
+   * etc.). `null` for regular messages. */
+  callSummary: string | null;
+}
+
+export interface MessageReaction {
+  userId: string;
+  emoji: string;
 }
 
 export function toDirectMessage(c: CloudDirectMessage): DirectMessage {
@@ -736,6 +844,152 @@ export function toDirectMessage(c: CloudDirectMessage): DirectMessage {
     sentAt: c.CreatedDate,
     readAt: c.readAt || null,
     attachmentFileId: c.attachmentFileId || null,
+    reactions: parseReactions(c.reactions),
+    editedAt: c.editedAt || null,
+    deletedAt: c.deletedAt || null,
+    // Narrow the wire string to the single known value. Anything else
+    // (empty string, legacy rows, hand-edited records) reads as the
+    // regular message branch — exactly the empty-string → null
+    // coercion the `editedAt` / `deletedAt` precedent uses.
+    messageType: c.messageType === "call_log" ? "call_log" : null,
+    callSummary: c.callSummary || null,
+  };
+}
+
+// Parse the cloud row's `reactions` string into a real array. Returns
+// an empty array on any parse failure so a malformed write (manual
+// row patch, mid-migration read) never throws inside the thread
+// renderer.
+function parseReactions(raw: string | undefined): MessageReaction[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (r): r is MessageReaction =>
+          typeof r?.userId === "string" &&
+          typeof r?.emoji === "string" &&
+          r.emoji.length > 0,
+      )
+      // Dedupe — same user / same emoji collapsed to one entry. The
+      // toggle mutation enforces this on the write path; this is the
+      // belt-and-braces for legacy rows.
+      .reduce<MessageReaction[]>((acc, r) => {
+        if (
+          !acc.some(
+            (existing) =>
+              existing.userId === r.userId && existing.emoji === r.emoji,
+          )
+        ) {
+          acc.push(r);
+        }
+        return acc;
+      }, []);
+  } catch {
+    return [];
+  }
+}
+
+// --- CallSignal adapter -------------------------------------------------------
+//
+// Cloud shape → UI shape for the WebRTC signaling row. The on-wire blobs
+// (sdpOffer / sdpAnswer / iceCandidatesJson) are JSON strings — they
+// round-trip through String-only Blocks Data fields. Parsing failures
+// degrade to safe defaults (null SDP, empty ICE array) so a malformed
+// row never throws inside the call renderer.
+
+const CALL_KIND_VALUES = ["voice", "video"] as const;
+const CALL_STATUS_VALUES = [
+  "ringing",
+  "accepted",
+  "declined",
+  "ended",
+  "missed",
+] as const;
+const CALL_END_REASON_VALUES = [
+  "hangup",
+  "declined",
+  "missed",
+  "error",
+] as const;
+
+function parseSdp(raw: string | undefined): RTCSessionDescriptionInit | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.type === "string" &&
+      typeof parsed.sdp === "string"
+    ) {
+      return parsed as RTCSessionDescriptionInit;
+    }
+  } catch {
+    // Corrupt blob — drop it but keep the row.
+  }
+  return null;
+}
+
+function parseIceCandidates(
+  raw: string | undefined,
+): CallSignalIceCandidate[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (c): c is CallSignalIceCandidate =>
+          c &&
+          typeof c === "object" &&
+          typeof c.candidate === "string" &&
+          (c.sdpMid === null || typeof c.sdpMid === "string") &&
+          (c.sdpMLineIndex === null ||
+            typeof c.sdpMLineIndex === "number"),
+      )
+      // Dedupe by `candidate` string — both sides write into the same
+      // JSON blob, so the trickle loop would otherwise append the
+      // peer's own candidates back into its own queue.
+      .reduce<CallSignalIceCandidate[]>((acc, c) => {
+        if (!acc.some((existing) => existing.candidate === c.candidate)) {
+          acc.push(c);
+        }
+        return acc;
+      }, []);
+  } catch {
+    // Corrupt blob — return an empty array so the PC doesn't try to
+    // add candidates that no longer exist on the wire.
+  }
+  return [];
+}
+
+export function toCallSignal(c: CloudCallSignal): CallSignal {
+  const kind = (CALL_KIND_VALUES as readonly string[]).includes(c.kind)
+    ? (c.kind as CallSignal["kind"])
+    : "voice";
+  const status = (CALL_STATUS_VALUES as readonly string[]).includes(c.status)
+    ? (c.status as CallSignal["status"])
+    : "ringing";
+  const endReason =
+    c.endReason &&
+    (CALL_END_REASON_VALUES as readonly string[]).includes(c.endReason)
+      ? (c.endReason as CallSignal["endReason"])
+      : null;
+  return {
+    id: c.ItemId,
+    callerId: c.callerId ?? "",
+    recipientId: c.recipientId ?? "",
+    kind,
+    status,
+    sdpOffer: parseSdp(c.sdpOffer),
+    sdpAnswer: parseSdp(c.sdpAnswer),
+    iceCandidates: parseIceCandidates(c.iceCandidatesJson),
+    endedAt: c.endedAt || null,
+    endReason,
+    createdAt: c.CreatedDate,
+    updatedAt: c.LastUpdatedDate,
   };
 }
 
@@ -753,7 +1007,12 @@ export function toAnnouncement(c: CloudAnnouncement): Announcement {
     id: c.ItemId,
     authorId: c.authorId ?? "",
     content: c.content ?? "",
-    postedAt: c.CreatedDate,
+    // `postedAt` reflects the most recent activity the user is
+    // looking at — a brand-new post is `CreatedDate`, and an edit
+    // or repost advances `LastUpdatedDate`. Sorting the list by
+    // `LastUpdatedDate` (see `useAnnouncements`) keeps the
+    // "Latest" card in sync with this displayed time.
+    postedAt: c.LastUpdatedDate ?? c.CreatedDate,
   };
 }
 
@@ -785,6 +1044,66 @@ export function toUserProfilePic(c: CloudUserProfile): UserProfilePic {
     id: c.ItemId,
     userId: c.userId ?? "",
     imageFileId: c.imageFileId || null,
+  };
+}
+
+// --- Member ↔ Project assignment -------------------------------------------
+//
+// Multi-select project assignment per member, edited from the Members page
+// drop-down. One row per user (upsert by userId), with the project-id list
+// stored as a JSON-encoded string field — same primitive-only-fields
+// pattern as Issue.assignedDeveloperIdsJson / Issue.evidenceJson /
+// Project.customEnvs.
+//
+// The cloud's `userId` and `projectIdsJson` columns are required for the
+// hook to read OR filter by them. They MUST be in the collection's
+// `fields` array or the gateway silently drops them — the same lesson
+// that caused the duplicate-rows bug on Issue.
+
+export interface CloudMemberProject {
+  ItemId: string;
+  userId: string;
+  projectIdsJson?: string;
+  updatedBy?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+export interface MemberProjectAssignment {
+  /** Row id — needed for the update leg of the upsert. */
+  id: string;
+  userId: string;
+  /** Parsed project-id list. Empty array when none assigned. */
+  projectIds: string[];
+  /** IAM user id of the last manager who edited this row, or null. */
+  updatedBy: string | null;
+}
+
+export function toMemberProjectAssignment(
+  c: CloudMemberProject,
+): MemberProjectAssignment {
+  // Fail-closed parse: a corrupt or non-array JSON value reads as no
+  // assignments so a single broken row doesn't poison the whole page.
+  let projectIds: string[] = [];
+  const raw = c.projectIdsJson;
+  if (raw && raw.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        projectIds = parsed.filter((v): v is string => typeof v === "string");
+      }
+    } catch {
+      // Corrupt JSON — empty list. Will be overwritten on the next save
+      // by the manager; until then we render the row as "no assignments"
+      // rather than crashing the dropdown.
+    }
+  }
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    projectIds,
+    updatedBy: c.updatedBy || null,
   };
 }
 
@@ -869,8 +1188,25 @@ export const chatMessagesCollection = blocksClient.data.collection<CloudChatMess
 // outbox reads filter on them, and the gateway drops filter clauses whose
 // field isn't selected (the same silent no-op that caused the duplicate-
 // rows bug on Issue). `readAt` feeds the unread badges / read ticks.
+// `messageType` + `callSummary` ride along so the toDirectMessage adapter
+// can populate the system-row shape — omitted selector columns silently
+// degrade to `undefined` per the project memory rule, which would lose
+// every call-log pill.
 export const directMessagesCollection = blocksClient.data.collection<CloudDirectMessage>("DirectMessage", {
-  fields: ["senderId", "recipientId", "content", "readAt", "attachmentFileId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  fields: ["senderId", "recipientId", "content", "readAt", "attachmentFileId", "reactions", "editedAt", "deletedAt", "messageType", "callSummary", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `callerId` AND `recipientId` MUST both be in the selector — the active-
+// signal read uses two list calls (outbox `callerId: me` + inbox
+// `recipientId: me`) and the incoming-call auto-open reads with
+// `recipientId: me`. An unselected filter column is silently dropped by
+// the gateway, so omitting either would either lose rows on the active-
+// signal read or fail to surface any incoming call. The lifecycle columns
+// (status / endedAt / endReason) and SDP/ICE blobs are selected so the
+// toCallSignal adapter can populate the full UI shape — same lesson as
+// DirectMessage: read-side parse failures silently degrade if these are
+// missing, so we select them up front.
+export const callSignalsCollection = blocksClient.data.collection<CloudCallSignal>("CallSignal", {
+  fields: ["callerId", "recipientId", "kind", "status", "sdpOffer", "sdpAnswer", "iceCandidatesJson", "endedAt", "endReason", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `authorId` in the selector for the same filter-gating reason as the DM
 // columns; `CreatedBy` rides along for the audit-style "posted by" render.
@@ -882,6 +1218,15 @@ export const announcementsCollection = blocksClient.data.collection<CloudAnnounc
 // silently dropped by the gateway — the duplicate-rows lesson from Issue).
 export const userProfilesCollection = blocksClient.data.collection<CloudUserProfile>("UserProfile", {
   fields: ["userId", "imageFileId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` is in `fields` for the same filter reason as `userProfiles` —
+// the upsert looks up the member's row by `userId`. `projectIdsJson` is
+// selected because the read path parses it (an unselected column would
+// silently read as `undefined`, which the `toMemberProjectAssignment`
+// adapter treats as "no assignments" — losing the manager's saved
+// selection on the next render).
+export const memberProjectsCollection = blocksClient.data.collection<CloudMemberProject>("MemberProject", {
+  fields: ["userId", "projectIdsJson", "updatedBy", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 
 // --- Issue Tracker collection accessors -------------------------------------

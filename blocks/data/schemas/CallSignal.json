@@ -1,0 +1,62 @@
+{
+  "schemaName": "CallSignal",
+  "collectionName": "blx_CallSignals",
+  "schemaType": 1,
+  "description": "Signaling channel for one WebRTC call attempt between two members of the workspace. One row per call — created by the caller with status='ringing' and the SDP offer, mutated by either side as the call progresses (sdpAnswer written by the recipient on accept, ICE candidates trickled into iceCandidatesJson by both sides, status transitions to accepted/declined/ended/missed, endedAt + endReason stamped on terminal states). The collection is workspace-readable so both sides of a call can read the same row — there is no per-row rules.json gate, matching the DirectMessage precedent (sender writes by `callerId`, recipient reads by `recipientId` filter).",
+  "fields": [
+    {
+      "name": "callerId",
+      "type": "String",
+      "requiredOn": 3,
+      "description": "IAM sub of the user who initiated the call. Duplicates the platform's CreatedBy audit field, but an explicit column keeps the two-call outbox read (`callerId: me`) self-documenting and immune to rows with a null CreatedBy. Required on every update — every PATCH must echo this back."
+    },
+    {
+      "name": "recipientId",
+      "type": "String",
+      "requiredOn": 3,
+      "description": "IAM sub of the user being called. The inbox filter key for the global incoming-call dialog (`recipientId: me`). Required on every update — every PATCH must echo this back."
+    },
+    {
+      "name": "kind",
+      "type": "String",
+      "requiredOn": 3,
+      "description": "'voice' | 'video'. Set on insert and never changes — determines the getUserMedia video flag, whether the CallDialog renders video tiles, and whether the recipient's Accept path requests the camera. Required on every update so a PATCH that only changes status doesn't accidentally wipe the kind."
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "requiredOn": 3,
+      "description": "'ringing' | 'accepted' | 'declined' | 'ended' | 'missed'. State machine — initial value 'ringing' on insert; 'accepted' once the recipient has both getUserMedia'd and written the SDP answer; 'declined' if the recipient actively declines; 'ended' for normal hangup or ICE failure (paired with endReason='error'); 'missed' if the caller times out (~30s) with no answer. Required on every update because both sides transition the row multiple times during a call."
+    },
+    {
+      "name": "sdpOffer",
+      "type": "String",
+      "requiredOn": 0,
+      "description": "JSON-encoded RTCSessionDescriptionInit from the caller (the SDP `type: 'offer'` and the `sdp` blob). Written on insert by the caller; read by the recipient when accepting. Empty string while the call hasn't started (should never happen in practice since the offer is the trigger for the row). Parsed on read by the toCallSignal adapter."
+    },
+    {
+      "name": "sdpAnswer",
+      "type": "String",
+      "requiredOn": 0,
+      "description": "JSON-encoded RTCSessionDescriptionInit from the recipient (the SDP `type: 'answer'`). Written by the recipient when accepting; read by the caller to set the remote description and complete the offer/answer handshake. Empty string while the call is still ringing."
+    },
+    {
+      "name": "iceCandidatesJson",
+      "type": "String",
+      "requiredOn": 0,
+      "description": "JSON-encoded array of {candidate, sdpMid, sdpMLineIndex} objects, accumulated from BOTH sides via the trickle loop. There is no push channel, so each side polls every 2s while the call is live, drains its own pending local candidates into this blob, and applies any new remote candidates it finds. The toCallSignal adapter dedupes by the `candidate` string so neither side ever applies the same candidate twice. Empty array (`\"[]\"`) while no candidates have been exchanged yet."
+    },
+    {
+      "name": "endedAt",
+      "type": "String",
+      "requiredOn": 0,
+      "description": "ISO timestamp set by whichever side ended the call. Empty string while the call is live. Drives the post-call toast duration counter on the caller side. Terminal states (declined, ended, missed) all stamp this — the row's `endedAt !== ''` is the idempotency guard for a second `useEndCall.mutate(...)`."
+    },
+    {
+      "name": "endReason",
+      "type": "String",
+      "requiredOn": 0,
+      "description": "'hangup' | 'declined' | 'missed' | 'error'. Set alongside `endedAt` so the closing toast can render the right localized message ('Call ended', 'Call declined', 'No answer', 'The call failed to connect…'). Empty string while the call is live. The useEndCall mutation requires this on every terminal PATCH."
+    }
+  ]
+}
