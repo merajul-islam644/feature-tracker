@@ -42,11 +42,18 @@
 #     - ...
 #
 # AI gateway and verification backend use server-only (no VITE_ prefix)
-# env vars. They are NOT baked into the image; they are injected at
-# deploy time via `blocks release deploy --with-secrets .env.production`
-# (the dotenv file must define AI_GATEWAY_URL, AI_GATEWAY_TOKEN, and
-# optionally AI_GATEWAY_MODEL and VERIFY_BACKEND_URL). See
-# `.env.production.example` for the expected shape.
+# env vars. The Blocks release pipeline (`blocks release deploy
+# --with-secrets .env.production`) syncs them into the repo's secret
+# set, but does NOT inject them into the running container's env
+# (verified: k8s deploy log shows "configured" with no env/envFrom
+# lines, prod-backend.mjs returns 503 ai_not_configured). The only
+# mechanism that reaches the container is build args — `release
+# deploy` runs buildx with the trigger substitutions. AI_GATEWAY_* and
+# VERIFY_BACKEND_URL must therefore be added as trigger substitutions
+# in the Blocks portal for the dev environment. See
+# `.env.production.example` for the expected shape. The runtime stage
+# (Stage 3) reads these ARGs and exposes them as ENV so prod-backend
+# picks them up at process start.
 
 # ---------- 1. Dependencies ----------
 FROM node:20-alpine AS deps
@@ -104,6 +111,20 @@ WORKDIR /app
 # makes /api/ai/chat work — without it production AI Chat returns 405).
 COPY server/prod-backend.mjs /app/server/prod-backend.mjs
 COPY --from=build /app/dist /app/dist
+
+# AI gateway + verification backend env vars. These come from the
+# Blocks trigger substitutions (Build → Trigger → Substitutions) — see
+# the file header comment. Without these, prod-backend.mjs returns
+# 503 ai_not_configured / verify_not_configured on every /api/ai/chat
+# and /api/verify/* request.
+ARG AI_GATEWAY_URL
+ARG AI_GATEWAY_TOKEN
+ARG AI_GATEWAY_MODEL
+ARG VERIFY_BACKEND_URL
+ENV AI_GATEWAY_URL=$AI_GATEWAY_URL \
+    AI_GATEWAY_TOKEN=$AI_GATEWAY_TOKEN \
+    AI_GATEWAY_MODEL=$AI_GATEWAY_MODEL \
+    VERIFY_BACKEND_URL=$VERIFY_BACKEND_URL
 
 ENV PORT=8080
 EXPOSE 8080
