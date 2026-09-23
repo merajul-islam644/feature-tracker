@@ -92,6 +92,12 @@ RUN npm run build
 # ---------- 3. Runtime (Node, SPA + API proxies) ----------
 FROM node:20-alpine AS runtime
 
+# WORKDIR matters: prod-backend.mjs resolves DIST_DIR from process.cwd()
+# (`path.resolve(process.cwd(), "dist")`). Without WORKDIR /app the path
+# would be `/dist` instead of `/app/dist` and every static route would
+# 500 with `{"error":"missing_dist"}`.
+WORKDIR /app
+
 # prod-backend.mjs uses only node built-ins (http, fs, path, zlib, stream,
 # url, crypto) — no package.json / npm ci needed at runtime. ~70 MB final
 # image (vs ~45 MB for nginx:1.27-alpine, but the Node process is what
