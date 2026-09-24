@@ -1,15 +1,84 @@
 {
-  "schemaName": "VerificationTarget",
   "collectionName": "blx_VerificationTargets",
-  "schemaType": 1,
-  "description": "One configured application URL that the Issue Tracker verifies. Scoped per user so each account tracks its own set of URLs; mutating hooks gate on the manager role.",
   "fields": [
-    { "name": "applicationName", "type": "String", "requiredOn": 3, "description": "Display name shown in the UI (MailCraft, IAM, etc.)." },
-    { "name": "url", "type": "String", "requiredOn": 3, "description": "Application URL — must be http(s); validated in the form layer." },
-    { "name": "environment", "type": "String", "requiredOn": 3, "description": "production | staging | development | preview." },
-    { "name": "credentialId", "type": "String", "requiredOn": 0, "description": "Optional Secret.ItemId used to log into the target during verification." },
-    { "name": "enabled", "type": "String", "requiredOn": 3, "description": "true | false. Stored as a string because Blocks Data schema fields are primitives — the adapter coerces to boolean." },
-    { "name": "lastVerifiedAt", "type": "String", "requiredOn": 0, "description": "ISO timestamp of the last completed verification run on this target." },
-    { "name": "lastStatus", "type": "String", "requiredOn": 0, "description": "TargetStatus of the most recent run (healthy / issues_found / verification_failed / …)." }
-  ]
+    {
+      "name": "applicationName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name shown in the UI (MailCraft, IAM, etc.).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "url",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Application URL — must be http(s); validated in the form layer.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "environment",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "production | staging | development | preview.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "credentialId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Optional Secret.ItemId used to log into the target during verification.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "enabled",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "true | false. Stored as a string because Blocks Data schema fields are primitives — the adapter coerces to boolean.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "lastVerifiedAt",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ISO timestamp of the last completed verification run on this target.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "lastStatus",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "TargetStatus of the most recent run (healthy / issues_found / verification_failed / …).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "VerificationTarget",
+  "schemaType": 1
 }

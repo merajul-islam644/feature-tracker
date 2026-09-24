@@ -451,6 +451,15 @@ export const issueTrackerApi = {
       /** Fired just before a gateway-retry backoff sleep, so the UI can
        * show "Retrying AI request… 2/3" instead of silent dead air. */
       onRetry?: (attempt: number, maxAttempts: number) => void;
+      // Per-request AI gateway overrides sourced from the caller's saved
+      // `UserAiConfig` row (Settings page). Empty string is the same as
+      // "no override" — the server-side proxy falls back to its .env
+      // default. Headers only attach when non-empty so we don't churn
+      // request fingerprints when the user has cleared their config.
+      gatewayProvider?: "anthropic" | "openai";
+      gatewayUrl?: string;
+      gatewayModel?: string;
+      gatewayToken?: string;
     } = {},
   ): Promise<ChatMessage> {
     try {
@@ -467,7 +476,24 @@ export const issueTrackerApi = {
       const chatFetch = () =>
         fetch("/api/ai/chat", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            // `x-ai-chat-provider` picks the route (anthropic | openai).
+            // The proxy defaults to "anthropic" when this header is absent,
+            // matching the migration of pre-existing UserAiConfig rows.
+            ...(options.gatewayProvider
+              ? { "x-ai-chat-provider": options.gatewayProvider }
+              : {}),
+            ...(options.gatewayUrl
+              ? { "x-ai-gateway-url": options.gatewayUrl }
+              : {}),
+            ...(options.gatewayModel
+              ? { "x-ai-gateway-model": options.gatewayModel }
+              : {}),
+            ...(options.gatewayToken
+              ? { "x-ai-gateway-token": options.gatewayToken }
+              : {}),
+          },
           body: JSON.stringify({
             text: userText,
             // Full app knowledge (pages, hierarchy, verification internals,

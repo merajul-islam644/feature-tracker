@@ -170,11 +170,20 @@ export function AnnouncementsPanel({
   const tPost = t("announcements.post", "Post");
 
   return (
-    <>
+    // `flex h-full flex-col` lets the modal (AnnouncementsDialog) pin
+    // the composer at the top with `shrink-0` and let only the
+    // announcement list scroll. The inline dashboard section has no
+    // height-constrained parent, so `h-full` collapses to content
+    // height there — both mounts render correctly without prop
+    // branching.
+    <div className="flex h-full flex-col">
       {/* Composer + quick templates — managers only. Rendered inside
-          the panel so both the inline section and the modal get it. */}
+          the panel so both the inline section and the modal get it.
+          `shrink-0` keeps it pinned when the parent is a flex column
+          (i.e. when the dialog body has a defined height and the
+          list scrolls underneath). */}
       {isManager && (
-        <div className="border-b border-border p-4">
+        <div className="shrink-0 border-b border-border p-4">
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -219,7 +228,14 @@ export function AnnouncementsPanel({
         </div>
       )}
 
-      <div className="p-4">
+      {/* Announcement list region. `flex-1 min-h-0 overflow-y-auto`
+          makes only this region scroll when the parent has a
+          constrained height (the dialog body); with no constrained
+          parent (the inline dashboard mount), it just lays out below
+          the pinned composer. `min-h-0` is the standard flex-shrink
+          override that lets the child shrink below its content size
+          so the scroll can engage. */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {announcementsQuery.isLoading ? (
           <div className="space-y-3">
             {Array.from({ length: 2 }).map((_, i) => (
@@ -397,7 +413,7 @@ export function AnnouncementsPanel({
           </div>
         )}
       </div>
-    </>
+    </div>
   );
 }
 
@@ -481,18 +497,33 @@ function AnnouncementCard({
   return (
     <div
       className={cn(
-        // Banner-style announcement: soft primary tint + accent
-        // ring + megaphone badge, so the manager's broadcast reads
-        // as the loudest thing on the dashboard. Token-based colours
-        // keep it correct in light AND dark mode.
-        "rounded-xl border border-primary/20 bg-primary/[0.05] ring-1 ring-inset ring-primary/5",
+        // Banner-style announcement. The original used opacity-only
+        // tints (`border-primary/20 bg-primary/[0.05] ring-primary/5`)
+        // which washed out against the panel surface — the
+        // announcement card looked like an outlined ghost on dark
+        // backgrounds and barely tinted on light. This version uses
+        // deliberate per-mode contrast: light mode keeps a faint
+        // primary wash + visible border + faint inner ring, dark
+        // mode bumps all three so the card still reads as a
+        // deliberate broadcast surface. The base `bg-card shadow-sm`
+        // supplies a card surface so the announcement has actual
+        // visual weight even before the primary tint kicks in.
+        "rounded-xl border bg-card shadow-sm",
+        "border-primary/30 bg-primary/[0.04] ring-1 ring-inset ring-primary/10",
+        "dark:border-primary/40 dark:bg-primary/[0.10] dark:ring-primary/25",
         compact ? "p-3.5" : "p-4",
       )}
     >
       <div className="flex items-start gap-3">
         <div
           className={cn(
-            "flex shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary",
+            // Megaphone halo. Per-mode tint mirroring the card
+            // surface: light stays faint, dark bumps so the badge
+            // doesn't dissolve into the dark announcement card.
+            // `ring-1 ring-primary/20` adds a subtle outline that
+            // defines the halo boundary regardless of which tint
+            // opacity is in play.
+            "flex shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary ring-1 ring-inset ring-primary/20 dark:bg-primary/25 dark:ring-primary/30",
             compact ? "h-9 w-9" : "h-10 w-10",
           )}
         >
@@ -565,9 +596,11 @@ function AnnouncementCard({
               detail latest row. Gating on `compact` would hide it
               inside the dialog and make a freshly-delivered
               announcement look indistinguishable from older archive
-              rows below. */}
+              rows below. The pill uses a saturated primary surface
+              + primary-foreground text so it pops as a deliberate
+              "active" badge rather than a soft tag. */}
           {isLatest && (
-            <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+            <span className="rounded-full bg-primary px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary-foreground shadow-sm">
               {tLatest}
             </span>
           )}
@@ -581,7 +614,7 @@ function AnnouncementCard({
                     title={tRepostAria}
                     onClick={() => onRepost(a)}
                     disabled={repostPending}
-                    className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-primary/15 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Repeat className="h-4 w-4" aria-hidden="true" />
                   </button>
@@ -590,7 +623,7 @@ function AnnouncementCard({
                     aria-label={tEdit}
                     title={tEdit}
                     onClick={() => onStartEdit(a)}
-                    className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-primary/15 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <Pencil className="h-4 w-4" aria-hidden="true" />
                   </button>
@@ -609,7 +642,7 @@ function AnnouncementCard({
                 aria-label={tHideAria}
                 title={tHideAria}
                 onClick={() => onHide(a)}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-primary/15 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <EyeOff className="h-4 w-4" aria-hidden="true" />
               </button>

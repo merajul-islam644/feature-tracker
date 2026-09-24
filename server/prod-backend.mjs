@@ -38,28 +38,428 @@ import { Readable } from "node:stream";
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Config — read at module load. The Cloud Run / Kubernetes contract on the
-//  Blocks platform sets $PORT; AI_GATEWAY_* / VERIFY_BACKEND_URL arrive via
-//  `blocks release deploy --with-secrets .env.production`. We also accept the
-//  ANTHROPIC_* aliases (same convention as the Vite proxy and as Claude Code
-//  itself) so users who set those instead still Just Work.
+//  Blocks platform sets $PORT; VERIFY_BACKEND_URL arrives via
+//  `blocks release deploy --with-secrets .env.production`.
+//
+//  AI_GATEWAY_* is intentionally NOT read here — the Settings page is the
+//  sole source of truth for the chat gateway config. Each user saves their
+//  own URL / model / token in Blocks Data; the SPA attaches them as
+//  `x-ai-gateway-*` headers on every chat request. If a request arrives
+//  without those headers, `proxyAiChat` returns 503 `ai_not_configured`.
+//  We also accept the ANTHROPIC_* aliases for forward-compat with anyone
+//  who has them exported in their environment, but only as a hard last
+//  resort if no header is supplied — same precedence as the Vite proxy.
 // ────────────────────────────────────────────────────────────────────────────
-const GATEWAY_URL = (
-  process.env.AI_GATEWAY_URL ?? process.env.ANTHROPIC_BASE_URL ?? ""
-).replace(/\/+$/, "");
-const GATEWAY_TOKEN =
-  process.env.AI_GATEWAY_TOKEN ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
-const GATEWAY_MODEL =
-  process.env.AI_GATEWAY_MODEL ??
-  process.env.ANTHROPIC_MODEL ??
-  "claude-sonnet-4-5";
 const VERIFY_URL = (process.env.VERIFY_BACKEND_URL ?? "").replace(/\/+$/, "");
+
+// ────────────────────────────────────────────────────────────────────────────
+// AI avatar provider abstraction
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The browser POSTs `{ imageBase64, style }` to `/api/ai/avatar` and expects
+// back `{ avatarDataUrl, contentType, durationMs }` — a single, vendor-neutral
+// contract. The handlers below own the *server-side* side of that contract.
+// Each provider knows how to translate the request into one upstream API:
+//
+//   - Replicate    — async prediction model: create → poll → download
+//   - Hugging Face — sync image-to-image via the Inference router
+//   - Mock         — no external API; returns the input image (offline dev)
+//   - (future) OpenAI, Stability, local ComfyUI, etc.
+//
+// Adding a new vendor is a single new entry in `AVATAR_PROVIDERS` below; no
+// edits to `proxyAiAvatar` needed. Selection is driven by the
+// `AI_AVATAR_PROVIDER` env var (default: "replicate") so the same wire shape
+// works in dev, prod, and any future environment. Tokens stay server-side
+// (no `VITE_` prefix) and never ship to the browser bundle.
+//
+// The dev-time mirror of this module lives in vite.config.ts (the
+// `aiAvatarProxy` plugin); keep the two in lockstep.
+//
+// ────────────────────────────────────────────────────────────────────────────
+// ADDING A NEW AI PROVIDER — recipe
+// ────────────────────────────────────────────────────────────────────────────
+//   1. Write a `create<Name>Provider(env)` function that returns an object
+//      satisfying the `AvatarProvider` interface (JSDoc typedef above).
+//      Each provider owns the upstream call shape — the abstraction hides
+//      it from the rest of the app.
+//   2. Add `create<Name>Provider` to the `AVATAR_PROVIDERS` map.
+//   3. Document the env vars it reads in `.env.example`.
+//
+// That's it. Selection happens via `AI_AVATAR_PROVIDER=<name>`. Per-style
+// overrides via `AI_AVATAR_PROVIDER_BY_STYLE=Anime:mock;3D:replicate`.
+// Adding a vendor is ~30–100 lines of code, no changes to the middleware
+// or to the client.
+
+/**
+ * @typedef {{ imageBase64: string, style: string }} AvatarRequest
+ * @typedef {{
+ *   avatarDataUrl: string,
+ *   contentType: string,
+ *   durationMs: number,
+ * }} AvatarResult
+ * @typedef {{
+ *   id: string,
+ *   isConfigured: () => boolean,
+ *   notConfiguredMessage: () => string,
+ *   generate: (
+ *     req: AvatarRequest,
+ *     signal: AbortSignal,
+ *     userOverride?: { token?: string, modelVersion?: string },
+ *   ) => Promise<AvatarResult>,
+ * }} AvatarProvider
+ */
+
+const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN ?? "";
+const REPLICATE_MODEL =
+  process.env.REPLICATE_AVATAR_MODEL ?? "fofr/face-to-many";
+const REPLICATE_VERSION = process.env.REPLICATE_AVATAR_MODEL_VERSION ?? "";
+// Lazily resolved latest version hash for `REPLICATE_MODEL`. Replicate's
+// create-prediction API rejects bare model names with `422 — version is
+// required`; explicit `REPLICATE_VERSION` wins when set, otherwise we
+// hit `/v1/models/{owner}/{name}` once per process and pin to the
+// returned hash. Cached for the process's lifetime — model bumps are
+// rare, a stale hash is acceptable, and a restart picks up new pins.
+let REPLICATE_RESOLVED_VERSION = null;
+let REPLICATE_RESOLVE_ATTEMPTED = false;
+async function resolveReplicateLatestVersion(useToken) {
+  if (REPLICATE_RESOLVED_VERSION || REPLICATE_RESOLVE_ATTEMPTED) {
+    return REPLICATE_RESOLVED_VERSION;
+  }
+  REPLICATE_RESOLVE_ATTEMPTED = true;
+  const [owner, name] = REPLICATE_MODEL.split("/");
+  if (!owner || !name) return null;
+  try {
+    const res = await fetch(
+      `https://api.replicate.com/v1/models/${owner}/${name}`,
+      { headers: { authorization: `Token ${useToken}` } },
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const id = data?.latest_version?.id;
+    if (typeof id === "string" && id.length > 0) {
+      REPLICATE_RESOLVED_VERSION = id;
+      return id;
+    }
+  } catch {
+    // Network/Replicate failure — fall through; create-prediction will
+    // surface a clear upstream error if it can't proceed.
+  }
+  return null;
+}
+
+/** @returns {AvatarProvider} */
+function createReplicateProvider() {
+  const token = REPLICATE_TOKEN;
+  const model = REPLICATE_MODEL;
+  const explicitVersion = REPLICATE_VERSION;
+  return {
+    id: "replicate",
+    isConfigured: () => token.length > 0,
+    notConfiguredMessage: () =>
+      "REPLICATE_API_TOKEN is not set on the prod-backend process. Set it (and optionally REPLICATE_AVATAR_MODEL / REPLICATE_AVATAR_MODEL_VERSION) to enable AI avatar generation.",
+    async generate(req, signal, userOverride) {
+      // Per-request credential resolution: the caller's Personal AI key
+      // (`x-ai-avatar-token`) wins over the env token. The middleware
+      // already 503s when no user token is supplied, so reaching here
+      // implies at least one source is non-empty — but the guard below
+      // keeps the provider robust if it's ever called from a new code
+      // path that forgets the check.
+      const effectiveToken = userOverride?.token || token;
+      const effectiveVersion = userOverride?.modelVersion || explicitVersion;
+      if (!effectiveToken) {
+        throw new Error(
+          "Replicate token is missing — set Personal AI key in Settings → Account, or configure REPLICATE_API_TOKEN on the server.",
+        );
+      }
+      const inputImage = req.imageBase64.startsWith("data:")
+        ? req.imageBase64
+        : `data:image/jpeg;base64,${req.imageBase64}`;
+      const pinnedVersion =
+        effectiveVersion || (await resolveReplicateLatestVersion(effectiveToken));
+      if (!pinnedVersion) {
+        throw new Error(
+          "Could not resolve the Replicate model version. Set REPLICATE_AVATAR_MODEL_VERSION in the prod env to pin a specific hash, or check the API token / network connectivity.",
+        );
+      }
+      const createBody = {
+        version: pinnedVersion,
+        input: {
+          image: inputImage,
+          style: req.style,
+          prompt: "",
+          prompt_strength: 0.9,
+          number_of_images: 1,
+          disable_safety_checker: true,
+        },
+      };
+      const start = Date.now();
+      const create = await fetch(
+        "https://api.replicate.com/v1/predictions",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Token ${effectiveToken}`,
+          },
+          body: JSON.stringify(createBody),
+        },
+      );
+      if (!create.ok) {
+        const text = await create.text();
+        throw new Error(
+          `Replicate create failed: ${text.slice(0, 500)}`,
+        );
+      }
+      const prediction = await create.json();
+      const predictionId = prediction?.id;
+      if (!predictionId) {
+        throw new Error("Replicate returned no prediction id");
+      }
+
+      // Poll until settled. Throws on abort — the outer middleware maps
+      // that to 504. Best-effort cancel so Replicate stops billing when
+      // the client disconnects mid-generation.
+      let final = prediction;
+      while (true) {
+        if (signal.aborted) {
+          fetch(
+            `https://api.replicate.com/v1/predictions/${predictionId}/cancel`,
+            {
+              method: "POST",
+              headers: { authorization: `Token ${effectiveToken}` },
+            },
+          ).catch(() => {});
+          throw new Error("aborted");
+        }
+        if (
+          final.status === "succeeded" ||
+          final.status === "failed" ||
+          final.status === "canceled"
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+        const poll = await fetch(
+          `https://api.replicate.com/v1/predictions/${predictionId}`,
+          { headers: { authorization: `Token ${effectiveToken}` } },
+        );
+        if (poll.ok) final = await poll.json();
+      }
+      if (final.status !== "succeeded") {
+        throw new Error(
+          typeof final?.error === "string"
+            ? final.error
+            : `prediction ${final.status}`,
+        );
+      }
+      const output = final.output;
+      const firstUrl = Array.isArray(output)
+        ? output.find((v) => typeof v === "string")
+        : typeof output === "string"
+          ? output
+          : null;
+      if (!firstUrl) throw new Error("Replicate returned no output URL");
+      const dl = await fetch(firstUrl);
+      if (!dl.ok) {
+        throw new Error(`Failed to download avatar (${dl.status})`);
+      }
+      const mime = dl.headers.get("content-type") ?? "image/png";
+      const buf = Buffer.from(await dl.arrayBuffer());
+      const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+      return {
+        avatarDataUrl: dataUrl,
+        contentType: mime,
+        durationMs: Date.now() - start,
+      };
+    },
+  };
+}
+
+// Hugging Face Inference router. The default model
+// `timbrooks/instruct-pix2pix` is a well-known free option that preserves
+// the input subject's structure while applying a text instruction — good
+// for "turn this face into X" style transfers. Override `HF_AVATAR_MODEL`
+// to swap.
+//
+// Style → prompt map stands in for Replicate's built-in style enum: each
+// preset becomes a natural-language instruction. Missing styles fall
+// back to a generic stylization prompt.
+const HF_STYLE_PROMPTS = {
+  "3D": "turn this person into a 3D rendered character",
+  Anime: "turn this person into anime",
+  Cartoon: "turn this person into a cartoon",
+  Emoji: "turn this person into an emoji",
+  "Video game": "turn this person into a video game character",
+  "Pixel art": "convert this person into pixel art",
+  Clay: "make this person look like a clay sculpture",
+  Illustration: "make this person a hand drawn illustration",
+  Toy: "turn this person into a toy figure",
+};
+const HF_DEFAULT_PROMPT = "stylize this person as a creative portrait";
+
+/** @returns {AvatarProvider} */
+function createHuggingFaceProvider() {
+  const token = process.env.HF_TOKEN ?? "";
+  const model = process.env.HF_AVATAR_MODEL ?? "timbrooks/instruct-pix2pix";
+  return {
+    id: "huggingface",
+    isConfigured: () => token.length > 0,
+    notConfiguredMessage: () =>
+      "HF_TOKEN is not set on the prod-backend process. Get a free token at https://huggingface.co/settings/tokens (Make calls to Inference Providers permission) and set HF_TOKEN + AI_AVATAR_PROVIDER=huggingface in the prod env.",
+    async generate(req, signal, userOverride) {
+      // Same per-request override as Replicate — `userOverride.token` wins
+      // over the env `HF_TOKEN` when present. Mirrors the dev proxy in
+      // `vite.config.ts`.
+      const effectiveToken = userOverride?.token || token;
+      if (!effectiveToken) {
+        throw new Error(
+          "Hugging Face token is missing — set Personal AI key in Settings → Account, or configure HF_TOKEN on the server.",
+        );
+      }
+      const prompt = HF_STYLE_PROMPTS[req.style] ?? HF_DEFAULT_PROMPT;
+      const inputImage = req.imageBase64.startsWith("data:")
+        ? req.imageBase64
+        : `data:image/jpeg;base64,${req.imageBase64}`;
+      const start = Date.now();
+      const res = await fetch(
+        `https://router.huggingface.co/hf-inference/models/${model}`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${effectiveToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            inputs: inputImage,
+            parameters: {
+              prompt,
+              num_inference_steps: 25,
+              image_guidance_scale: 1.5,
+            },
+          }),
+          signal,
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(
+          `Hugging Face failed (${res.status}): ${text.slice(0, 500)}`,
+        );
+      }
+      const ab = await res.arrayBuffer();
+      const mime = res.headers.get("content-type") ?? "image/png";
+      if (!mime.startsWith("image/")) {
+        const text = Buffer.from(ab).toString("utf8");
+        throw new Error(
+          `Hugging Face returned non-image response: ${text.slice(0, 500)}`,
+        );
+      }
+      const dataUrl = `data:${mime};base64,${Buffer.from(ab).toString("base64")}`;
+      return {
+        avatarDataUrl: dataUrl,
+        contentType: mime,
+        durationMs: Date.now() - start,
+      };
+    },
+  };
+}
+
+// ── Mock provider (no external API) ─────────────────────────────────────────
+//
+// Returns the input image unchanged. Useful for:
+//   - offline development (no API key required),
+//   - UI / wire-shape testing without burning API credits,
+//   - as a placeholder when no real provider is configured.
+//
+// Always "configured" — no credentials to set. Override
+// `AI_AVATAR_PROVIDER=mock` in the prod env to enable.
+/** @returns {AvatarProvider} */
+function createMockProvider() {
+  return {
+    id: "mock",
+    isConfigured: () => true,
+    notConfiguredMessage: () =>
+      "Mock provider is always configured — no credentials required.",
+    async generate(req, _signal, _userOverride) {
+      const inputImage = req.imageBase64.startsWith("data:")
+        ? req.imageBase64
+        : `data:image/jpeg;base64,${req.imageBase64}`;
+      return {
+        avatarDataUrl: inputImage,
+        contentType: "image/png",
+        durationMs: 0,
+      };
+    },
+  };
+}
+
+// Per-style provider override. Parses `AI_AVATAR_PROVIDER_BY_STYLE` from
+// the env into a `{ style → providerId }` map so the same app can route,
+// say, "Anime" through Hugging Face (free) and "3D" through Replicate
+// (paid).
+//
+// Format: semicolon-separated `Style:providerId` pairs.
+//   AI_AVATAR_PROVIDER_BY_STYLE=Anime:mock;3D:replicate;Emoji:huggingface
+// Whitespace is trimmed; unknown style keys are ignored. A style that's
+// listed here takes precedence over the global `AI_AVATAR_PROVIDER`.
+const AVATAR_PROVIDERS = {
+  replicate: createReplicateProvider,
+  huggingface: createHuggingFaceProvider,
+  mock: createMockProvider,
+};
+
+function parseStyleProviders(value) {
+  if (!value) return {};
+  const map = {};
+  for (const pair of value.split(/[;,]/)) {
+    const [k, v] = pair.split(":").map((s) => (s ?? "").trim());
+    if (k && v) map[k] = v.toLowerCase();
+  }
+  return map;
+}
+
+/**
+ * Resolve the active provider. Per-style override wins, then global
+ * `AI_AVATAR_PROVIDER`, then default "replicate".
+ * @param {string} [style] — the style preset the client requested.
+ * @returns {AvatarProvider}
+ */
+function getAvatarProvider(style) {
+  const styleOverrides = parseStyleProviders(
+    process.env.AI_AVATAR_PROVIDER_BY_STYLE,
+  );
+  const override = style ? styleOverrides[style] : undefined;
+  const id = (override ?? process.env.AI_AVATAR_PROVIDER ?? "replicate").toLowerCase();
+  const factory = AVATAR_PROVIDERS[id];
+  if (!factory) {
+    const known = Object.keys(AVATAR_PROVIDERS).join(", ");
+    return {
+      id,
+      isConfigured: () => false,
+      notConfiguredMessage: () =>
+        `AI_AVATAR_PROVIDER="${id}" is not recognized. Known providers: ${known}.`,
+      generate: async () => {
+        throw new Error(`Unknown AI avatar provider: ${id}`);
+      },
+    };
+  }
+  return factory();
+}
+
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = "0.0.0.0";
 const DIST_DIR = path.resolve(process.cwd(), "dist");
 
 // Belt-and-braces: cap request bodies. Anthropic + tool-catalog bodies stay
 // well under 1 MB; 5 MB is generous headroom for any future expansion.
+// The AI avatar endpoint needs more — the source photo is 4 MB at the
+// picker and base64 inflates to ~5.3 MB on the wire; 10 MB gives a safety
+// margin. Each handler that needs the wider cap passes the constant in
+// directly; the chat / verify / secrets / evidence paths keep the 5 MB
+// default by reading from `MAX_BODY_BYTES` explicitly.
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const AVATAR_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const AVATAR_TIMEOUT_MS = 65_000;
 // requestTimeout: 90 s. Anthropic with max_tokens 4096 + tools can run 30–60 s.
 // SSE endpoint overrides this per-request via res.setTimeout(0) below.
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -142,6 +542,8 @@ server.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(`[prod-backend]   VERIFY_BACKEND_URL=${VERIFY_URL || "(unset — /api/verify/* returns 503)"}`);
   // eslint-disable-next-line no-console
+  console.log(`[prod-backend]   AI_AVATAR_PROVIDER=${getAvatarProvider().id}${getAvatarProvider().isConfigured() ? "" : " (no credentials — /api/ai/avatar returns 503)"}`);
+  // eslint-disable-next-line no-console
   console.log(`[prod-backend]   DIST_DIR=${DIST_DIR}`);
 });
 
@@ -166,6 +568,19 @@ function handleApi(req, res, pathname, reqUrl) {
       return;
     }
     proxyAiChat(req, res);
+    return;
+  }
+
+  // POST /api/ai/avatar — Vendor-agnostic avatar generation. Returns the
+  // generated image as a data URL so the browser can render it without a
+  // CORS round-trip. The actual upstream is selected by AI_AVATAR_PROVIDER
+  // (Replicate by default; Hugging Face and others live alongside).
+  if (pathname === "/api/ai/avatar") {
+    if (method !== "POST") {
+      sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+    proxyAiAvatar(req, res);
     return;
   }
 
@@ -223,17 +638,242 @@ function handleApi(req, res, pathname, reqUrl) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-//  POST /api/ai/chat — port of vite.config.ts aiChatProxy (lines 33-134).
+//  POST /api/ai/chat — port of vite.config.ts aiChatProxy.
+//
+//  Per-request overrides from `x-ai-gateway-{url,model,token}` headers
+//  (sent by the SPA from the user's saved UserAiConfig row in Blocks Data)
+//  AND the provider id from `x-ai-chat-provider` are the ONLY source of
+//  truth. There is no .env fallback by design — the Settings page is
+//  where the user manages these values. A request without the required
+//  headers returns 503 `ai_not_configured`. Same-origin browser fetch →
+//  no CORS preflight, so custom headers pass through.
+//
+//  The provider id selects the wire format. Anthropic passes through;
+//  OpenAI translates. Adding more providers = a new factory below
+//  + one entry in `CHAT_PROVIDERS`. Mirrors vite.config.ts in lockstep.
 // ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {{
+ *   model: string,
+ *   max_tokens: number,
+ *   system: string,
+ *   messages: Array<{ role: "user" | "assistant", content: string }>,
+ *   tools?: Array<{ name: string, description?: string, input_schema: Record<string, unknown> }>,
+ * }} AnthropicRequestBody
+ *
+ * @typedef {{
+ *   id: string,
+ *   type: "message",
+ *   role: "assistant",
+ *   model: string,
+ *   content: Array<{ type: "text", text: string } | { type: "tool_use", id: string, name: string, input: Record<string, unknown> }>,
+ *   stop_reason: string,
+ * }} AnthropicResponseBody
+ *
+ * @typedef {{
+ *   url: string,
+ *   token: string,
+ *   model: string,
+ * }} ChatProviderConfig
+ *
+ * @typedef {{
+ *   id: "anthropic" | "openai",
+ *   isConfigured: (cfg: ChatProviderConfig) => boolean,
+ *   notConfiguredMessage: () => string,
+ *   sendChat: (cfg: ChatProviderConfig, body: AnthropicRequestBody, signal: AbortSignal) => Promise<AnthropicResponseBody>,
+ * }} ChatProvider
+ */
+
+/** @returns {ChatProvider} */
+function createAnthropicChatProvider() {
+  return {
+    id: "anthropic",
+    isConfigured: ({ url, token }) =>
+      typeof url === "string" && url.length > 0 &&
+      typeof token === "string" && token.length > 0,
+    notConfiguredMessage: () =>
+      "AI gateway is not configured. Open Settings → AI Gateway and pick a provider, then enter the URL and token.",
+    async sendChat(cfg, body, signal) {
+      // `body.model` already carries the dispatcher-provided value (the
+      // OpenAI provider uses `cfg.model` directly because its native wire
+      // doesn't include a `model` in the body). Spreading `body` is enough.
+      const upstream = await fetch(
+        `${cfg.url.replace(/\/+$/, "")}/v1/messages`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${cfg.token}`,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify(body),
+          signal,
+        },
+      );
+      if (!upstream.ok) {
+        const text = await upstream.text();
+        throw new Error(
+          `upstream_${upstream.status}: ${text.slice(0, 500)}`,
+        );
+      }
+      return /** @type {AnthropicResponseBody} */ (await upstream.json());
+    },
+  };
+}
+
+/** @returns {ChatProvider} */
+function createOpenAIChatProvider() {
+  return {
+    id: "openai",
+    isConfigured: ({ url, token }) =>
+      typeof url === "string" && url.length > 0 &&
+      typeof token === "string" && token.length > 0,
+    notConfiguredMessage: () =>
+      "OpenAI provider is not configured. Open Settings → AI Gateway, pick OpenAI, and enter the Base URL + API key.",
+    async sendChat(cfg, body, signal) {
+      // Anthropic → OpenAI request translation.
+      //   • Anthropic `system` → OpenAI system message at the head.
+      //   • Anthropic `tools[]` → OpenAI `tools[].function.parameters`
+      //     (both APIs use JSON Schema for the function-parameter shape
+      //     so `input_schema` passes through unchanged).
+      const openaiMessages = body.system
+        ? [{ role: "system", content: body.system }, ...body.messages]
+        : [...body.messages];
+      const openaiTools = Array.isArray(body.tools)
+        ? body.tools.map((t) => ({
+            type: "function",
+            function: {
+              name: t.name,
+              description: t.description ?? "",
+              parameters: t.input_schema,
+            },
+          }))
+        : undefined;
+
+      const upstream = await fetch(
+        `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${cfg.token}`,
+          },
+          body: JSON.stringify({
+            model: cfg.model,
+            max_tokens: body.max_tokens,
+            messages: openaiMessages,
+            ...(openaiTools ? { tools: openaiTools } : {}),
+          }),
+          signal,
+        },
+      );
+      if (!upstream.ok) {
+        const text = await upstream.text();
+        throw new Error(
+          `upstream_${upstream.status}: ${text.slice(0, 500)}`,
+        );
+      }
+
+      // OpenAI → Anthropic response translation. Shape:
+      //   { choices: [{ message: { content?, tool_calls? }, finish_reason }],
+      //     model }
+      const json = (await upstream.json()) || {};
+      const choice = Array.isArray(json.choices) ? json.choices[0] : null;
+      const content = [];
+      const msg = choice?.message || {};
+      if (typeof msg.content === "string" && msg.content.length > 0) {
+        content.push({ type: "text", text: msg.content });
+      }
+      const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+      for (const tc of toolCalls) {
+        // `function.arguments` is a JSON-encoded string — parse so the
+        // client sees a real `toolUseBlocks[].input` object. Falls back
+        // to {} on parse failure (matches Anthropic's tolerance when a
+        // model emits invalid JSON).
+        let input = {};
+        try {
+          const parsed = JSON.parse(tc.function?.arguments || "{}");
+          if (parsed && typeof parsed === "object") input = parsed;
+        } catch {
+          input = {};
+        }
+        content.push({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.function?.name || "",
+          input,
+        });
+      }
+      // Map finish_reason → stop_reason. Anthropic uses tool_use /
+      // end_turn / max_tokens; OpenAI uses tool_calls / stop / length.
+      const finish = choice?.finish_reason;
+      const stopReason =
+        finish === "tool_calls"
+          ? "tool_use"
+          : finish === "length"
+            ? "max_tokens"
+            : "end_turn";
+      return {
+        id: `chatcmpl-${Date.now()}`,
+        type: "message",
+        role: "assistant",
+        model: json.model || cfg.model,
+        content,
+        stop_reason: stopReason,
+      };
+    },
+  };
+}
+
+const CHAT_PROVIDERS = {
+  anthropic: createAnthropicChatProvider,
+  openai: createOpenAIChatProvider,
+};
+
+/** @returns {ChatProvider} */
+function getChatProvider(id) {
+  const factory = CHAT_PROVIDERS[id];
+  if (factory) return factory();
+  // Unknown / missing → default to anthropic. Matches the migration
+  // choice: rows saved before the provider column existed (no header)
+  // keep routing through the Anthropic provider until the user opens
+  // Settings and picks OpenAI.
+  return createAnthropicChatProvider();
+}
+
 async function proxyAiChat(req, res) {
-  if (!GATEWAY_URL || !GATEWAY_TOKEN) {
+  const headerValue = (name) => {
+    const v = req.headers[name];
+    return typeof v === "string" ? v.trim() : "";
+  };
+  // Provider id defaults to "anthropic" — rows saved before the
+  // provider column existed (no header, no `provider` field) keep
+  // routing through Anthropic until the user opens Settings.
+  const providerId = headerValue("x-ai-chat-provider") || "anthropic";
+  const cfg = {
+    url: headerValue("x-ai-gateway-url"),
+    token: headerValue("x-ai-gateway-token"),
+    model: headerValue("x-ai-gateway-model") || "claude-sonnet-4-5",
+  };
+  const provider = getChatProvider(providerId);
+  if (!provider.isConfigured(cfg)) {
     sendJson(res, 503, {
       error: "ai_not_configured",
-      message:
-        "AI_GATEWAY_URL (or ANTHROPIC_BASE_URL) and AI_GATEWAY_TOKEN (or ANTHROPIC_AUTH_TOKEN) must be set on the prod-backend process.",
+      message: provider.notConfiguredMessage(),
     });
     return;
   }
+
+  // One AbortSignal per request: fires when the browser disconnects
+  // mid-call so the upstream fetch stops streaming. Mirrors the avatar
+  // proxy's pattern (see `proxyAiAvatar` below).
+  const abort = new AbortController();
+  let disconnected = false;
+  req.on("close", () => {
+    disconnected = true;
+    abort.abort();
+  });
 
   try {
     const raw = await readBodyCapped(req, MAX_BODY_BYTES);
@@ -262,31 +902,159 @@ async function proxyAiChat(req, res) {
           }))
       : [];
 
-    const upstream = await fetch(`${GATEWAY_URL}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${GATEWAY_TOKEN}`,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: GATEWAY_MODEL,
+    // Provider receives an Anthropic-format body; each provider
+    // factory translates to its native wire (or passes through for
+    // Anthropic) and returns Anthropic-format JSON.
+    const response = await provider.sendChat(
+      cfg,
+      {
+        model: cfg.model,
         max_tokens: 4096,
         system: systemPrompt,
         messages: [...history, { role: "user", content: userText }],
         ...(tools ? { tools } : {}),
-      }),
-    });
-
-    const upstreamText = await upstream.text();
-    res.statusCode = upstream.status;
-    res.setHeader(
-      "content-type",
-      upstream.headers.get("content-type") ?? "application/json",
+      },
+      abort.signal,
     );
-    res.end(upstreamText);
+    if (disconnected || abort.signal.aborted) {
+      // Browser went away; nothing to send back.
+      res.end();
+      return;
+    }
+    sendJson(res, 200, response);
   } catch (err) {
+    if (disconnected || abort.signal.aborted) {
+      res.end();
+      return;
+    }
     sendUpstreamError(res, err);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  POST /api/ai/avatar — vendor-agnostic port of vite.config.ts aiAvatarProxy.
+//
+//  Wire shape (JSON, matches the dev proxy so the client is the same
+//  in both environments):
+//    request:   { imageBase64: string, style?: string }
+//    response:  { avatarDataUrl: string, contentType: string, durationMs: number }
+//  Error codes: `avatar_not_configured` (503), `payload_too_large` (413),
+//  `bad_request` (400), `upstream_failure` (502).
+//
+//  The selected provider (resolved per-request from `AI_AVATAR_PROVIDER`,
+//  optionally overridden per-style via `AI_AVATAR_PROVIDER_BY_STYLE`)
+//  owns the upstream call shape; this handler only handles body parsing,
+//  the wall-clock timeout, and disconnect cleanup. Each provider MUST
+//  respect `signal` so a timeout or a hung-up browser aborts the upstream
+//  call cleanly.
+// ────────────────────────────────────────────────────────────────────────────
+async function proxyAiAvatar(req, res) {
+  let raw;
+  try {
+    raw = await readBodyCapped(req, AVATAR_MAX_BODY_BYTES);
+  } catch (err) {
+    // readBodyCapped throws a statusCode-bearing Error on cap trips; route
+    // it through the shared helper so 413 lands as `payload_too_large`,
+    // not the generic 502.
+    if (err && err.statusCode === 413) {
+      sendJson(res, 413, {
+        error: "payload_too_large",
+        message: "Avatar request body too large",
+      });
+      return;
+    }
+    sendUpstreamError(res, err);
+    return;
+  }
+
+  const parsed = raw ? safeJsonParse(raw) : {};
+  const imageBase64 =
+    typeof parsed?.imageBase64 === "string" ? parsed.imageBase64 : "";
+  const style = typeof parsed?.style === "string" ? parsed.style : "3D";
+  if (!imageBase64) {
+    sendJson(res, 400, {
+      error: "bad_request",
+      message: "imageBase64 is required",
+    });
+    return;
+  }
+
+  // Per-request provider resolution: global `AI_AVATAR_PROVIDER` is the
+  // default; `AI_AVATAR_PROVIDER_BY_STYLE` lets specific styles route to
+  // a different upstream (e.g. free HF for "Anime", paid Replicate for
+  // "3D").
+  const provider = getAvatarProvider(style);
+
+  // Per-request credential override. The Personal AI key lives in the
+  // user's own row (`blx_UserAvatarConfigs`) and rides along on every
+  // avatar request as `x-ai-avatar-{provider,token,model}`. The UI is
+  // the SOLE source of truth — env values are NOT mixed in. If no user
+  // override is set we 503 with a hint pointing at the Settings → Account
+  // section, so the avatar button stays hidden until the user configures
+  // their own key.
+  const headerValue = (name) => {
+    const v = req.headers[name];
+    return typeof v === "string" ? v.trim() : "";
+  };
+  const userToken = headerValue("x-ai-avatar-token");
+  const userModelVersion = headerValue("x-ai-avatar-model");
+  if (!userToken) {
+    sendJson(res, 503, {
+      error: "avatar_not_configured",
+      message:
+        "Personal AI key is not set. Open Settings → Account → Personal AI Key and add your provider token to enable AI avatar generation.",
+    });
+    return;
+  }
+  // `provider.isConfigured()` is still checked so a future env-only
+  // vendor (e.g. a HF-only deployment) can refuse to run when the env
+  // token is missing — Replicate + HF both honor the override, but the
+  // underlying model id may be hardcoded for env-only modes.
+  if (!provider.isConfigured()) {
+    sendJson(res, 503, {
+      error: "avatar_not_configured",
+      message: provider.notConfiguredMessage(),
+    });
+    return;
+  }
+
+  // One AbortSignal per request: fires on the wall-clock timeout OR when
+  // the browser disconnects mid-generation. Providers must respect it —
+  // Replicate aborts its poll loop, HF aborts the fetch.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), AVATAR_TIMEOUT_MS);
+  let disconnected = false;
+  req.on("close", () => {
+    disconnected = true;
+    abort.abort();
+  });
+
+  try {
+    const result = await provider.generate(
+      { imageBase64, style },
+      abort.signal,
+      {
+        token: userToken,
+        modelVersion: userModelVersion || undefined,
+      },
+    );
+    clearTimeout(timer);
+    if (disconnected) {
+      // Browser went away; nothing to send back.
+      res.end();
+      return;
+    }
+    sendJson(res, 200, result);
+  } catch (err) {
+    clearTimeout(timer);
+    if (disconnected || abort.signal.aborted) {
+      res.end();
+      return;
+    }
+    sendJson(res, 502, {
+      error: "upstream_failure",
+      message: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

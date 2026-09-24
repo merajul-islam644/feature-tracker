@@ -23,7 +23,7 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { Check, Copy, Pencil, RefreshCw, Search, Users } from "lucide-react";
+import { Check, Copy, FolderKanban, Pencil, RefreshCw, Search, Users } from "lucide-react";
 import { useT } from "@/lib/blocks/i18n";
 import {
   useAllJoinedUsers,
@@ -54,6 +54,35 @@ import { Input } from "@/components/ui/input";
 // when a member belongs to many projects (the popover editor still
 // shows the full list for assigning).
 const MAX_VISIBLE_PROJECT_NAMES = 3;
+
+// Left-edge role rail color. The rail is a 4px bar on the left of
+// every card so the role is identifiable at a glance without reading
+// the label. Colors follow the existing role-color vocabulary used
+// elsewhere in the app:
+//   - manager → indigo (`bg-primary`): identity / primary interaction,
+//     per index.css:13. This is the only role getting the brand color
+//     because all other palette slots (emerald/sky/amber/red/violet/
+//     cyan) are reserved for status / environment semantics.
+//   - developer → violet: matches the role chip in IssueGroup.tsx:193.
+//   - tester → sky: matches the role chip in IssueGroup.tsx:192.
+//   - clouduser / unknown → muted: blends into the card border so a
+//     role we haven't onboarded doesn't shout visually.
+const ROLE_RAIL_BG: Record<string, string> = {
+  manager: "bg-primary",
+  developer: "bg-violet-500 dark:bg-violet-400",
+  tester: "bg-sky-500 dark:bg-sky-400",
+};
+const DEFAULT_ROLE_RAIL_BG = "bg-muted-foreground/50";
+
+// Role label text color — kept consistent with the rail so the rail
+// and label reinforce each other instead of competing. Falls back to
+// muted-foreground for clouduser / unknown roles.
+const ROLE_LABEL_TONE: Record<string, string> = {
+  manager: "text-primary",
+  developer: "text-violet-600 dark:text-violet-400",
+  tester: "text-sky-600 dark:text-sky-400",
+};
+const DEFAULT_ROLE_LABEL_TONE = "text-muted-foreground";
 
 export function MembersPage() {
   const t = useT();
@@ -177,20 +206,45 @@ export function MembersPage() {
       <section aria-label={t("members.title", "Members")}>
         {membersQuery.isLoading ? (
           // Skeleton grid matches the real layout so the swap-in
-          // doesn't reflow the page once data lands.
+          // doesn't reflow the page once data lands. Mirrors the
+          // new card shape: rail placeholder, h-28 avatar, role
+          // label + email + project list + stats footer line.
           <div
             className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
             aria-busy="true"
           >
             {Array.from({ length: 8 }).map((_, i) => (
-              <Card key={i} className="overflow-hidden">
-                <CardContent className="flex flex-col items-center gap-3 p-6">
-                  <Skeleton className="h-24 w-24 rounded-full" />
+              <Card key={i} className="relative overflow-hidden">
+                {/* Rail placeholder — same width / position as the
+                    real rail so the swap-in doesn't nudge the
+                    content right by 4px. Muted color so it
+                    doesn't suggest any specific role. */}
+                <span
+                  aria-hidden="true"
+                  className="absolute inset-y-0 left-0 w-1 rounded-r-full bg-muted-foreground/20"
+                />
+                <CardContent className="flex flex-col gap-3 p-6 pt-10">
+                  <Skeleton className="mx-auto h-28 w-28 rounded-full" />
                   <div className="space-y-1.5 text-center">
                     <Skeleton className="mx-auto h-4 w-32" />
                     <Skeleton className="mx-auto h-3 w-16" />
                   </div>
-                  <Skeleton className="h-3 w-40" />
+                  <Skeleton className="mx-auto h-3 w-40" />
+                  {/* Bounded list placeholder (3 lines) + separator
+                      + footer line, so the skeleton card matches
+                      the real card's vertical proportions. `min-h-
+                      [5rem]` mirrors the real list-area wrapper so
+                      the swap-in doesn't reflow the row. */}
+                  <div className="mt-auto space-y-2 pt-2">
+                    <div className="min-h-[5rem] space-y-1">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-3 w-32" />
+                      <Skeleton className="h-3 w-28" />
+                    </div>
+                    <div className="mt-3 border-t border-border/60 pt-3">
+                      <Skeleton className="h-3 w-20" />
+                    </div>
+                  </div>
                 </CardContent>
               </Card>
             ))}
@@ -289,6 +343,12 @@ function MemberCard({
   // not open another's. Closing follows Radix's standard
   // onOpenChange (Escape, click outside, focus loss).
   const [editOpen, setEditOpen] = useState(false);
+  // Same rationale for the overflow popover — opening the
+  // "+N more" viewer on one card must not leak into another card's
+  // state. Separate from `editOpen` so a non-manager (who can't
+  // edit) can still open the viewer without the manager-only edit
+  // popover state interfering.
+  const [overflowOpen, setOverflowOpen] = useState(false);
   // Look up the human-readable label for a project id so the
   // bullet-list renders the project name rather than the raw id.
   // Falls back to the id when the option list doesn't know about
@@ -347,8 +407,34 @@ function MemberCard({
     // `min-h-` keeps the card from collapsing when the project list
     // at the bottom is empty — a tall card with "No projects
     // assigned" reads as intentional whitespace, not an under-
-    // filled cell.
-    <Card className="relative flex h-full min-h-[22rem] flex-col overflow-hidden">
+    // filled cell. `card-interactive` opts in to the design-system's
+    // hover surface (index.css:380-382) — `bg-accent/40` on hover,
+    // no shadow. Self card gets a subtle primary ring so it stands
+    // apart from the roster at a glance without relying solely on
+    // the `ME` badge.
+    <Card
+      className={cn(
+        "relative flex h-full min-h-[22rem] flex-col overflow-hidden card-interactive transition-colors",
+        isSelf && "ring-1 ring-primary/40",
+      )}
+    >
+      {/* Left-edge role rail. A 4px bar that identifies the
+          member's role at a glance — color matches the
+          `ROLE_RAIL_BG` lookup so the rail and the role label
+          below reinforce each other. `rounded-r-full` softens the
+          inner edge so it doesn't read as a hard stop against the
+          card body. `inset-y-0 left-0 w-1` matches the shape of
+          `.accent-rail-indigo` (index.css:361-364) so the visual
+          stays consistent with the design system's other rail
+          patterns. The rail is decorative — `aria-hidden` keeps
+          screen readers from announcing the color change. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute inset-y-0 left-0 w-1 rounded-r-full",
+          ROLE_RAIL_BG[member.role] ?? DEFAULT_ROLE_RAIL_BG,
+        )}
+      />
       {/* Self-card marker. Sits in the top-right corner so it doesn't
           crowd the avatar / name cluster in the center. The badge
           uses the same `Badge` primitive as the project chips in the
@@ -382,7 +468,7 @@ function MemberCard({
           <UserAvatar
             userId={member.id}
             name={member.name}
-            className="h-24 w-24 text-2xl"
+            className="h-28 w-28 text-3xl"
           />
           <div>
             <h3 className="text-base font-semibold text-foreground">
@@ -407,7 +493,19 @@ function MemberCard({
             </h3>
             {member.role && (
               <p className="mt-0.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                {member.role}
+                {/* Role label takes the rail's color so the rail
+                    and the label reinforce each other instead of
+                    competing visually. The fallback keeps an
+                    uncolored role (clouduser / unknown) muted
+                    rather than silently picking up the developer's
+                    violet tone. */}
+                <span
+                  className={cn(
+                    ROLE_LABEL_TONE[member.role] ?? DEFAULT_ROLE_LABEL_TONE,
+                  )}
+                >
+                  {member.role}
+                </span>
                 {/* "of the Selise Group" suffix reads as the role's
                     organisational scope. Normal case + regular
                     weight so the role label (e.g. "DEVELOPER")
@@ -567,41 +665,144 @@ function MemberCard({
               from wrapping and forcing a height change. Surfaces a
               muted helper when nothing is assigned so the section
               isn't visually empty (an empty-looking footer on a tall
-              card reads as a layout glitch). */}
-          {value.length === 0 ? (
-            <p className="text-xs italic text-muted-foreground">
-              {t(
-                "members.noProjects",
-                projectOptions.length === 0
-                  ? "No projects yet"
-                  : "No projects assigned",
-              )}
-            </p>
-          ) : (
-            <ul className="space-y-1">
-              {value
-                .slice(0, MAX_VISIBLE_PROJECT_NAMES)
-                .map((projectId) => (
-                  <li
-                    key={projectId}
-                    className="flex items-center gap-1.5 text-xs text-foreground"
-                  >
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
-                      aria-hidden="true"
-                    />
-                    <span className="truncate">
-                      {projectLabelFor(projectId)}
-                    </span>
+              card reads as a layout glitch). The whole list area is
+              wrapped in a fixed `min-h-[5rem]` container so a
+              member with 0/1/2 projects doesn't end up shorter than
+              a member with 3+ — `auto-rows-fr` already equalizes
+              cards within a row, but rows themselves used to drift
+              apart as content changed. Locking the list area
+              eliminates that drift without resorting to
+              placeholders in the list. */}
+          <div className="min-h-[5rem]">
+            {value.length === 0 ? (
+              <p className="text-xs italic text-muted-foreground">
+                {t(
+                  "members.noProjects",
+                  projectOptions.length === 0
+                    ? "No projects yet"
+                    : "No projects assigned",
+                )}
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {value
+                  .slice(0, MAX_VISIBLE_PROJECT_NAMES)
+                  .map((projectId) => (
+                    <li
+                      key={projectId}
+                      className="flex items-center gap-1.5 text-xs text-foreground"
+                    >
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+                        aria-hidden="true"
+                      />
+                      <span className="truncate">
+                        {projectLabelFor(projectId)}
+                      </span>
+                    </li>
+                  ))}
+                {value.length > MAX_VISIBLE_PROJECT_NAMES && (
+                  // Read-only overflow viewer. The bounded list
+                  // caps visible projects at MAX_VISIBLE_PROJECT_NAMES
+                  // to keep card heights predictable, but the user
+                  // needs a way to see the rest. Clicking the
+                  // "+N more" trigger opens a small popover listing
+                  // every assigned project — read-only on purpose so
+                  // non-managers can still inspect their own (or
+                  // others') full assignment without touching the
+                  // manager-only Edit surface. The trigger is a
+                  // <button> for keyboard activation (Enter / Space)
+                  // and a proper aria-label so screen readers
+                  // announce the project count, not just "+2 more".
+                  <li>
+                    <Popover
+                      open={overflowOpen}
+                      onOpenChange={setOverflowOpen}
+                    >
+                      <PopoverTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={t(
+                            "members.showAllProjectsAria",
+                            `Show all ${value.length} assigned projects`,
+                          )}
+                          className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+                        >
+                          +{value.length - MAX_VISIBLE_PROJECT_NAMES}{" "}
+                          {t("members.moreProjects", "more")}
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="end"
+                        side="top"
+                        sideOffset={6}
+                        className="w-64 p-2"
+                      >
+                        <p className="px-2 pb-2 text-xs font-medium text-muted-foreground">
+                          {t(
+                            "members.allProjectsLabel",
+                            `All assigned projects (${value.length})`,
+                          )}
+                        </p>
+                        {/* Scrollable list — caps at 16rem so a
+                            long roster of projects doesn't push the
+                            popover past the viewport. Keys off the
+                            project's stable id so re-renders don't
+                            re-mount items. */}
+                        <ul
+                          role="list"
+                          className="max-h-64 space-y-1 overflow-y-auto"
+                        >
+                          {value.map((projectId) => (
+                            <li
+                              key={projectId}
+                              className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-foreground"
+                            >
+                              <span
+                                className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+                                aria-hidden="true"
+                              />
+                              <span className="truncate">
+                                {projectLabelFor(projectId)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </PopoverContent>
+                    </Popover>
                   </li>
-                ))}
-              {value.length > MAX_VISIBLE_PROJECT_NAMES && (
-                <li className="text-xs text-muted-foreground">
-                  +{value.length - MAX_VISIBLE_PROJECT_NAMES}{" "}
-                  {t("members.moreProjects", "more")}
-                </li>
-              )}
-            </ul>
+                )}
+              </ul>
+            )}
+          </div>
+          {/* Stats footer. Shows the total assigned-project count
+              for the member so a glance at the roster answers
+              "how loaded is this person?" without opening the
+              detail drawer. Hidden when the workspace has no
+              projects at all (`projectOptions.length === 0`) —
+              otherwise every card would say "0 projects" and the
+              stat would just be noise. `mt-3` overrides the parent
+              `space-y-2` so the separator line gets the breathing
+              room it needs without crowding the list above. Icon +
+              bold `text-foreground` number + muted label matches
+              the ProjectCard footer pattern (ProjectCard.tsx:106)
+              so the per-card footer reads as the same vocabulary
+              on every card surface in the app. */}
+          {projectOptions.length > 0 && (
+            <div className="mt-3 flex items-center gap-3 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <FolderKanban
+                  className="h-3.5 w-3.5 shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="font-semibold text-foreground tabular-nums">
+                  {value.length}
+                </span>
+                {value.length === 1
+                  ? t("members.projectCountOne", "project")
+                  : t("members.projectCountMany", "projects")}
+              </span>
+            </div>
           )}
         </div>
       </CardContent>

@@ -50,6 +50,7 @@ import {
   useIssueTrackerTargets,
   useProjects,
   useRenameChatSession,
+  useUserAiConfig,
   useUpdateFeature,
   useUpdateFlow,
   useUpdateIssue,
@@ -279,6 +280,10 @@ export function useIssueTracker() {
   const targetsQuery = useIssueTrackerTargets();
   const secretsQuery = useIssueTrackerSecrets();
   const issuesQuery = useIssueTrackerIssues();
+  // User's saved AI gateway overrides (URL / model / token) — read once
+  // here so the chat request below can attach them as `x-ai-gateway-*`
+  // headers. Empty fields fall through to the proxy's .env defaults.
+  const aiConfigQuery = useUserAiConfig();
   // Projects come from the same Blocks layer the Projects page uses — the
   // chatbot can create/edit/delete projects, and its CURRENT STATE snapshot
   // needs the real ids so "rename Blocks-Logic" resolves against state
@@ -1592,6 +1597,15 @@ export function useIssueTracker() {
             setAiRetryStatus(
               `AI gateway hiccup — retrying request… (attempt ${attempt} of ${maxAttempts})`,
             ),
+          // Per-request overrides from the user's saved UserAiConfig row.
+          // Empty strings mean "no override" — server falls back to .env.
+          // `gatewayProvider` selects anthropic vs openai on the proxy; an
+          // older row without a `provider` field falls through to
+          // "anthropic" via `toUserAiConfig`.
+          gatewayProvider: aiConfigQuery.data?.provider ?? "anthropic",
+          gatewayUrl: aiConfigQuery.data?.gatewayUrl ?? "",
+          gatewayModel: aiConfigQuery.data?.model ?? "",
+          gatewayToken: aiConfigQuery.data?.token ?? "",
         },
       );
       setAiRetryStatus(null);

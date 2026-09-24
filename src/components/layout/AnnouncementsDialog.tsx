@@ -1,22 +1,22 @@
-// Announcement broadcast modal — opened from the topbar speaker
-// button. Renders the same `<AnnouncementsPanel>` content as the
-// dashboard's inline section but inside a Radix Dialog with a fixed
-// title and a scrolling body. The panel is rendered with
-// `expandedByDefault={true}` so opening the modal always reveals
-// the full history; the "Show N more" toggle stays hidden because
-// every row is already visible.
+// Announcement broadcast modal — opened from the dashboard's top-right
+// "Announcements" pill. Renders the same `<AnnouncementsPanel>` content
+// as the dashboard's inline section but inside a Radix Dialog with a
+// fixed title and a scrolling body. The panel is rendered with
+// `expandedByDefault={true}` so opening the modal always reveals the
+// full history; the "Show N more" toggle stays hidden because every
+// row is already visible.
 //
-// Top-sheet animation:
+// Right-drawer animation:
 // The base `DialogContent` wrapper (in `@/components/ui/dialog`) is
 // wired with `data-[state=open]:zoom-in-95` + `data-[state=open]:fade-in-0`
 // for a centred-card open. Those classes set `animation-name`, which
-// collides with our `dialog-from-top` keyframe — in the CSS cascade
+// collides with our `dialog-from-right` keyframe — in the CSS cascade
 // the centred zoom wins (or interpolates against the slide), so the
-// modal looked like it slid in from the side instead of sliding
-// straight down from above. To win cleanly we bypass the wrapper and
-// mount `DialogPrimitive.Content` ourselves with only the slide
-// animations, plus a static `top: 0` to pin the resting position to
-// the viewport edge.
+// modal looked like it slid in from the centre instead of from the
+// right edge. To win cleanly we bypass the wrapper and mount
+// `DialogPrimitive.Content` ourselves with only the slide animations,
+// plus a static `right: 0` to pin the resting position to the viewport
+// edge.
 //
 // Usage:
 //
@@ -89,26 +89,41 @@ export function AnnouncementsDialog({
         />
         <DialogPrimitive.Content
           className={cn(
-            // Position: pin to viewport top, centre horizontally with
-            // `inset-x-0` + `mx-auto` (NOT `left-[50%] translate-x-[-50%]`
-            // — that would fight the keyframe's `transform: translateY()`,
-            // making the modal slide in from the left edge and then snap
-            // to centre when the animation ends). Width is "as wide as
-            // possible, capped at 1600px" so it reads as a top dashboard
-            // strip on ultrawide monitors and as a wide panel on smaller
-            // screens. 90vh keeps the bottom edge clear of the viewport
-            // so the rounded corners actually look like a drawer.
-            "fixed inset-x-0 top-0 z-50 mx-auto grid w-[calc(100vw-2rem)] max-w-[min(1600px,calc(100vw-2rem))]",
-            "max-h-[90vh] gap-0 overflow-hidden border-0 bg-background p-0",
-            "shadow-dialog sm:rounded-b-xl sm:rounded-t-none",
+            // Position: pin to viewport right edge (no `left-[50%]
+            // translate-x-[-50%]` — that would fight the keyframe's
+            // `transform: translateX()`, making the drawer slide in
+            // from the centre and then snap right when the animation
+            // ends). Width is half the viewport horizontally so the
+            // broadcast channel can show the megaphone + content +
+            // Latest pill + Repost/Edit/Hide actions on a single row
+            // without compressing the body copy. `min-w-[20rem]`
+            // keeps the drawer readable on narrow phones (a literal
+            // 50% on a 360px viewport would leave the content
+            // unreadable); `max-w-[48rem]` caps it on ultrawide
+            // monitors so the drawer doesn't swallow the whole screen.
+            "fixed right-0 top-0 bottom-0 z-50 grid w-1/2 min-w-[20rem] max-w-[48rem]",
+            // Drawer chrome. The left edge is a 2px strong border so
+            // it's unambiguously visible against the page background
+            // in both modes (the original `border-border` single-px
+            // edge disappeared on dark surfaces). `shadow-2xl` gives
+            // the drawer decisive elevation above the dimmed overlay.
+            // `rounded-l-2xl` carves a more pronounced curve at the
+            // left corners so the drawer reads as a deliberate
+            // surface rather than a full-bleed overlay pane. The
+            // subtle inset ring (`ring-black/5` light, `ring-white/5`
+            // dark) adds an inner highlight on the rounded corners
+            // without competing with the border.
+            "h-screen gap-0 overflow-hidden border-l-2 border-border-strong bg-background p-0",
+            "shadow-2xl sm:rounded-l-2xl sm:rounded-r-none",
+            "ring-1 ring-inset ring-black/[0.04] dark:ring-white/[0.06]",
             // Slide animations. These are the only animation-name
             // declarations on the element — no `zoom-in-95` /
             // `fade-in-0` to fight them in the cascade. Because the
-            // modal has no other `transform-*` classes (no
-            // translate-x-[-50%]), the keyframe's `transform` is the
-            // sole owner of `transform` for the lifetime of the
-            // animation, so the slide is purely vertical.
-            "data-[state=open]:animate-dialog-from-top data-[state=closed]:animate-dialog-to-top",
+            // modal has no other `transform-*` classes, the keyframe's
+            // `transform` is the sole owner of `transform` for the
+            // lifetime of the animation, so the slide is purely
+            // horizontal.
+            "data-[state=open]:animate-dialog-from-right data-[state=closed]:animate-dialog-to-right",
           )}
         >
           <div className="flex flex-row items-center justify-between space-y-0 border-b border-border px-5 py-4">
@@ -126,12 +141,13 @@ export function AnnouncementsDialog({
               <X className="h-4 w-4" aria-hidden="true" />
             </DialogPrimitive.Close>
           </div>
-          {/* Body scrolls independently so composer stays pinned at the
-              top regardless of how much history is loaded. `min-h-0`
-              on the parent flex keeps the scroll area from overflowing
-              the dialog's max-height. The 64px offset covers the
-              pinned header row. */}
-          <div className="max-h-[calc(90vh-64px)] overflow-y-auto p-0">
+          {/* Body container gives the panel a defined height so its
+              internal flex layout can pin the composer at the top
+              (`shrink-0`) and scroll only the announcement list
+              (`flex-1 overflow-y-auto`). The drawer is full viewport
+              height (100vh), so this region fills the remaining
+              100vh - 64px after the pinned header row. */}
+          <div className="h-[calc(100vh-64px)] p-0">
             <AnnouncementsPanel expandedByDefault />
           </div>
         </DialogPrimitive.Content>

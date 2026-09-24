@@ -4,7 +4,9 @@ import {
   Bug,
   FolderKanban,
   GitBranch,
+  FlaskConical,
   ListChecks,
+  Megaphone,
   Users,
   ArrowRight,
 } from "lucide-react";
@@ -21,10 +23,13 @@ import { EnvChip } from "@/components/ui/env-chip";
 import { StatCard } from "@/components/ui/stat-card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Separator } from "@/components/ui/separator";
+import { AnnouncementsDialog } from "@/components/layout/AnnouncementsDialog";
+import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
 import {
   useProjects,
   useRecentFeatures,
   useWorkspaceTotals,
+  useAnnouncementsAutoOpen,
 } from "@/lib/blocks/hooks";
 import { useAllJoinedUsers } from "@/lib/blocks/users";
 import { useLocale, useT } from "@/lib/blocks/i18n";
@@ -34,14 +39,15 @@ import { cn } from "@/lib/utils";
  * Dashboard — see DESIGN-APP-v1.md §6.2.
  *
  * Layout (single column):
- *   1. Hero row: greeting + date
+ *   1. Hero row: greeting + date on the left, Megaphone icon in the
+ *      top-right corner that opens the announcements broadcast modal
+ *      (same `AnnouncementsDialog` mounted from the topbar speaker
+ *      trigger — same shared React Query, single source of truth).
  *   2. Metrics row: 4 StatCards (Projects, Features, Flows, Members)
  *   3. Recent projects (grid) + Recent features (compact list, equal width)
  *
- * The manager broadcast was previously a pinned AnnouncementsSection at
- * the top. It now lives behind the speaker-icon trigger in the topbar
- * (see `AnnouncementsDialog`), so the dashboard itself stays a calm
- * summary surface instead of competing with broadcast content.
+ * The dashboard stays a calm read-only summary; the icon trigger is
+ * the dedicated surface for broadcast content.
  *
  * The Verification activity card was removed — it was a placeholder
  * showing "No verification runs yet" + an Idle chip + a duplicate
@@ -57,6 +63,15 @@ export function DashboardPage() {
   const recentFeaturesQuery = useRecentFeatures(5);
   const t = useT();
   const { formatRelativeTime } = useLocale();
+
+  // Auto-open the announcements modal on a new broadcast. Lives here
+  // (and not in the Topbar, which used to own it) because the
+  // pill button on this page is now the canonical entry point for
+  // the broadcast channel. Sharing the hook keeps the "fresh arrival
+  // pops the dialog" behaviour intact without forcing the user to
+  // hunt for the trigger somewhere else on the dashboard.
+  const [announcementsOpen, setAnnouncementsOpen] =
+    useAnnouncementsAutoOpen();
 
   const projects = projectsQuery.data ?? [];
   const members = useAllJoinedUsers().data ?? [];
@@ -99,26 +114,85 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      {/* Hero row — greeting + date only. The two CTAs (Start
-          verification / View projects) used to live here; per feedback
-          they made the dashboard feel like a landing page competing
-          with the sidebar. The sidebar's primary nav already exposes
-          both surfaces, so the hero stays a calm read-only summary. */}
+      {/* Hero row — greeting + date on the left, larger "Announcements"
+          pill button pinned to the top-right corner. Sized to match the
+          hero headline visually so the icon+label reads as a deliberate
+          affordance rather than a utility chip. Opens the same
+          `AnnouncementsDialog` mounted from the topbar speaker trigger
+          — React Query keeps the dataset in lockstep across both
+          entry points. */}
       <section aria-labelledby="dashboard-hero-heading">
-        <div className="space-y-1">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            {today}
-          </p>
-          <h1
-            id="dashboard-hero-heading"
-            className="text-3xl font-semibold tracking-tight text-foreground"
-          >
-            {currentUser
-              ? t("dashboard.welcome", "Welcome back, {name}.", {
-                  name: currentUser.name,
-                })
-              : t("dashboard.welcomeFallback", "Welcome back.")}
-          </h1>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 space-y-1">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {today}
+            </p>
+            <h1
+              id="dashboard-hero-heading"
+              className="text-3xl font-semibold tracking-tight text-foreground"
+            >
+              {currentUser
+                ? t("dashboard.welcome", "Welcome back, {name}.", {
+                    name: currentUser.name,
+                  })
+                : t("dashboard.welcomeFallback", "Welcome back.")}
+            </h1>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Test button — opens the permission-card confirmation
+                modal. Sized to match the Announcements pill (same
+                `h-11`, same border treatment) so the two read as a
+                paired row of utility affordances. The icon (`FlaskConical`)
+                echoes the test/QA semantic of the trigger. */}
+            <TestConfirmationDialog>
+              <button
+                type="button"
+                aria-label={t("dashboard.testButton", "Test")}
+                title={t("dashboard.testButton", "Test")}
+                className={cn(
+                  // Amber treatment mirrors the deployment-notice
+                  // modal the button opens — the pill visually
+                  // previews the card it will reveal. Solid per-mode
+                  // backgrounds (instead of low-opacity washes) keep
+                  // the affordance legible in both themes, and the
+                  // saturated amber border gives the button a
+                  // deliberate edge against the neighbouring
+                  // Announcements pill (which keeps the primary
+                  // tint).
+                  "inline-flex h-11 items-center gap-2 rounded-md border px-4 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2",
+                  "border-amber-500/40 bg-amber-500/10 text-amber-900 hover:bg-amber-500/15 focus-visible:ring-amber-500/60",
+                  "dark:border-amber-500/50 dark:bg-amber-500/15 dark:text-amber-100 dark:hover:bg-amber-500/25 dark:focus-visible:ring-amber-500/70",
+                )}
+              >
+                <FlaskConical
+                  className="h-5 w-5 text-amber-700 dark:text-amber-400"
+                  aria-hidden="true"
+                />
+                <span>{t("dashboard.testButton", "Test")}</span>
+              </button>
+            </TestConfirmationDialog>
+
+            <AnnouncementsDialog
+              open={announcementsOpen}
+              onOpenChange={setAnnouncementsOpen}
+            >
+              <button
+                type="button"
+                aria-label={t(
+                  "announcements.openModal",
+                  "Open announcements",
+                )}
+                title={t("announcements.openModal", "Open announcements")}
+                className="inline-flex h-11 shrink-0 items-center gap-2 rounded-md border border-border bg-card px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Megaphone
+                  className="h-5 w-5 text-primary -rotate-30 -scale-x-100"
+                  aria-hidden="true"
+                />
+                <span>{t("announcements.title", "Announcements")}</span>
+              </button>
+            </AnnouncementsDialog>
+          </div>
         </div>
       </section>
 
