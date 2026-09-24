@@ -1,5 +1,5 @@
-import { Link, useNavigate } from "react-router-dom";
-import { LogOut, User as UserIcon, Megaphone } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { LogOut, User as UserIcon } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import {
   DropdownMenu,
@@ -12,25 +12,13 @@ import {
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/hooks/useAuth";
-import { useT } from "@/lib/blocks/i18n";
-import { useAnnouncementsAutoOpen } from "@/lib/blocks/hooks";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { NotificationBell } from "./NotificationBell";
 import { ThemeToggler } from "./ThemeToggler";
-import { AnnouncementsDialog } from "./AnnouncementsDialog";
 
 export function Topbar() {
   const { currentUser, logout } = useAuth();
-  const t = useT();
   const navigate = useNavigate();
-
-  // Auto-open the announcements modal whenever a new broadcast lands
-  // (excludes the poster's own posts + the initial-load snapshot).
-  // Returns `[open, setOpen]` so the speaker-icon trigger can still
-  // toggle the same dialog — opening/closing shares one piece of
-  // state.
-  const [announcementsOpen, setAnnouncementsOpen] =
-    useAnnouncementsAutoOpen();
 
   if (!currentUser) return null;
 
@@ -64,32 +52,11 @@ export function Topbar() {
       {/* Right: utility icons + profile avatar */}
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-0.5">
-          {/* Announcements modal — opening the same broadcast list the
-              Dashboard section shows, but as a full-archive modal.
-              The speaker-icon trigger matches the icon the user asked
-              for (left-facing Volume2). Controlled via
-              `announcementsOpen` so the auto-open hook can pop it
-              when a new arrival is detected without forcing the
-              user away from the dashboard otherwise. */}
-          <AnnouncementsDialog
-            open={announcementsOpen}
-            onOpenChange={setAnnouncementsOpen}
-          >
-            <button
-              type="button"
-              aria-label={t(
-                "announcements.openModal",
-                "Open announcements",
-              )}
-              title={t("announcements.openModal", "Open announcements")}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <Megaphone
-                className="h-4 w-4 -rotate-30 -scale-x-100"
-                aria-hidden="true"
-              />
-            </button>
-          </AnnouncementsDialog>
+          {/* Announcements broadcast entry moved to the Dashboard's
+              top-right pill (see `DashboardPage`). The topbar keeps
+              the rest of the utility chrome — language, notifications,
+              theme — and intentionally drops the speaker icon to avoid
+              two entry points for the same surface. */}
           <LanguageSwitcher />
           <NotificationBell />
           <ThemeToggler />

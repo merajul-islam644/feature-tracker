@@ -65,40 +65,183 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 import fs from "fs";
+function createAnthropicChatProvider() {
+    return {
+        id: "anthropic",
+        isConfigured: function (_a) {
+            var url = _a.url, token = _a.token;
+            return url.length > 0 && token.length > 0;
+        },
+        notConfiguredMessage: function () {
+            return "AI gateway is not configured. Open Settings → AI Gateway and pick a provider, then enter the URL and token.";
+        },
+        sendChat: function (cfg, body, signal) {
+            return __awaiter(this, void 0, void 0, function () {
+                var upstream, text;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0: return [4 /*yield*/, fetch("".concat(cfg.url.replace(/\/+$/, ""), "/v1/messages"), {
+                                method: "POST",
+                                headers: {
+                                    "content-type": "application/json",
+                                    authorization: "Bearer ".concat(cfg.token),
+                                    "anthropic-version": "2023-06-01",
+                                },
+                                body: JSON.stringify(body),
+                                signal: signal,
+                            })];
+                        case 1:
+                            upstream = _a.sent();
+                            if (!!upstream.ok) return [3 /*break*/, 3];
+                            return [4 /*yield*/, upstream.text()];
+                        case 2:
+                            text = _a.sent();
+                            throw new Error("upstream_".concat(upstream.status, ": ").concat(text.slice(0, 500)));
+                        case 3: return [4 /*yield*/, upstream.json()];
+                        case 4: return [2 /*return*/, (_a.sent())];
+                    }
+                });
+            });
+        },
+    };
+}
+function createOpenAIChatProvider() {
+    return {
+        id: "openai",
+        isConfigured: function (_a) {
+            var url = _a.url, token = _a.token;
+            return url.length > 0 && token.length > 0;
+        },
+        notConfiguredMessage: function () {
+            return "OpenAI provider is not configured. Open Settings → AI Gateway, pick OpenAI, and enter the Base URL + API key.";
+        },
+        sendChat: function (cfg, body, signal) {
+            return __awaiter(this, void 0, void 0, function () {
+                var openaiMessages, openaiTools, upstream, text_1, json, choice, content, text, _i, _a, tc, input, parsed, stopReason;
+                var _b, _c, _d, _e, _f, _g;
+                return __generator(this, function (_h) {
+                    switch (_h.label) {
+                        case 0:
+                            openaiMessages = body.system
+                                ? __spreadArray([{ role: "system", content: body.system }], body.messages, true) : __spreadArray([], body.messages, true);
+                            openaiTools = (_b = body.tools) === null || _b === void 0 ? void 0 : _b.map(function (t) {
+                                var _a;
+                                return ({
+                                    type: "function",
+                                    function: {
+                                        name: t.name,
+                                        description: (_a = t.description) !== null && _a !== void 0 ? _a : "",
+                                        parameters: t.input_schema,
+                                    },
+                                });
+                            });
+                            return [4 /*yield*/, fetch("".concat(cfg.url.replace(/\/+$/, ""), "/v1/chat/completions"), {
+                                    method: "POST",
+                                    headers: {
+                                        "content-type": "application/json",
+                                        authorization: "Bearer ".concat(cfg.token),
+                                    },
+                                    body: JSON.stringify(__assign({ model: cfg.model, max_tokens: body.max_tokens, messages: openaiMessages }, (openaiTools ? { tools: openaiTools } : {}))),
+                                    signal: signal,
+                                })];
+                        case 1:
+                            upstream = _h.sent();
+                            if (!!upstream.ok) return [3 /*break*/, 3];
+                            return [4 /*yield*/, upstream.text()];
+                        case 2:
+                            text_1 = _h.sent();
+                            throw new Error("upstream_".concat(upstream.status, ": ").concat(text_1.slice(0, 500)));
+                        case 3: return [4 /*yield*/, upstream.json()];
+                        case 4:
+                            json = (_h.sent());
+                            choice = (_c = json.choices) === null || _c === void 0 ? void 0 : _c[0];
+                            content = [];
+                            text = (_d = choice === null || choice === void 0 ? void 0 : choice.message) === null || _d === void 0 ? void 0 : _d.content;
+                            if (typeof text === "string" && text.length > 0) {
+                                content.push({ type: "text", text: text });
+                            }
+                            for (_i = 0, _a = (_f = (_e = choice === null || choice === void 0 ? void 0 : choice.message) === null || _e === void 0 ? void 0 : _e.tool_calls) !== null && _f !== void 0 ? _f : []; _i < _a.length; _i++) {
+                                tc = _a[_i];
+                                input = {};
+                                try {
+                                    parsed = JSON.parse(tc.function.arguments);
+                                    if (parsed && typeof parsed === "object") {
+                                        input = parsed;
+                                    }
+                                }
+                                catch (_j) {
+                                    input = {};
+                                }
+                                content.push({
+                                    type: "tool_use",
+                                    id: tc.id,
+                                    name: tc.function.name,
+                                    input: input,
+                                });
+                            }
+                            stopReason = (choice === null || choice === void 0 ? void 0 : choice.finish_reason) === "tool_calls"
+                                ? "tool_use"
+                                : (choice === null || choice === void 0 ? void 0 : choice.finish_reason) === "length"
+                                    ? "max_tokens"
+                                    : "end_turn";
+                            return [2 /*return*/, {
+                                    id: "chatcmpl-".concat(Date.now()),
+                                    type: "message",
+                                    role: "assistant",
+                                    model: (_g = json.model) !== null && _g !== void 0 ? _g : cfg.model,
+                                    content: content,
+                                    stop_reason: stopReason,
+                                }];
+                    }
+                });
+            });
+        },
+    };
+}
+var CHAT_PROVIDERS = {
+    anthropic: createAnthropicChatProvider,
+    openai: createOpenAIChatProvider,
+};
+function getChatProvider(id) {
+    var factory = CHAT_PROVIDERS[id];
+    if (factory)
+        return factory();
+    // Unknown / missing → default to anthropic. Matches the migration
+    // choice: rows saved before the provider column existed (no header)
+    // keep routing through the Anthropic provider until the user opens
+    // Settings and picks OpenAI.
+    return createAnthropicChatProvider();
+}
 // Server-side proxy for the Issue Tracker AI Assistant. The browser posts to
-// `/api/ai/chat` on the Vite dev server; this middleware forwards to the
-// upstream gateway at `${AI_GATEWAY_URL}/v1/messages`, attaching the bearer
-// token from server-side env vars. The token is intentionally NEVER prefixed
-// with `VITE_` so it cannot be imported by the client bundle — only the Vite
-// Node process reads it.
+// `/api/ai/chat` on the Vite dev server; this middleware reads the
+// per-user gateway config off `x-ai-gateway-{url,token,model}` and the
+// provider id off `x-ai-chat-provider` (default "anthropic"), then asks
+// `getChatProvider(providerId).sendChat(...)` to handle the upstream call
+// and return Anthropic-format JSON. The Settings page is the SOLE source
+// of truth for these values — see `src/pages/SettingsPage.tsx →
+// AiGatewayConfigSection`.
 //
-// Falls back to the `ANTHROPIC_*` aliases (`ANTHROPIC_BASE_URL`,
-// `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`) when the canonical names are
-// unset, so `setx ANTHROPIC_AUTH_TOKEN "..."` on Windows Just Works.
-//
-// `env` is the loadEnv() record built in defineConfig — it merges .env file
-// values with the shell's process.env (process.env wins), so the server
-// picks up AI_GATEWAY_MODEL etc. from .env without the shell exporting them.
-// Without this, a dev server started from a shell without these vars fell
-// back to the default model and the gateway routed it to the wrong
-// (quota-exhausted) model group.
-function aiChatProxy(env) {
-    var _a, _b, _c, _d, _e, _f;
-    var gatewayUrl = (_b = (_a = env.AI_GATEWAY_URL) !== null && _a !== void 0 ? _a : env.ANTHROPIC_BASE_URL) !== null && _b !== void 0 ? _b : "";
-    var token = (_d = (_c = env.AI_GATEWAY_TOKEN) !== null && _c !== void 0 ? _c : env.ANTHROPIC_AUTH_TOKEN) !== null && _d !== void 0 ? _d : "";
-    var model = (_f = (_e = env.AI_GATEWAY_MODEL) !== null && _e !== void 0 ? _e : env.ANTHROPIC_MODEL) !== null && _f !== void 0 ? _f : "claude-sonnet-4-5";
+// `env` is no longer consulted at runtime (the build-time param is kept
+// so the call site stays unchanged). Add a new provider by writing a
+// `createXxxChatProvider` factory above and adding it to `CHAT_PROVIDERS`.
+function aiChatProxy(_env) {
+    // The Settings page is the SOLE source of truth for AI gateway config —
+    // there is intentionally no .env fallback. Each user saves their own
+    // URL / model / token in Blocks Data; the SPA attaches them as
+    // `x-ai-gateway-*` headers on every chat request. If a request arrives
+    // without those headers, we 503 with `ai_not_configured` — the chat
+    // panel surfaces that as "open Settings and fill in the form".
     return {
         name: "feature-tracker:ai-chat-proxy",
         apply: "serve",
         configureServer: function (server) {
             var _this = this;
             server.middlewares.use("/api/ai/chat", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var chunks, chunk, e_1_1, raw, parsed, userText, systemPrompt, tools, history_1, upstreamUrl, upstream, upstreamText, err_1;
+                var headerValue, providerId, cfg, provider, abort, disconnected, chunks, chunk, e_1_1, raw, parsed, userText, systemPrompt, tools, history_1, response, err_1;
                 var _a, req_1, req_1_1;
                 var _b, e_1, _c, _d;
-                var _e;
-                return __generator(this, function (_f) {
-                    switch (_f.label) {
+                return __generator(this, function (_e) {
+                    switch (_e.label) {
                         case 0:
                             if (req.method !== "POST") {
                                 res.statusCode = 405;
@@ -106,47 +249,64 @@ function aiChatProxy(env) {
                                 res.end(JSON.stringify({ error: "method_not_allowed" }));
                                 return [2 /*return*/];
                             }
-                            if (!gatewayUrl || !token) {
+                            headerValue = function (name) {
+                                var v = req.headers[name];
+                                return typeof v === "string" ? v.trim() : "";
+                            };
+                            providerId = headerValue("x-ai-chat-provider") || "anthropic";
+                            cfg = {
+                                url: headerValue("x-ai-gateway-url"),
+                                token: headerValue("x-ai-gateway-token"),
+                                model: headerValue("x-ai-gateway-model") || "claude-sonnet-4-5",
+                            };
+                            provider = getChatProvider(providerId);
+                            if (!provider.isConfigured(cfg)) {
                                 res.statusCode = 503;
                                 res.setHeader("content-type", "application/json");
                                 res.end(JSON.stringify({
                                     error: "ai_not_configured",
-                                    message: "AI_GATEWAY_URL (or ANTHROPIC_BASE_URL) and AI_GATEWAY_TOKEN (or ANTHROPIC_AUTH_TOKEN) must be set on the Vite server process.",
+                                    message: provider.notConfiguredMessage(),
                                 }));
                                 return [2 /*return*/];
                             }
-                            _f.label = 1;
+                            abort = new AbortController();
+                            disconnected = false;
+                            req.on("close", function () {
+                                disconnected = true;
+                                abort.abort();
+                            });
+                            _e.label = 1;
                         case 1:
-                            _f.trys.push([1, 16, , 17]);
+                            _e.trys.push([1, 15, , 16]);
                             chunks = [];
-                            _f.label = 2;
+                            _e.label = 2;
                         case 2:
-                            _f.trys.push([2, 7, 8, 13]);
+                            _e.trys.push([2, 7, 8, 13]);
                             _a = true, req_1 = __asyncValues(req);
-                            _f.label = 3;
+                            _e.label = 3;
                         case 3: return [4 /*yield*/, req_1.next()];
                         case 4:
-                            if (!(req_1_1 = _f.sent(), _b = req_1_1.done, !_b)) return [3 /*break*/, 6];
+                            if (!(req_1_1 = _e.sent(), _b = req_1_1.done, !_b)) return [3 /*break*/, 6];
                             _d = req_1_1.value;
                             _a = false;
                             chunk = _d;
                             chunks.push(chunk);
-                            _f.label = 5;
+                            _e.label = 5;
                         case 5:
                             _a = true;
                             return [3 /*break*/, 3];
                         case 6: return [3 /*break*/, 13];
                         case 7:
-                            e_1_1 = _f.sent();
+                            e_1_1 = _e.sent();
                             e_1 = { error: e_1_1 };
                             return [3 /*break*/, 13];
                         case 8:
-                            _f.trys.push([8, , 11, 12]);
+                            _e.trys.push([8, , 11, 12]);
                             if (!(!_a && !_b && (_c = req_1.return))) return [3 /*break*/, 10];
                             return [4 /*yield*/, _c.call(req_1)];
                         case 9:
-                            _f.sent();
-                            _f.label = 10;
+                            _e.sent();
+                            _e.label = 10;
                         case 10: return [3 /*break*/, 12];
                         case 11:
                             if (e_1) throw e_1.error;
@@ -176,39 +336,36 @@ function aiChatProxy(env) {
                                     content: m.content.slice(0, 2000),
                                 }); })
                                 : [];
-                            upstreamUrl = gatewayUrl.replace(/\/+$/, "") + "/v1/messages";
-                            return [4 /*yield*/, fetch(upstreamUrl, {
-                                    method: "POST",
-                                    headers: {
-                                        "content-type": "application/json",
-                                        authorization: "Bearer ".concat(token),
-                                        "anthropic-version": "2023-06-01",
-                                    },
-                                    body: JSON.stringify(__assign({ model: model, 
-                                        // 4096 — agentic browser walkthroughs end with a long
-                                        // evidence report (findings tables + next-step narration),
-                                        // which overflowed the older 2048 cap mid-sentence.
-                                        max_tokens: 4096, system: systemPrompt, messages: __spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false) }, (tools ? { tools: tools } : {}))),
-                                })];
+                            return [4 /*yield*/, provider.sendChat(cfg, __assign({ model: cfg.model, 
+                                    // 4096 — agentic browser walkthroughs end with a long
+                                    // evidence report (findings tables + next-step narration),
+                                    // which overflowed the older 2048 cap mid-sentence.
+                                    max_tokens: 4096, system: systemPrompt, messages: __spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false) }, (tools ? { tools: tools } : {})), abort.signal)];
                         case 14:
-                            upstream = _f.sent();
-                            return [4 /*yield*/, upstream.text()];
+                            response = _e.sent();
+                            if (disconnected || abort.signal.aborted) {
+                                // Browser went away mid-call; nothing to send back.
+                                res.end();
+                                return [2 /*return*/];
+                            }
+                            res.statusCode = 200;
+                            res.setHeader("content-type", "application/json");
+                            res.end(JSON.stringify(response));
+                            return [3 /*break*/, 16];
                         case 15:
-                            upstreamText = _f.sent();
-                            res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_e = upstream.headers.get("content-type")) !== null && _e !== void 0 ? _e : "application/json");
-                            res.end(upstreamText);
-                            return [3 /*break*/, 17];
-                        case 16:
-                            err_1 = _f.sent();
+                            err_1 = _e.sent();
+                            if (disconnected || abort.signal.aborted) {
+                                res.end();
+                                return [2 /*return*/];
+                            }
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
                                 message: err_1 instanceof Error ? err_1.message : String(err_1),
                             }));
-                            return [3 /*break*/, 17];
-                        case 17: return [2 /*return*/];
+                            return [3 /*break*/, 16];
+                        case 16: return [2 /*return*/];
                     }
                 });
             }); });
@@ -847,6 +1004,561 @@ function readBody(req) {
         req.on("error", function () { return resolve(""); });
     });
 }
+// ── Replicate ───────────────────────────────────────────────────────────────
+function createReplicateProvider(env) {
+    var _a, _b, _c;
+    var token = (_a = env.REPLICATE_API_TOKEN) !== null && _a !== void 0 ? _a : "";
+    var model = (_b = env.REPLICATE_AVATAR_MODEL) !== null && _b !== void 0 ? _b : "fofr/face-to-many";
+    var explicitVersion = (_c = env.REPLICATE_AVATAR_MODEL_VERSION) !== null && _c !== void 0 ? _c : "";
+    // Resolve the model's latest version lazily + cache it. Replicate's
+    // create-prediction API rejects bare model names with `422 — version is
+    // required` — `version` (or `model:hash`) is mandatory. The model owner
+    // bumping the version is rare; a slightly stale hash is acceptable.
+    var resolvedVersion = null;
+    var resolveAttempted = false;
+    function resolveLatestVersion(useToken) {
+        return __awaiter(this, void 0, void 0, function () {
+            var _a, owner, name, res, data, id, _b;
+            var _c;
+            return __generator(this, function (_d) {
+                switch (_d.label) {
+                    case 0:
+                        if (resolvedVersion || resolveAttempted)
+                            return [2 /*return*/, resolvedVersion];
+                        resolveAttempted = true;
+                        _a = model.split("/"), owner = _a[0], name = _a[1];
+                        if (!owner || !name)
+                            return [2 /*return*/, null];
+                        _d.label = 1;
+                    case 1:
+                        _d.trys.push([1, 4, , 5]);
+                        return [4 /*yield*/, fetch("https://api.replicate.com/v1/models/".concat(owner, "/").concat(name), { headers: { authorization: "Token ".concat(useToken) } })];
+                    case 2:
+                        res = _d.sent();
+                        if (!res.ok)
+                            return [2 /*return*/, null];
+                        return [4 /*yield*/, res.json()];
+                    case 3:
+                        data = (_d.sent());
+                        id = (_c = data.latest_version) === null || _c === void 0 ? void 0 : _c.id;
+                        if (typeof id === "string" && id.length > 0) {
+                            resolvedVersion = id;
+                            return [2 /*return*/, id];
+                        }
+                        return [3 /*break*/, 5];
+                    case 4:
+                        _b = _d.sent();
+                        return [3 /*break*/, 5];
+                    case 5: return [2 /*return*/, null];
+                }
+            });
+        });
+    }
+    return {
+        id: "replicate",
+        isConfigured: function () { return token.length > 0; },
+        notConfiguredMessage: function () {
+            return "REPLICATE_API_TOKEN is not set on the Vite server. Set it (and optionally REPLICATE_AVATAR_MODEL / REPLICATE_AVATAR_MODEL_VERSION) to enable AI avatar generation.";
+        },
+        generate: function (req, signal, userOverride) {
+            return __awaiter(this, void 0, void 0, function () {
+                var effectiveToken, effectiveVersion, inputImage, pinnedVersion, _a, createBody, start, create, text, prediction, predictionId, final, poll, output, firstUrl, dl, ab, mime, dataUrl;
+                var _b;
+                return __generator(this, function (_c) {
+                    switch (_c.label) {
+                        case 0:
+                            effectiveToken = (userOverride === null || userOverride === void 0 ? void 0 : userOverride.token) || token;
+                            effectiveVersion = (userOverride === null || userOverride === void 0 ? void 0 : userOverride.modelVersion) || explicitVersion;
+                            if (!effectiveToken) {
+                                throw new Error("Replicate token is missing — set Personal AI key in Settings → Account, or configure REPLICATE_API_TOKEN on the server.");
+                            }
+                            inputImage = req.imageBase64.startsWith("data:")
+                                ? req.imageBase64
+                                : "data:image/jpeg;base64,".concat(req.imageBase64);
+                            _a = effectiveVersion;
+                            if (_a) return [3 /*break*/, 2];
+                            return [4 /*yield*/, resolveLatestVersion(effectiveToken)];
+                        case 1:
+                            _a = (_c.sent());
+                            _c.label = 2;
+                        case 2:
+                            pinnedVersion = _a;
+                            if (!pinnedVersion) {
+                                throw new Error("Could not resolve the Replicate model version. Set REPLICATE_AVATAR_MODEL_VERSION in .env to pin a specific hash, or check the API token / network connectivity.");
+                            }
+                            createBody = {
+                                version: pinnedVersion,
+                                input: {
+                                    image: inputImage,
+                                    style: req.style,
+                                    prompt: "",
+                                    prompt_strength: 0.9,
+                                    number_of_images: 1,
+                                    disable_safety_checker: true,
+                                },
+                            };
+                            start = Date.now();
+                            return [4 /*yield*/, fetch("https://api.replicate.com/v1/predictions", {
+                                    method: "POST",
+                                    headers: {
+                                        "content-type": "application/json",
+                                        authorization: "Token ".concat(effectiveToken),
+                                    },
+                                    body: JSON.stringify(createBody),
+                                })];
+                        case 3:
+                            create = _c.sent();
+                            if (!!create.ok) return [3 /*break*/, 5];
+                            return [4 /*yield*/, create.text()];
+                        case 4:
+                            text = _c.sent();
+                            throw new Error("Replicate create failed: ".concat(text.slice(0, 500)));
+                        case 5: return [4 /*yield*/, create.json()];
+                        case 6:
+                            prediction = (_c.sent());
+                            predictionId = prediction.id;
+                            if (!predictionId) {
+                                throw new Error("Replicate returned no prediction id");
+                            }
+                            final = prediction;
+                            _c.label = 7;
+                        case 7:
+                            if (!true) return [3 /*break*/, 12];
+                            if (signal.aborted) {
+                                fetch("https://api.replicate.com/v1/predictions/".concat(predictionId, "/cancel"), {
+                                    method: "POST",
+                                    headers: { authorization: "Token ".concat(effectiveToken) },
+                                }).catch(function () { });
+                                throw new Error("aborted");
+                            }
+                            if (final.status === "succeeded" ||
+                                final.status === "failed" ||
+                                final.status === "canceled") {
+                                return [3 /*break*/, 12];
+                            }
+                            return [4 /*yield*/, new Promise(function (r) { return setTimeout(r, 2000); })];
+                        case 8:
+                            _c.sent();
+                            return [4 /*yield*/, fetch("https://api.replicate.com/v1/predictions/".concat(predictionId), { headers: { authorization: "Token ".concat(effectiveToken) } })];
+                        case 9:
+                            poll = _c.sent();
+                            if (!poll.ok) return [3 /*break*/, 11];
+                            return [4 /*yield*/, poll.json()];
+                        case 10:
+                            final = (_c.sent());
+                            _c.label = 11;
+                        case 11: return [3 /*break*/, 7];
+                        case 12:
+                            if (final.status !== "succeeded") {
+                                throw new Error(typeof final.error === "string"
+                                    ? final.error
+                                    : "prediction ".concat(final.status));
+                            }
+                            output = final.output;
+                            firstUrl = Array.isArray(output)
+                                ? output.find(function (v) { return typeof v === "string"; })
+                                : typeof output === "string"
+                                    ? output
+                                    : null;
+                            if (!firstUrl)
+                                throw new Error("Replicate returned no output URL");
+                            return [4 /*yield*/, fetch(firstUrl)];
+                        case 13:
+                            dl = _c.sent();
+                            if (!dl.ok) {
+                                throw new Error("Failed to download avatar (".concat(dl.status, ")"));
+                            }
+                            return [4 /*yield*/, dl.arrayBuffer()];
+                        case 14:
+                            ab = _c.sent();
+                            mime = (_b = dl.headers.get("content-type")) !== null && _b !== void 0 ? _b : "image/png";
+                            dataUrl = "data:".concat(mime, ";base64,").concat(Buffer.from(ab).toString("base64"));
+                            return [2 /*return*/, {
+                                    avatarDataUrl: dataUrl,
+                                    contentType: mime,
+                                    durationMs: Date.now() - start,
+                                }];
+                    }
+                });
+            });
+        },
+    };
+}
+// ── Hugging Face Inference router ───────────────────────────────────────────
+//
+// Uses the unified router (`router.huggingface.co`) with an image-to-image
+// model by default. The default model `timbrooks/instruct-pix2pix` is a
+// well-known free option that preserves the input subject's structure
+// while applying a text instruction — perfect for "turn this face into X"
+// style transfers. Override `HF_AVATAR_MODEL` to swap.
+//
+// Style → prompt map is a stand-in for Replicate's built-in style enum:
+// each preset becomes a natural-language instruction. Missing styles fall
+// back to a generic stylization prompt.
+var HF_STYLE_PROMPTS = {
+    "3D": "turn this person into a 3D rendered character",
+    Anime: "turn this person into anime",
+    Cartoon: "turn this person into a cartoon",
+    Emoji: "turn this person into an emoji",
+    "Video game": "turn this person into a video game character",
+    "Pixel art": "convert this person into pixel art",
+    Clay: "make this person look like a clay sculpture",
+    Illustration: "make this person a hand drawn illustration",
+    Toy: "turn this person into a toy figure",
+};
+var HF_DEFAULT_PROMPT = "stylize this person as a creative portrait";
+function createHuggingFaceProvider(env) {
+    var _a, _b;
+    var token = (_a = env.HF_TOKEN) !== null && _a !== void 0 ? _a : "";
+    var model = (_b = env.HF_AVATAR_MODEL) !== null && _b !== void 0 ? _b : "timbrooks/instruct-pix2pix";
+    return {
+        id: "huggingface",
+        isConfigured: function () { return token.length > 0; },
+        notConfiguredMessage: function () {
+            return "HF_TOKEN is not set on the Vite server. Get a free token at https://huggingface.co/settings/tokens (Make calls to Inference Providers permission) and set HF_TOKEN + AI_AVATAR_PROVIDER=huggingface in .env.";
+        },
+        generate: function (req, signal, userOverride) {
+            return __awaiter(this, void 0, void 0, function () {
+                var effectiveToken, prompt, inputImage, start, res, text, ab, mime, text, dataUrl;
+                var _a, _b;
+                return __generator(this, function (_c) {
+                    switch (_c.label) {
+                        case 0:
+                            effectiveToken = (userOverride === null || userOverride === void 0 ? void 0 : userOverride.token) || token;
+                            if (!effectiveToken) {
+                                throw new Error("Hugging Face token is missing — set Personal AI key in Settings → Account, or configure HF_TOKEN on the server.");
+                            }
+                            prompt = (_a = HF_STYLE_PROMPTS[req.style]) !== null && _a !== void 0 ? _a : HF_DEFAULT_PROMPT;
+                            inputImage = req.imageBase64.startsWith("data:")
+                                ? req.imageBase64
+                                : "data:image/jpeg;base64,".concat(req.imageBase64);
+                            start = Date.now();
+                            return [4 /*yield*/, fetch("https://router.huggingface.co/hf-inference/models/".concat(model), {
+                                    method: "POST",
+                                    headers: {
+                                        authorization: "Bearer ".concat(effectiveToken),
+                                        "content-type": "application/json",
+                                    },
+                                    body: JSON.stringify({
+                                        inputs: inputImage,
+                                        parameters: {
+                                            prompt: prompt,
+                                            num_inference_steps: 25,
+                                            image_guidance_scale: 1.5,
+                                        },
+                                    }),
+                                    signal: signal,
+                                })];
+                        case 1:
+                            res = _c.sent();
+                            if (!!res.ok) return [3 /*break*/, 3];
+                            return [4 /*yield*/, res.text()];
+                        case 2:
+                            text = _c.sent();
+                            throw new Error("Hugging Face failed (".concat(res.status, "): ").concat(text.slice(0, 500)));
+                        case 3: return [4 /*yield*/, res.arrayBuffer()];
+                        case 4:
+                            ab = _c.sent();
+                            mime = (_b = res.headers.get("content-type")) !== null && _b !== void 0 ? _b : "image/png";
+                            if (!mime.startsWith("image/")) {
+                                text = Buffer.from(ab).toString("utf8");
+                                throw new Error("Hugging Face returned non-image response: ".concat(text.slice(0, 500)));
+                            }
+                            dataUrl = "data:".concat(mime, ";base64,").concat(Buffer.from(ab).toString("base64"));
+                            return [2 /*return*/, {
+                                    avatarDataUrl: dataUrl,
+                                    contentType: mime,
+                                    durationMs: Date.now() - start,
+                                }];
+                    }
+                });
+            });
+        },
+    };
+}
+// ── Mock provider (no external API) ─────────────────────────────────────────
+//
+// Returns the input image unchanged. Useful for:
+//   - offline development (no API key required),
+//   - UI / wire-shape testing without burning API credits,
+//   - as a placeholder when no real provider is configured.
+//
+// Always "configured" — no credentials to set. Override
+// `AI_AVATAR_PROVIDER=mock` in `.env` to enable.
+function createMockProvider() {
+    return {
+        id: "mock",
+        isConfigured: function () { return true; },
+        notConfiguredMessage: function () {
+            return "Mock provider is always configured — no credentials required.";
+        },
+        generate: function (req, _signal, _userOverride) {
+            return __awaiter(this, void 0, void 0, function () {
+                var inputImage;
+                return __generator(this, function (_a) {
+                    inputImage = req.imageBase64.startsWith("data:")
+                        ? req.imageBase64
+                        : "data:image/jpeg;base64,".concat(req.imageBase64);
+                    return [2 /*return*/, {
+                            avatarDataUrl: inputImage,
+                            contentType: "image/png",
+                            durationMs: 0,
+                        }];
+                });
+            });
+        },
+    };
+}
+// Per-style provider override. Parses `AI_AVATAR_PROVIDER_BY_STYLE` from the
+// env into a `{ style → providerId }` map so the same app can route, say,
+// "Anime" through Hugging Face (free) and "3D" through Replicate (paid).
+//
+// Format: semicolon-separated `Style:providerId` pairs.
+//   AI_AVATAR_PROVIDER_BY_STYLE=Anime:mock;3D:replicate;Emoji:huggingface
+// Whitespace is trimmed; unknown style keys are ignored. A style that's
+// listed here takes precedence over the global `AI_AVATAR_PROVIDER`.
+var AVATAR_PROVIDERS = {
+    replicate: createReplicateProvider,
+    huggingface: createHuggingFaceProvider,
+    mock: createMockProvider,
+};
+function parseStyleProviders(value) {
+    if (!value)
+        return {};
+    var map = {};
+    for (var _i = 0, _a = value.split(/[;,]/); _i < _a.length; _i++) {
+        var pair = _a[_i];
+        var _b = pair.split(":").map(function (s) { var _a; return (_a = s === null || s === void 0 ? void 0 : s.trim()) !== null && _a !== void 0 ? _a : ""; }), k = _b[0], v = _b[1];
+        if (k && v)
+            map[k] = v.toLowerCase();
+    }
+    return map;
+}
+function getAvatarProvider(env, style) {
+    var _this = this;
+    var _a;
+    // Per-style override wins, then global, then default "replicate".
+    var styleOverrides = parseStyleProviders(env.AI_AVATAR_PROVIDER_BY_STYLE);
+    var override = style ? styleOverrides[style] : undefined;
+    var id = ((_a = override !== null && override !== void 0 ? override : env.AI_AVATAR_PROVIDER) !== null && _a !== void 0 ? _a : "replicate").toLowerCase();
+    var factory = AVATAR_PROVIDERS[id];
+    if (!factory) {
+        var known_1 = Object.keys(AVATAR_PROVIDERS).join(", ");
+        return {
+            id: id,
+            isConfigured: function () { return false; },
+            notConfiguredMessage: function () {
+                return "AI_AVATAR_PROVIDER=\"".concat(id, "\" is not recognized. Known providers: ").concat(known_1, ".");
+            },
+            generate: function () { return __awaiter(_this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    throw new Error("Unknown AI avatar provider: ".concat(id));
+                });
+            }); },
+        };
+    }
+    return factory(env);
+}
+// Server-side proxy for the AI avatar generator. The browser POSTs
+// `{ imageBase64, style }` to `/api/ai/avatar`; this middleware dispatches
+// to the provider selected by `AI_AVATAR_PROVIDER` and returns a `data:`
+// URL the client can render in <img src> without a second round-trip.
+//
+// Body cap, timeout, and req-close handling live here (centralized) so
+// every provider gets the same guarantees. Each provider only owns the
+// vendor-specific call shape.
+function aiAvatarProxy(env) {
+    // Provider selection happens per-request inside the middleware so
+    // per-style overrides can route different styles to different upstreams.
+    // `getAvatarProvider` only reads env, which is constant between
+    // requests in dev (and only changes on process restart in prod).
+    return {
+        name: "feature-tracker:ai-avatar-proxy",
+        apply: "serve",
+        configureServer: function (server) {
+            var _this = this;
+            // Body cap. Source photo is 4 MB max at the picker; base64 inflates
+            // to ~5.3 MB on the wire; 6 MB is generous headroom for the form
+            // envelope. Trips early via Content-Length before we start streaming.
+            var AVATAR_MAX_BODY_BYTES = 6 * 1024 * 1024;
+            // Wall-clock timeout. Generous so a single retry's worth of slack
+            // fits before we cancel and (where applicable) bill-stop.
+            var AVATAR_TIMEOUT_MS = 65000;
+            server.middlewares.use("/api/ai/avatar", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
+                var declared, imageBase64, style, chunks, received, chunk, e_4_1, raw, parsed, _a, provider, headerValue, userToken, userModelVersion, abort, timer, disconnected, result, err_9;
+                var _b, req_4, req_4_1;
+                var _c, e_4, _d, _e;
+                var _f;
+                return __generator(this, function (_g) {
+                    switch (_g.label) {
+                        case 0:
+                            if (req.method !== "POST") {
+                                res.statusCode = 405;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({ error: "method_not_allowed" }));
+                                return [2 /*return*/];
+                            }
+                            declared = Number((_f = req.headers["content-length"]) !== null && _f !== void 0 ? _f : 0);
+                            if (declared > AVATAR_MAX_BODY_BYTES) {
+                                res.statusCode = 413;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({ error: "payload_too_large" }));
+                                return [2 /*return*/];
+                            }
+                            imageBase64 = "";
+                            style = "3D";
+                            _g.label = 1;
+                        case 1:
+                            _g.trys.push([1, 14, , 15]);
+                            chunks = [];
+                            received = 0;
+                            _g.label = 2;
+                        case 2:
+                            _g.trys.push([2, 7, 8, 13]);
+                            _b = true, req_4 = __asyncValues(req);
+                            _g.label = 3;
+                        case 3: return [4 /*yield*/, req_4.next()];
+                        case 4:
+                            if (!(req_4_1 = _g.sent(), _c = req_4_1.done, !_c)) return [3 /*break*/, 6];
+                            _e = req_4_1.value;
+                            _b = false;
+                            chunk = _e;
+                            received += chunk.length;
+                            if (received > AVATAR_MAX_BODY_BYTES) {
+                                res.statusCode = 413;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({ error: "payload_too_large" }));
+                                return [2 /*return*/];
+                            }
+                            chunks.push(chunk);
+                            _g.label = 5;
+                        case 5:
+                            _b = true;
+                            return [3 /*break*/, 3];
+                        case 6: return [3 /*break*/, 13];
+                        case 7:
+                            e_4_1 = _g.sent();
+                            e_4 = { error: e_4_1 };
+                            return [3 /*break*/, 13];
+                        case 8:
+                            _g.trys.push([8, , 11, 12]);
+                            if (!(!_b && !_c && (_d = req_4.return))) return [3 /*break*/, 10];
+                            return [4 /*yield*/, _d.call(req_4)];
+                        case 9:
+                            _g.sent();
+                            _g.label = 10;
+                        case 10: return [3 /*break*/, 12];
+                        case 11:
+                            if (e_4) throw e_4.error;
+                            return [7 /*endfinally*/];
+                        case 12: return [7 /*endfinally*/];
+                        case 13:
+                            raw = Buffer.concat(chunks).toString("utf8");
+                            if (raw) {
+                                parsed = JSON.parse(raw);
+                                if (typeof parsed.imageBase64 === "string") {
+                                    imageBase64 = parsed.imageBase64;
+                                }
+                                if (typeof parsed.style === "string") {
+                                    style = parsed.style;
+                                }
+                            }
+                            return [3 /*break*/, 15];
+                        case 14:
+                            _a = _g.sent();
+                            res.statusCode = 400;
+                            res.setHeader("content-type", "application/json");
+                            res.end(JSON.stringify({
+                                error: "bad_request",
+                                message: "Invalid JSON body.",
+                            }));
+                            return [2 /*return*/];
+                        case 15:
+                            if (!imageBase64) {
+                                res.statusCode = 400;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({
+                                    error: "bad_request",
+                                    message: "imageBase64 is required",
+                                }));
+                                return [2 /*return*/];
+                            }
+                            provider = getAvatarProvider(env, style);
+                            headerValue = function (name) {
+                                var v = req.headers[name];
+                                return typeof v === "string" ? v.trim() : "";
+                            };
+                            userToken = headerValue("x-ai-avatar-token");
+                            userModelVersion = headerValue("x-ai-avatar-model");
+                            if (!userToken) {
+                                res.statusCode = 503;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({
+                                    error: "avatar_not_configured",
+                                    message: "Personal AI key is not set. Open Settings → Account → Personal AI Key and add your provider token to enable AI avatar generation.",
+                                }));
+                                return [2 /*return*/];
+                            }
+                            // `provider.isConfigured()` is still checked so a future env-only
+                            // vendor (e.g. a HF-only deployment) can refuse to run when the
+                            // env token is missing — Replicate + HF both honor the override,
+                            // but the underlying model id may be hardcoded for env-only modes.
+                            if (!provider.isConfigured()) {
+                                res.statusCode = 503;
+                                res.setHeader("content-type", "application/json");
+                                res.end(JSON.stringify({
+                                    error: "avatar_not_configured",
+                                    message: provider.notConfiguredMessage(),
+                                }));
+                                return [2 /*return*/];
+                            }
+                            abort = new AbortController();
+                            timer = setTimeout(function () { return abort.abort(); }, AVATAR_TIMEOUT_MS);
+                            disconnected = false;
+                            req.on("close", function () {
+                                disconnected = true;
+                                abort.abort();
+                            });
+                            _g.label = 16;
+                        case 16:
+                            _g.trys.push([16, 18, , 19]);
+                            return [4 /*yield*/, provider.generate({ imageBase64: imageBase64, style: style }, abort.signal, {
+                                    token: userToken,
+                                    modelVersion: userModelVersion || undefined,
+                                })];
+                        case 17:
+                            result = _g.sent();
+                            clearTimeout(timer);
+                            if (disconnected) {
+                                // Browser went away; nothing to send back.
+                                res.end();
+                                return [2 /*return*/];
+                            }
+                            res.statusCode = 200;
+                            res.setHeader("content-type", "application/json");
+                            res.end(JSON.stringify(result));
+                            return [3 /*break*/, 19];
+                        case 18:
+                            err_9 = _g.sent();
+                            clearTimeout(timer);
+                            if (disconnected || abort.signal.aborted) {
+                                res.end();
+                                return [2 /*return*/];
+                            }
+                            res.statusCode = 502;
+                            res.setHeader("content-type", "application/json");
+                            res.end(JSON.stringify({
+                                error: "upstream_failure",
+                                message: err_9 instanceof Error ? err_9.message : String(err_9),
+                            }));
+                            return [3 /*break*/, 19];
+                        case 19: return [2 /*return*/];
+                    }
+                });
+            }); });
+        },
+    };
+}
 export default defineConfig(function (_a) {
     var mode = _a.mode, command = _a.command;
     // Load .env (all vars, not just VITE_* — the prefixes arg "" disables
@@ -866,6 +1578,7 @@ export default defineConfig(function (_a) {
         plugins: [
             react(),
             aiChatProxy(env),
+            aiAvatarProxy(env),
             verifyProxy(env),
             customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
         ],

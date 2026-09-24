@@ -114,15 +114,39 @@ async function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+export interface GenerateAvatarOptions {
+  /**
+   * Per-request credential override from the caller's saved
+   * `UserAvatarConfig` row. Sent as `x-ai-avatar-{provider,token,model}`
+   * headers on `/api/ai/avatar` — the proxy uses them exclusively (no env
+   * fallback). Omit when the user hasn't configured a Personal AI key;
+   * the proxy will 503 and the button stays hidden.
+   */
+  credentials?: {
+    provider: string;
+    token: string;
+    model?: string;
+  };
+}
+
 export async function generateAvatar(
   input: GenerateAvatarInput,
   signal?: AbortSignal,
+  options?: GenerateAvatarOptions,
 ): Promise<GenerateAvatarResult> {
   const resized = await resizeForModel(input.image);
   const imageBase64 = await blobToBase64(resized);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (options?.credentials?.token) {
+    headers["x-ai-avatar-provider"] = options.credentials.provider;
+    headers["x-ai-avatar-token"] = options.credentials.token;
+    if (options.credentials.model) {
+      headers["x-ai-avatar-model"] = options.credentials.model;
+    }
+  }
   const res = await fetch("/api/ai/avatar", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ imageBase64, style: input.style }),
     signal,
   });
@@ -159,19 +183,36 @@ export async function generateAvatar(
 // Capability probe. Pings the proxy with a deliberately-invalid POST
 // (missing `imageBase64`) — a configured proxy returns 400 `bad_request`,
 // an unconfigured proxy returns 503 `avatar_not_configured`. Used by
-// `AIAvatarButton` to decide whether to render at all, so the Settings
-// page stays honest about feature availability on this environment.
-export async function probeAvatarAvailable(): Promise<boolean> {
+// `AIAvatarButton` to decide whether to render at all.
+//
+// When the caller passes `credentials`, the probe sends them along so the
+// middleware's 503 check (user token present?) succeeds and we reach the
+// 400 / payload-validation path. Without credentials the probe will 503
+// and the button stays hidden — matches the new "no env fallback" policy
+// from the Personal AI key migration.
+export async function probeAvatarAvailable(options?: {
+  credentials?: { provider: string; token: string; model?: string };
+}): Promise<boolean> {
   try {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (options?.credentials?.token) {
+      headers["x-ai-avatar-provider"] = options.credentials.provider;
+      headers["x-ai-avatar-token"] = options.credentials.token;
+      if (options.credentials.model) {
+        headers["x-ai-avatar-model"] = options.credentials.model;
+      }
+    }
     const res = await fetch("/api/ai/avatar", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify({}),
     });
     // 400 = wired up (we sent an invalid body, the proxy rejected it
-    // cleanly). 503 = not configured. Any other status is treated as
-    // "available" — the click flow has its own error path for genuine
-    // upstream failures.
+    // cleanly). 503 = not configured (no Personal AI key). Any other
+    // status is treated as "available" — the click flow has its own
+    // error path for genuine upstream failures.
     return res.status === 400;
   } catch {
     // Network error — treat as unavailable so we don't render a button

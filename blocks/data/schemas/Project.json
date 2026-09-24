@@ -1,14 +1,73 @@
 {
-  "schemaName": "Project",
   "collectionName": "blx_Projects",
-  "schemaType": 1,
-  "description": "A workspace that groups related features and flows for one user.",
   "fields": [
-    { "name": "name", "type": "String", "requiredOn": 3, "description": "Display name of the project." },
-    { "name": "description", "type": "String", "requiredOn": 0, "description": "Free-form notes about the project." },
-    { "name": "status", "type": "String", "requiredOn": 3, "description": "Lifecycle status (active/archived)." },
-    { "name": "color", "type": "String", "requiredOn": 0, "description": "Hex color used in the UI." },
-    { "name": "customEnvs", "type": "String", "requiredOn": 0, "description": "JSON-encoded list of {slug, label, color} added per-project beyond the canonical dev/stg/prod/uat envs." },
-    { "name": "envLabelOverrides", "type": "String", "requiredOn": 0, "description": "JSON-encoded map of per-project label overrides for canonical envs (key = canonical slug like \"dev\", value = display label). Custom-env labels are stored in `customEnvs`; canonical-env overrides live here so the slug stays reserved but the visible label can be tailored per project." }
-  ]
+    {
+      "name": "name",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name of the project.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "description",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Free-form notes about the project.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Lifecycle status (active/archived).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "color",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Hex color used in the UI.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "customEnvs",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "JSON-encoded list of {slug, label, color} added per-project beyond the canonical dev/stg/prod/uat envs.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "envLabelOverrides",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "JSON-encoded map of per-project label overrides for canonical envs (key = canonical slug like \"dev\", value = display label). Custom-env labels are stored in `customEnvs`; canonical-env overrides live here so the slug stays reserved but the visible label can be tailored per project.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "Project",
+  "schemaType": 1
 }

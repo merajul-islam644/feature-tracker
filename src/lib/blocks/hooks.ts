@@ -35,6 +35,8 @@ import {
   secretsCollection,
   userProfilesCollection,
   memberProjectsCollection,
+  userAiConfigsCollection,
+  userAvatarConfigsCollection,
   verificationTargetsCollection,
   toAnnouncement,
   toCallSignal,
@@ -46,11 +48,14 @@ import {
   toMemberProjectAssignment,
   toProject,
   toSecret,
+  toUserAiConfig,
+  toUserAvatarConfig,
   toUserProfilePic,
   toVerificationTarget,
   type Announcement,
   type CallSignal,
   type CallSignalIceCandidate,
+  type ChatProviderId,
   type CloudAnnouncement,
   type CloudCallSignal,
   type CloudDirectMessage,
@@ -58,6 +63,8 @@ import {
   type CloudFlow,
   type CloudMemberProject,
   type CloudProject,
+  type CloudUserAiConfig,
+  type CloudUserAvatarConfig,
   type CloudUserProfile,
   type DirectMessage,
   type Feature,
@@ -69,6 +76,8 @@ import {
   type PersistedChatMessage,
   type Project,
   type ProjectCustomEnv,
+  type UserAiConfig,
+  type UserAvatarConfig,
   type UserProfilePic,
 } from "./data";
 import {
@@ -319,6 +328,15 @@ export const queryKeys = {
   // member's row, so any avatar can render); the caller id in the key only
   // keeps one session's cache from bleeding into the next.
   profilePics: (userId: string) => ["profile-pics", userId] as const,
+  // Per-user AI gateway config (URL / model / token) — one row per user,
+  // read+write filtered by the caller's own `userId`. Keyed per-user so a
+  // sign-out / sign-in cycle doesn't bleed one user's overrides into
+  // another's cache.
+  userAiConfig: (userId: string) => ["user-ai-config", userId] as const,
+  // Personal AI key for the AI-generated profile picture flow. Different
+  // cache key from `userAiConfig` so an invalidation of the chat proxy
+  // config never flushes the avatar config (or vice versa).
+  userAvatarConfig: (userId: string) => ["user-avatar-config", userId] as const,
   // Provider-signed download URL for one Blocks Data Storage file. Cached
   // per file id — every UserAvatar showing the same picture shares it.
   fileDownloadUrl: (fileId: string) => ["file-download-url", fileId] as const,
@@ -4612,13 +4630,22 @@ export function useUploadProfilePic(): UseMutationResult<
       });
       await uploadToPresignedUrl(presign.uploadUrl, file, file.type);
 
-      // AI-stamped uploads also persist `source` and `style` on the row
+      // AI-stamped uploads used to persist `source` and `style` on the row
       // so the rest of the app (and any future re-render flows) knows
-      // how the picture was produced. `source` defaults to `"original"`
-      // when omitted — the `toUserProfilePic` adapter applies the same
-      // fallback for legacy rows.
-      const source = aiMeta ? "ai" : "original";
-      const style = aiMeta?.style ?? "";
+      // how the picture was produced. **Temporarily disabled** — the
+      // deployed `UserProfile` schema doesn't include those fields yet,
+      // so sending them in the upsert payload rejects the whole write
+      // (`Field 'source' does not exist on type 'UserProfile'`) and
+      // blocks the upload entirely. Until the schema migration lands,
+      // the file-level `tags: "profile-pic-ai"` marker is the only
+      // signal that an upload was AI-generated; the read-side
+      // `toUserProfilePic` adapter defaults missing fields to
+      // `"original"` / `null` so the existing UI is unaffected.
+      // const source = aiMeta ? "ai" : "original";
+      // const style = aiMeta?.style ?? "";
+      // (re-enable these once the UserProfile schema gains `source` /
+      // `style` columns — the tags: "profile-pic-ai" marker above is the
+      // only signal that survives in the meantime.)
 
       // Upsert the caller's OWN row: find by userId, update if present
       // (full patch — `userId` is requiredOn 3), create otherwise.
@@ -4628,20 +4655,14 @@ export function useUploadProfilePic(): UseMutationResult<
         pageSize: 1,
       });
       const existing = unwrapPaged<CloudUserProfile>(existingRaw).items[0];
+      const baseFields = {
+        userId,
+        imageFileId: presign.fileId,
+      };
       if (existing) {
-        await userProfilesCollection.update(existing.ItemId, {
-          userId,
-          imageFileId: presign.fileId,
-          source,
-          style,
-        });
+        await userProfilesCollection.update(existing.ItemId, baseFields);
       } else {
-        await userProfilesCollection.create({
-          userId,
-          imageFileId: presign.fileId,
-          source,
-          style,
-        });
+        await userProfilesCollection.create(baseFields);
       }
       return { fileId: presign.fileId };
     },
@@ -4652,6 +4673,164 @@ export function useUploadProfilePic(): UseMutationResult<
         queryKey: queryKeys.fileDownloadUrl(fileId),
         queryFn: () => fetchFileDownloadUrl(fileId),
       });
+    },
+  });
+}
+
+// Per-user AI gateway config read. Returns the caller's saved `UserAiConfig`
+// row (gatewayUrl / model / token) or `null` when they haven't saved one —
+// `null` is the signal to the chat call site to skip the override headers
+// and let the proxy fall back to its `.env` defaults. Same filter-by-userId
+// pattern as `useProfilePics`; one row per user by convention.
+export function useUserAiConfig(): UseQueryResult<UserAiConfig | null> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.userAiConfig(userId),
+    enabled: Boolean(userId),
+    // Settings-page config rarely changes; keep it warm across navigations
+    // so a fresh chat session doesn't trigger an extra Blocks round-trip.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const raw = await userAiConfigsCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const row = unwrapPaged<CloudUserAiConfig>(raw).items[0];
+      return row ? toUserAiConfig(row) : null;
+    },
+  });
+}
+
+// Upsert the caller's AI gateway config. Find the existing row by `userId`
+// (the filter the read leg also uses), update if present, create otherwise.
+// `userId` rides along on the update payload because the schema declares it
+// `requiredOn: "Both"`. On success we invalidate the read key so the next
+// chat call site picks up the new values from the cache.
+//
+// `provider` is now part of the payload so the user can pick Anthropic vs
+// OpenAI from the Settings page; older rows without it default to
+// "anthropic" via `toUserAiConfig`.
+export function useSaveUserAiConfig(): UseMutationResult<
+  UserAiConfig,
+  Error,
+  { provider: ChatProviderId; gatewayUrl: string; model: string; token: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) {
+        throw new Error("You must be signed in to save your AI config.");
+      }
+      const listRaw = await userAiConfigsCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudUserAiConfig>(listRaw).items[0];
+      const baseFields = {
+        userId,
+        provider: input.provider,
+        gatewayUrl: input.gatewayUrl,
+        model: input.model,
+        token: input.token,
+      };
+      if (existing) {
+        await userAiConfigsCollection.update(existing.ItemId, baseFields);
+      } else {
+        await userAiConfigsCollection.create(baseFields);
+      }
+      return toUserAiConfig({
+        ...baseFields,
+        ItemId: existing?.ItemId ?? "",
+        CreatedDate: existing?.CreatedDate ?? new Date().toISOString(),
+        LastUpdatedDate: new Date().toISOString(),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.userAiConfig(userId) });
+    },
+  });
+}
+
+// Per-user Personal AI key for the AI-generated profile picture flow.
+// Mirrors `useUserAiConfig` exactly — one row per user, filtered by
+// `currentUser.id`, treated as `null` when unset so the avatar button
+// hides cleanly. Kept as a separate hook + cache key so a chat proxy
+// settings change can never accidentally clear this row.
+export function useUserAvatarConfig(): UseQueryResult<UserAvatarConfig | null> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.userAvatarConfig(userId),
+    enabled: Boolean(userId),
+    // Cache warm across navigations — Settings loads it once, the avatar
+    // probe in `AIAvatarButton` reads the same cached row.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const raw = await userAvatarConfigsCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const row = unwrapPaged<CloudUserAvatarConfig>(raw).items[0];
+      return row ? toUserAvatarConfig(row) : null;
+    },
+  });
+}
+
+// Upsert the caller's Personal AI key. Same shape as `useSaveUserAiConfig`
+// — find by `userId`, update if present, create otherwise. Invalidates
+// only the avatar config key on success so the chat proxy cache is
+// untouched.
+export function useSaveUserAvatarConfig(): UseMutationResult<
+  UserAvatarConfig,
+  Error,
+  {
+    provider: import("./data").AvatarProviderId;
+    token: string;
+    model: string;
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) {
+        throw new Error(
+          "You must be signed in to save your personal AI key.",
+        );
+      }
+      const listRaw = await userAvatarConfigsCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudUserAvatarConfig>(listRaw).items[0];
+      const baseFields = {
+        userId,
+        provider: input.provider,
+        token: input.token,
+        model: input.model,
+      };
+      if (existing) {
+        await userAvatarConfigsCollection.update(existing.ItemId, baseFields);
+      } else {
+        await userAvatarConfigsCollection.create(baseFields);
+      }
+      return toUserAvatarConfig({
+        ...baseFields,
+        ItemId: existing?.ItemId ?? "",
+        CreatedDate: existing?.CreatedDate ?? new Date().toISOString(),
+        LastUpdatedDate: new Date().toISOString(),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.userAvatarConfig(userId) });
     },
   });
 }

@@ -44,6 +44,16 @@ interface AIAvatarPreviewModalProps {
   /** Called when the user clicks "Use this avatar". The parent is
    *  responsible for the actual upload-to-Storage flow. */
   onApprove: (result: GenerateAvatarResult, style: AvatarStyle) => void;
+  /** Per-request credentials from the caller's saved `UserAvatarConfig`
+   *  row. Sent on every `generateAvatar` call as `x-ai-avatar-*` headers.
+   *  The Settings form keeps these in sync, so by the time the modal
+   *  opens they're guaranteed to be present — but the prop is `optional`
+   *  for type safety. */
+  credentials?: {
+    provider: string;
+    token: string;
+    model?: string;
+  };
 }
 
 type GenerationState =
@@ -57,6 +67,7 @@ export function AIAvatarPreviewModal({
   onOpenChange,
   sourceFile,
   onApprove,
+  credentials,
 }: AIAvatarPreviewModalProps) {
   const [style, setStyle] = useState<AvatarStyle>("3D");
   const [state, setState] = useState<GenerationState>({ kind: "idle" });
@@ -114,6 +125,7 @@ export function AIAvatarPreviewModal({
       const result = await generateAvatar(
         { image: sourceFile, style: chosenStyle },
         abort.signal,
+        credentials ? { credentials } : undefined,
       );
       // Guard: another `runGeneration` may have been queued between the
       // `await` resolving and this setState. Only commit if our

@@ -1,19 +1,128 @@
 {
-  "schemaName": "Feature",
   "collectionName": "blx_Features",
-  "schemaType": 1,
-  "description": "Capability within a project. Belongs to exactly one environment (canonical dev/stg/prod/uat, or a per-project custom env). The dev page lands by default; env-scoped reads filter on `envSlug`.",
   "fields": [
-    { "name": "title", "type": "String", "requiredOn": 3, "description": "Short title of the feature." },
-    { "name": "description", "type": "String", "requiredOn": 0, "description": "Long-form description." },
-    { "name": "status", "type": "String", "requiredOn": 3, "description": "backlog/in_progress/done." },
-    { "name": "priority", "type": "String", "requiredOn": 0, "description": "low/medium/high." },
-    { "name": "projectId", "type": "String", "requiredOn": 3, "description": "Owning Project.ItemId." },
-    { "name": "tags", "type": "String", "isArray": true, "requiredOn": 0, "description": "Free-form labels." },
-    { "name": "envSlug", "type": "String", "requiredOn": 0, "description": "Owning environment slug — canonical (dev/stg/prod/uat) or per-project custom env slug. Required for new records (the app layer stamps it on every create); legacy records predating the env-scoped refactor may be empty." },
-    { "name": "clonedFromFeatureId", "type": "String", "requiredOn": 0, "description": "ItemId of the dev feature this record was cloned from. Stamped on insert by useCloneFlow when it auto-creates the destination feature. The cross-env sync feature (delete + rename) looks up sibling features via this field — records with no value are pre-existing clones that don't participate in cascade sync." },
-    { "name": "developerIds", "type": "String", "isArray": true, "requiredOn": 0, "description": "OIDC `sub`s of users assigned to develop this feature. Empty array (or omitted) means unassigned. A feature can be co-developed by any number of developers. Per-env, not propagated to cloned siblings in other envs. Replaces the single-value `developerId` field." },
-    { "name": "qaIds", "type": "String", "isArray": true, "requiredOn": 0, "description": "OIDC `sub`s of users assigned to QA this feature. Empty array (or omitted) means unassigned. A feature can be co-tested by any number of QAs. Per-env, not propagated to cloned siblings in other envs. The QA dropdown is populated from users with the `tester` IAM role. Replaces the single-value `qaId` field." },
-    { "name": "githubLink", "type": "String", "requiredOn": 0, "description": "Optional GitHub URL (issue, PR, or repo path) associated with this feature — e.g. https://github.com/owner/repo/issues/123. Free-form string; no validation enforced at the data layer (UI may prefix `https://` if the user omits the scheme)." }
-  ]
+    {
+      "name": "title",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Short title of the feature.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "description",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Long-form description.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "backlog/in_progress/done.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "priority",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "low/medium/high.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Project.ItemId.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "tags",
+      "type": "String",
+      "isArray": true,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Free-form labels.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "envSlug",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning environment slug — canonical (dev/stg/prod/uat) or per-project custom env slug. Required for new records (the app layer stamps it on every create); legacy records predating the env-scoped refactor may be empty.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "clonedFromFeatureId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ItemId of the dev feature this record was cloned from. Stamped on insert by useCloneFlow when it auto-creates the destination feature. The cross-env sync feature (delete + rename) looks up sibling features via this field — records with no value are pre-existing clones that don't participate in cascade sync.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "developerIds",
+      "type": "String",
+      "isArray": true,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "OIDC `sub`s of users assigned to develop this feature. Empty array (or omitted) means unassigned. A feature can be co-developed by any number of developers. Per-env, not propagated to cloned siblings in other envs. Replaces the single-value `developerId` field.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "qaIds",
+      "type": "String",
+      "isArray": true,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "OIDC `sub`s of users assigned to QA this feature. Empty array (or omitted) means unassigned. A feature can be co-tested by any number of QAs. Per-env, not propagated to cloned siblings in other envs. The QA dropdown is populated from users with the `tester` IAM role. Replaces the single-value `qaId` field.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "githubLink",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Optional GitHub URL (issue, PR, or repo path) associated with this feature — e.g. https://github.com/owner/repo/issues/123. Free-form string; no validation enforced at the data layer (UI may prefix `https://` if the user omits the scheme).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "Feature",
+  "schemaType": 1
 }

@@ -15,7 +15,10 @@ import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/useToast";
 import { useT } from "@/lib/blocks/i18n";
-import { useUploadAiAvatar } from "@/lib/blocks/hooks";
+import {
+  useUploadAiAvatar,
+  useUserAvatarConfig,
+} from "@/lib/blocks/hooks";
 import {
   probeAvatarAvailable,
   type GenerateAvatarResult,
@@ -35,20 +38,31 @@ export function AIAvatarButton() {
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const upload = useUploadAiAvatar();
+  // Personal AI key — lives on the user's `UserAvatarConfig` row. The
+  // button only shows when this is set, and the token is sent on every
+  // `/api/ai/avatar` request as `x-ai-avatar-token`. Completely separate
+  // from `UserAiConfig` (chat proxy) — never mixed.
+  const avatarConfigQuery = useUserAvatarConfig();
 
-  // Probe on mount — single round trip. `available === null` while
+  // Probe on mount + whenever the user's avatar config changes (e.g.
+  // they save a new key on the same page). `available === null` while
   // pending so we render nothing instead of a button that may
   // immediately 503. `available === false` after the probe completes
   // → render nothing permanently.
   useEffect(() => {
     let cancelled = false;
-    void probeAvatarAvailable().then((ok) => {
+    const cfg = avatarConfigQuery.data;
+    const credentials =
+      cfg && cfg.token
+        ? { provider: cfg.provider, token: cfg.token, model: cfg.model }
+        : undefined;
+    void probeAvatarAvailable({ credentials }).then((ok) => {
       if (!cancelled) setAvailable(ok);
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [avatarConfigQuery.data]);
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -138,6 +152,15 @@ export function AIAvatarButton() {
         onOpenChange={setModalOpen}
         sourceFile={sourceFile}
         onApprove={handleApprove}
+        credentials={
+          avatarConfigQuery.data && avatarConfigQuery.data.token
+            ? {
+                provider: avatarConfigQuery.data.provider,
+                token: avatarConfigQuery.data.token,
+                model: avatarConfigQuery.data.model,
+              }
+            : undefined
+        }
       />
     </>
   );

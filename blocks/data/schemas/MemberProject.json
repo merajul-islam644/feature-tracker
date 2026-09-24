@@ -1,11 +1,40 @@
 {
-  "schemaName": "MemberProject",
   "collectionName": "blx_MemberProjects",
-  "schemaType": 1,
-  "description": "Per-member project assignment. One row per user; projectIdsJson is the JSON-encoded list of Project itemIds the member is assigned to. Read by everyone in the workspace; edited only by the manager role from the Members page multi-select. The list-shape-on-the-row follows the same pattern as Issue.assignedDeveloperIdsJson (string-encoded JSON to satisfy the schema's primitive field types).",
   "fields": [
-    { "name": "userId", "type": "String", "requiredOn": 3, "description": "IAM user id this assignment row belongs to. The app layer treats userId as unique — upsert semantics, one row per user." },
-    { "name": "projectIdsJson", "type": "String", "requiredOn": 0, "description": "JSON-encoded string[] of Project itemIds the member is assigned to. '[]' when no projects assigned (an empty list, not a missing field — distinguishes 'cleared' from 'never set')." },
-    { "name": "updatedBy", "type": "String", "requiredOn": 0, "description": "IAM user id of the last manager who edited this row. Audit only; no read-time gate." }
-  ]
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id this assignment row belongs to. The app layer treats userId as unique — upsert semantics, one row per user.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectIdsJson",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "JSON-encoded string[] of Project itemIds the member is assigned to. '[]' when no projects assigned (an empty list, not a missing field — distinguishes 'cleared' from 'never set').",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "updatedBy",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id of the last manager who edited this row. Audit only; no read-time gate.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "MemberProject",
+  "schemaType": 1
 }

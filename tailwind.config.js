@@ -247,6 +247,19 @@ export default {
           from: { opacity: "1", transform: "translateY(0)" },
           to: { opacity: "0", transform: "translateY(-100%)" },
         },
+        // Right-drawer variant — slides the announcements panel in from
+        // off-screen to the right of the viewport and parks at the right
+        // edge. Pairs with `right-0 top-0 bottom-0` + a sidebar-width
+        // max-width on the modal container so the resting position
+        // reads as a sidebar drawer rather than a centered card.
+        "dialog-from-right": {
+          from: { opacity: "0", transform: "translateX(100%)" },
+          to: { opacity: "1", transform: "translateX(0)" },
+        },
+        "dialog-to-right": {
+          from: { opacity: "1", transform: "translateX(0)" },
+          to: { opacity: "0", transform: "translateX(100%)" },
+        },
         "progress-pulse": {
           "0%, 100%": { opacity: "1" },
           "50%": { opacity: "0.65" },
@@ -287,6 +300,8 @@ export default {
         "chat-in": "chat-in 220ms cubic-bezier(0.16, 1, 0.3, 1)",
         "dialog-from-top": "dialog-from-top 280ms cubic-bezier(0.16, 1, 0.3, 1)",
         "dialog-to-top": "dialog-to-top 220ms cubic-bezier(0.4, 0, 1, 1)",
+        "dialog-from-right": "dialog-from-right 280ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "dialog-to-right": "dialog-to-right 220ms cubic-bezier(0.4, 0, 1, 1)",
         "progress-pulse": "progress-pulse 1.8s ease-in-out infinite",
         "rotate-stroke": "rotate-stroke 1.2s linear infinite",
         // 8s — ambient breathing. One beat every 8 seconds; slow

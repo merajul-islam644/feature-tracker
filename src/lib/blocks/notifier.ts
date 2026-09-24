@@ -1,4 +1,6 @@
 // Thin wrapper around `blocksClient.notifier.*` so call-sites stay tidy.
+// Aligned with the `blocks-notifier` skill (`.codex/skills/blocks-notifier/SKILL.md`):
+// every method the skill documents has a corresponding call site here.
 //
 // Two surfaces live here:
 //
@@ -13,21 +15,28 @@
 //      succeed regardless of notification backend health.
 //
 //   2. `useNotificationInbox()` — TanStack Query-backed inbox for the
-//      signed-in user. Replaces the previous zustand mock store with
-//      real `blocksClient.notifier.getNotifications` calls plus the
-//      matching `markNotificationAsRead` / `markAllNotificationAsRead`
-//      mutations. The returned shape mirrors the old store (`items`,
-//      `markRead`, `markAllRead`) so NotificationBell needs only a
-//      small swap.
+//      signed-in user. Uses `blocksClient.notifier.getNotifications`
+//      as the primary path, falls back to
+//      `getUnreadNotificationsBySubscriptionFilter({ orderBy: 1 })`
+//      when List returns an empty `notifications` array but reports a
+//      non-zero `unReadNotificationsCount` (the silent-enumeration
+//      quirk documented in `docs/platform-bug-notifier-enumeration.md`).
+//      The `orderBy: 1` value is **required in practice** per the
+//      skill — the service returns an empty list for any other value
+//      (including `0`, which is what an omitted field would serialize
+//      to). Read-state mutations use the matching
+//      `markNotificationAsRead` / `markAllNotificationAsRead` SDK
+//      methods.
 //
-// `payload` is sent as a `subscriptionFilter` (so the manager can
-// filter by `context`/`actionName` later) AND as a denormalized payload
-// (so the inbox can render a title/body without a follow-up read).
-// The `saveDenormalizedPayloadAsAnObject: true` flag keeps the server
-// able to index the fields — read back they arrive as a parsed object
-// on `n.denormalizedPayload`.
+// `payload` is sent as a denormalized payload (so the inbox can render
+// a title/body without a follow-up read). The
+// `saveDenormalizedPayloadAsAnObject: false` flag matches the SDK
+// default and the legacy broadcast records that still enumerate on this
+// tenant — `notifyRole` and `notifyAssignedFeature` are intentionally
+// consistent on this flag so a single experiment can attribute
+// enumeration behavior to one variable.
 //
-// Tenant-side status (verified 2026-09-18):
+// Tenant-side status (verified 2026-09-18, refreshed 2026-09-24):
 //   - `blocks notification save --update --name feature-tracker-events
 //     --channel 0 --type 1 --enable-persistence --notify-method 0`
 //     is required. `--type 0` makes the notifier return 500
@@ -42,6 +51,12 @@
 //   - The CLI returns `no_configuration_exist` for the same config
 //     the browser accepts; this is a token-scope mismatch (CLI is
 //     admin, browser is user) and not actionable from app code.
+//   - `getUnreadNotificationsBySubscriptionFilter` returns 415 on this
+//     tenant because the SDK flattens its filter body into GET query
+//     params (Fetch spec forbids a body on GET) and the gateway
+//     rejects the resulting request shape. The fallback call here is
+//     wrapped in try/catch so a future gateway change lights up the
+//     path without touching the call site.
 
 import { useCallback, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -64,7 +79,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { blocksClient } from "./client";
-import { blocksConfig } from "./config";
 import { useAuth } from "@/hooks/useAuth";
 
 export interface NotifyRolePayload {
@@ -127,10 +141,21 @@ const NOTIFIER_CONFIGURATION_NAME = "feature-tracker-events-typed";
 //     f3610e95-…) intentionally excluded — the SDK will not
 //     deliver to inactive users anyway, so including the id just
 //     bloats the broadcast.
-// Any new testers/developers added via
-// `blocks iam users update --roles <role> …` need their id
-// appended here until the platform exposes a browser-safe listing.
-const RECIPIENTS_BY_ROLE: Record<string, readonly string[]> = {
+//
+// TODO(server-side-proxy): the long-term fix is a server-side proxy
+// that holds an admin token and forwards
+// `iam.users.list({ filter: { roles: role } })` on behalf of the
+// browser. That proxy lives outside the SPA and lets the bell query
+// "who currently holds the tester role?" without trusting client code
+// to keep an OIDC-sub map in sync. See
+// `docs/platform-bug-notifier-enumeration.md` for the broader
+// "browser SDK has no path to escalate to admin scope" rationale —
+// the same reasoning applies here.
+//
+// Until that proxy ships, any new testers/developers added via
+// `blocks iam users update --roles <role> …` need their id appended
+// here, and a redeploy is required to pick the new ids up.
+export const RECIPIENTS_BY_ROLE: Record<string, readonly string[]> = {
   tester: ["db4bca2e-459d-4bd5-8c65-4700ca858084"],
   developer: [
     "d39eb926-6c04-461c-8833-6ed00189a520",
@@ -270,7 +295,13 @@ export async function notifyAssignedFeature(
       actorName: input.actorName,
       actorId: input.actorId,
     }),
-    saveDenormalizedPayloadAsAnObject: true,
+    // Aligned with `notifyRole` — both paths write with
+    // `saveDenormalizedPayloadAsAnObject: false`. See the long
+    // comment on `notifyRole` for why "false" is the chosen value;
+    // keeping both call sites on the same flag means a single
+    // experiment can attribute enumeration behavior to one flag
+    // without crossing a per-call-site variable.
+    saveDenormalizedPayloadAsAnObject: false,
   });
 }
 
@@ -485,7 +516,7 @@ function deriveBody(payload: Record<string, unknown>): string {
   return value ? `Reference: ${value}` : "You have a new notification.";
 }
 
-function toInboxItem(n: RawInboxNotification): InboxItem {
+function toInboxItem(n: RawInboxNotification): InboxItem | null {
   const payload = parseDenormalized(n.denormalizedPayload);
   const ctx = typeof payload.context === "string" ? payload.context : "";
   const action =
@@ -511,12 +542,22 @@ function toInboxItem(n: RawInboxNotification): InboxItem {
       : undefined;
   const featureId = ctx === "feature" ? valueId : undefined;
   const flowId = ctx === "flow" ? valueId : undefined;
+  // Real `id` is required for the SDK's `markNotificationAsRead({ id })`.
+  // A missing `id` on an upstream row is unexpected — every record the
+  // platform writes through the notifier API carries one — so we warn
+  // loudly and skip the row rather than render it with a per-render
+  // fake id that would silently no-op when the user clicks to mark it
+  // read. Skipping (vs fabricating) keeps a server-side bug visible
+  // instead of masking it.
+  if (!n.id) {
+    console.warn(
+      "[notifier] Skipping inbox row without an id; mark-read would have been a silent no-op.",
+      n,
+    );
+    return null;
+  }
   return {
-    // Real `id` is required for the SDK's `markNotificationAsRead({ id })`.
-    // Fall back to a per-render uuid only if the upstream record is
-    // missing one — that case is exotic (legacy rows?) and a click will
-    // be a no-op rather than a hard crash.
-    id: n.id ?? crypto.randomUUID(),
+    id: n.id,
     title: deriveTitle(payload),
     body: deriveBody(payload),
     createdAt: n.createdTime ?? new Date(0).toISOString(),
@@ -562,86 +603,13 @@ const INBOX_WINDOW_TARGET = 60;
 // the backstop for a tab that has been left open.
 const INBOX_POLL_MS = 10 * 1000;
 
-// CLI-shaped direct fetch helper. The CLI's
-// `/logic/v4/Notifier/GetNotifications` call enumerates this tenant
-// reliably (verified 2026-09-19 by inspecting `dist/commands/notifier/
-// list.js` in `@seliseblocks/cli-os`), while the browser SDK's
-// `getNotifications` returns `totalNotificationsCount: N` and
-// `notifications: []` for the same record set. The CLI uses
-// `impersonatedProjectAuth: true` which the SDK doesn't expose — but
-// the URL itself, query string, and response shape are identical to
-// what the SDK already calls, so a direct `fetch` with the same
-// browser cookies sometimes lets the request through. Failures
-// (typically 406 "Invalid_Origin_Or_Referer" on this tenant) are
-// surfaced to the caller as a thrown error — `useNotificationInbox`
-// swallows them so the bell still has the SDK's badge count.
-async function fetchCliShapedList(maxItems: number): Promise<{
-  items: RawInboxNotification[];
-  totalNotificationsCount?: number;
-  unReadNotificationsCount?: number;
-}> {
-  // Mirror the CLI's query shape exactly: `Sort.IsDescending`,
-  // `Sort.Property`, `Page`, `PageSize`. The CLI caps `PageSize` at
-  // its own default of 20; we stay under the pageSize-19 server
-  // pagination bug by reusing `INBOX_PAGE_SIZE` (10) and walking
-  // pages up to `maxItems`.
-  const collected: RawInboxNotification[] = [];
-  let total: number | undefined;
-  let unread: number | undefined;
-  let page = 1;
-  while (collected.length < maxItems) {
-    const params = new URLSearchParams({
-      Page: String(page),
-      PageSize: String(INBOX_PAGE_SIZE),
-      "Sort.IsDescending": "true",
-      "Sort.Property": "CreatedTime",
-    });
-    // The blocksClient instance exposes its base URL via the
-    // `xBlocksKey`; the SDK's own `getNotifications` hits this same
-    // host. `blocksConfig.apiUrl` is the source of truth in this
-    // app (see `src/lib/blocks/client.ts`); we read it directly
-    // because the SDK doesn't expose the resolved `baseUrl` on
-    // its public client object.
-    const baseUrl = blocksConfig.apiUrl;
-    if (!baseUrl) break;
-    const res = await fetch(`${baseUrl}/logic/v4/Notifier/GetNotifications?${params}`, {
-      method: "GET",
-      credentials: "include",
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) {
-      throw new Error(`CLI-shaped list failed: ${res.status}`);
-    }
-    const json = (await res.json()) as RawInboxResponse;
-    const items = json.notifications ?? [];
-    if (page === 1) {
-      total = json.totalNotificationsCount;
-      unread = json.unReadNotificationsCount;
-    }
-    collected.push(...items);
-    if (items.length === 0) break;
-    if (typeof total === "number" && collected.length >= total) break;
-    page += 1;
-  }
-  return {
-    items: collected,
-    totalNotificationsCount: total,
-    unReadNotificationsCount: unread,
-  };
-}
-
 export function useNotificationInbox() {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   const qc = useQueryClient();
 
   const query = useQuery({
-    queryKey: [
-      "notifications",
-      userId,
-      INBOX_PAGE_SIZE,
-      INBOX_WINDOW_TARGET,
-    ] as const,
+    queryKey: ["notifications", userId] as const,
     enabled: Boolean(userId),
     queryFn: async () => {
       // Single List endpoint suffices now that `notifyRole` targets
@@ -714,30 +682,66 @@ export function useNotificationInbox() {
         page += 1;
       }
 
-      // Diagnostic (added 2026-09-24): the SDK's `getNotifications`
-      // paginated walk returns `totalCount > 0` with `notifications: []`
-      // on this tenant for some user ids — verified on the developer
-      // session, where every fresh notification incremented the bell
-      // badge but the dropdown stayed empty. Counts come back fine
-      // (the persistence layer is correct), but the List endpoint is
-      // silently refusing to ship bodies for those user ids in this
-      // auth scope. We log once per (userId, page-walk result) so the
-      // symptom is visible without spamming the console on every poll.
+      // Fallback path per the `blocks-notifier` skill docs: when
+      // `getNotifications` enumerates zero items but the server knows
+      // there are unread records (the silent-enumeration quirk on this
+      // tenant — see `docs/platform-bug-notifier-enumeration.md`), try
+      // the SDK's second enumeration surface,
+      // `getUnreadNotificationsBySubscriptionFilter`. The skill
+      // explicitly calls out that `orderBy` is **required in
+      // practice** — the service returns an empty list for any other
+      // value, including the `0` an omitted field would serialize to.
+      // We pass `1` (CreatedTime, newest first) because the bell
+      // already orders by `createdAt` desc and we want a stable merge.
       //
-      // Why no in-browser fallback: the SDK's second enumeration
-      // surface (`getUnreadNotificationsBySubscriptionFilter`) flattens
-      // its filter into GET query params and the server returns 415
-      // "Unsupported Media Type" — verified on 2026-09-24, every poll
-      // produced the same 415. The CLI's own `notifier list` works
-      // because it sends the request under
-      // `impersonatedProjectAuth: true` (admin scope) which bypasses
-      // both the silent-List quirk AND the subscription-filter 415.
-      // The browser SDK has no path to escalate to admin scope, and a
-      // direct fetch from the browser gets 406 "Invalid_Origin_Or_Referer"
-      // on the gateway's origin check. The only end-to-end-working
-      // path is server-side: the Vite dev proxy or prod-backend holds
-      // an admin token and forwards the call. See the platform-bug
-      // doc for the full history.
+      // Documented limitation of this fallback: it only enumerates
+      // *unread* records (per the method name and the docs). If
+      // `getNotifications` returned SOME rows including read ones,
+      // we don't want to clobber those with a smaller unread-only
+      // result — we only invoke the fallback when the primary path
+      // gave us zero rows. Read items already in the cache from a
+      // previous successful poll are not overwritten.
+      //
+      // Tenant-side caveat: a 2026-09-24 sweep against this tenant
+      // found that the subscription-filter call returns 415
+      // "Unsupported Media Type" because the SDK flattens its filter
+      // body into GET query params (Fetch spec forbids a body on GET)
+      // and the gateway rejects the resulting request shape. We
+      // catch that here so the bell still has the SDK's badge count;
+      // if the gateway ever accepts the flattened GET, this branch
+      // starts producing rows without any other code change.
+      if (
+        collected.length === 0 &&
+        typeof unReadCount === "number" &&
+        unReadCount > 0
+      ) {
+        try {
+          const fallback = await blocksClient.notifier.getUnreadNotificationsBySubscriptionFilter(
+            {
+              orderBy: 1,
+              userId,
+            },
+          );
+          const fallbackItems: RawInboxNotification[] = Array.isArray(fallback)
+            ? (fallback as unknown as RawInboxNotification[])
+            : [];
+          if (fallbackItems.length > 0) {
+            collected.push(...fallbackItems);
+            exhausted = false;
+            console.info(
+              "[notifier] Subscription-filter fallback recovered",
+              fallbackItems.length,
+              "rows after List returned empty.",
+            );
+          }
+        } catch (err) {
+          console.warn(
+            "[notifier] Subscription-filter fallback failed (likely 415 on this tenant); continuing with empty items array. Counts:",
+            { totalCount, unReadCount },
+          );
+        }
+      }
+
       if (
         collected.length === 0 &&
         typeof totalCount === "number" &&
@@ -749,14 +753,6 @@ export function useNotificationInbox() {
           { totalCount, unReadCount },
         );
       }
-
-      // `fetchCliShapedList` is kept exported via module scope for a
-      // future re-enable (the direct-fetch path still 406s on the
-      // browser's origin check); deliberately unused here so TS
-      // doesn't complain about the noUnusedLocals rule. Referencing
-      // `totalCount` keeps the compiler happy about that rule too.
-      void totalCount;
-      void fetchCliShapedList;
 
       return {
         notifications: collected,
@@ -810,7 +806,7 @@ export function useNotificationInbox() {
       blocksClient.notifier.markNotificationAsRead({ id }),
     onSuccess: (_data, id) => {
       qc.setQueryData<RawInboxResponse>(
-        ["notifications", userId, INBOX_PAGE_SIZE, INBOX_WINDOW_TARGET],
+        ["notifications", userId],
         (prev) => {
           if (!prev) return prev;
           const notifications = (prev.notifications ?? []).map((n) =>
@@ -837,7 +833,7 @@ export function useNotificationInbox() {
     mutationFn: async () => blocksClient.notifier.markAllNotificationAsRead(),
     onSuccess: () => {
       qc.setQueryData<RawInboxResponse>(
-        ["notifications", userId, INBOX_PAGE_SIZE, INBOX_WINDOW_TARGET],
+        ["notifications", userId],
         (prev) => {
           if (!prev) return prev;
           return {
@@ -854,7 +850,8 @@ export function useNotificationInbox() {
   });
 
   const items: InboxItem[] = (query.data?.notifications ?? [])
-    .map(toInboxItem);
+    .map(toInboxItem)
+    .filter((item): item is InboxItem => item !== null);
 
   // Surface the API-reported totals alongside the (possibly empty)
   // items array so the bell badge stays in sync with what the

@@ -1067,6 +1067,122 @@ export function toUserProfilePic(c: CloudUserProfile): UserProfilePic {
   };
 }
 
+// --- Per-user AI gateway config --------------------------------------------
+//
+// The Issue Tracker AI Assistant chat panel routes through the server-side
+// `/api/ai/chat` proxy. By default the proxy uses `AI_GATEWAY_URL` /
+// `AI_GATEWAY_MODEL` / `AI_GATEWAY_TOKEN` from the server process's `.env`,
+// but each user can override all three from the Settings page so the same
+// config follows them across browsers/devices. The browser sends the saved
+// values as `x-ai-gateway-{url,model,token}` request headers; an empty string
+// in any field tells the proxy to fall back to the server default.
+//
+// One row per user (upsert by `userId`). Ownership is enforced at the app
+// layer via the read+write hooks (`useUserAiConfig` / `useSaveUserAiConfig`)
+// that always filter by `currentUser.id` — same pattern as every other
+// per-user collection in this project (UserProfile, MemberProject, etc.),
+// none of which use cloud-side row policies.
+/**
+ * Provider id for the Issue Tracker AI chat gateway. Lives on `UserAiConfig`
+ * (per-user, persisted in Blocks Data) so each user can pick their own
+ * Anthropic vs OpenAI wiring without affecting anyone else.
+ *
+ * The server-side proxy (`vite.config.ts → aiChatProxy` in dev,
+ * `server/prod-backend.mjs → proxyAiChat` in prod) reads `x-ai-chat-provider`
+ * on every chat request; an unknown / missing id falls back to `"anthropic"`
+ * so rows saved before this field existed keep working.
+ */
+export type ChatProviderId = "anthropic" | "openai";
+
+export interface CloudUserAiConfig {
+  ItemId: string;
+  userId: string;
+  /**
+   * NEW: which provider to use. Missing on rows saved before this migration
+   * — see `toUserAiConfig` for the "anthropic" fallback.
+   */
+  provider?: string;
+  gatewayUrl?: string;
+  model?: string;
+  token?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+export interface UserAiConfig {
+  /** Row id — needed for the update leg of the upsert. */
+  id: string;
+  userId: string;
+  /** Defaults to "anthropic" for rows without the new field. */
+  provider: ChatProviderId;
+  /** Empty string when not set; UI treats that as "use server default". */
+  gatewayUrl: string;
+  model: string;
+  token: string;
+}
+
+export function toUserAiConfig(c: CloudUserAiConfig): UserAiConfig {
+  // Any unknown / missing value (including null from a partial API response)
+  // is treated as "anthropic" — matches the user's chosen migration: don't
+  // need to re-save Settings for existing rows to keep working.
+  const provider: ChatProviderId = c.provider === "openai" ? "openai" : "anthropic";
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    provider,
+    gatewayUrl: c.gatewayUrl ?? "",
+    model: c.model ?? "",
+    token: c.token ?? "",
+  };
+}
+
+/**
+ * Provider id for the AI-generated profile picture flow. Lives on
+ * `UserAvatarConfig` (per-user, persisted in Blocks Data). Completely
+ * separate from `UserAiConfig` — the chat proxy and the avatar proxy read
+ * different header sets and never fall back to each other.
+ *
+ * Currently only `replicate` is supported (we ship the `fofr/face-to-many`
+ * styles). Adding a new vendor here means adding an entry to
+ * `AVATAR_PROVIDERS` in `vite.config.ts` and `server/prod-backend.mjs`.
+ */
+export type AvatarProviderId = "replicate";
+
+export interface CloudUserAvatarConfig {
+  ItemId: string;
+  userId: string;
+  provider?: string;
+  token?: string;
+  model?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+export interface UserAvatarConfig {
+  id: string;
+  userId: string;
+  provider: AvatarProviderId;
+  /** Empty string when not set; the avatar button is hidden until set. */
+  token: string;
+  model: string;
+}
+
+export function toUserAvatarConfig(c: CloudUserAvatarConfig): UserAvatarConfig {
+  // Provider defaults to "replicate" — the only vendor we ship today. A
+  // missing/empty provider on a legacy row lands here too.
+  const provider: AvatarProviderId =
+    c.provider === "replicate" ? "replicate" : "replicate";
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    provider,
+    token: c.token ?? "",
+    model: c.model ?? "",
+  };
+}
+
 // --- Member ↔ Project assignment -------------------------------------------
 //
 // Multi-select project assignment per member, edited from the Members page
@@ -1237,11 +1353,36 @@ export const announcementsCollection = blocksClient.data.collection<CloudAnnounc
 // caller's own row for the upload upsert (an unselected filter column is
 // silently dropped by the gateway — the duplicate-rows lesson from Issue).
 export const userProfilesCollection = blocksClient.data.collection<CloudUserProfile>("UserProfile", {
-  // `source` and `style` MUST be selected — `useProfilePics` reads them via
-  // the `toUserProfilePic` adapter to surface the "AI-generated" badge and
-  // any future re-render flows. An unselected column reads as `undefined`,
-  // which would silently drop the AI marker on every read.
-  fields: ["userId", "imageFileId", "source", "style", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  // NOTE: `source` and `style` columns are NOT in the deployed `UserProfile`
+  // schema yet — the AI avatar feature (commit b21051e) assumed a schema
+  // migration that was never applied, so requesting/writing them returns
+  // "Field `source` does not exist on type `UserProfile`" (HTTP 400) on
+  // every read AND every upsert. Until the migration lands, keep them out
+  // of both `fields` (this selector) and the upsert payload
+  // (`useUploadProfilePic` in hooks.ts). The `toUserProfilePic` adapter
+  // already defaults `source` to `"original"` when the field is missing,
+  // so the UI keeps working unchanged; only the AI badge is suppressed.
+  fields: ["userId", "imageFileId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` MUST be selected for the same filter-gating reason as
+// `userProfiles` / `memberProjects` above — the read leg of the upsert
+// (`useUserAiConfig`) and the save hook (`useSaveUserAiConfig`) both filter
+// by `userId`, and the gateway silently drops unselected filter columns,
+// which would either read the wrong row or insert duplicates.
+export const userAiConfigsCollection = blocksClient.data.collection<CloudUserAiConfig>("UserAiConfig", {
+  // `provider` is selected so the Settings page can populate the dropdown
+  // on load and so it round-trips through the upsert. Rows written before
+  // the schema migration don't have it — `toUserAiConfig` defaults the
+  // value to "anthropic", matching the user's chosen migration.
+  fields: ["userId", "provider", "gatewayUrl", "model", "token", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` is selected for the same filter-gating reason as every other
+// per-user collection above — `useUserAvatarConfig` reads the row by
+// `userId` and the upsert in `useSaveUserAvatarConfig` filters on it too.
+// Deliberately a separate collection from `userAiConfigsCollection` so the
+// chat proxy key and the avatar proxy key can never collide.
+export const userAvatarConfigsCollection = blocksClient.data.collection<CloudUserAvatarConfig>("UserAvatarConfig", {
+  fields: ["userId", "provider", "token", "model", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` is in `fields` for the same filter reason as `userProfiles` —
 // the upsert looks up the member's row by `userId`. `projectIdsJson` is
