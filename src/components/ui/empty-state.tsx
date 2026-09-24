@@ -19,6 +19,10 @@ export interface EmptyStateProps {
   icon?: React.ReactNode;
   /** Additional secondary action slot (rarely needed). */
   secondaryAction?: React.ReactNode;
+  /** Override classes on the icon container — used when a section wants its
+   *  empty state icon to match the section's accent (e.g. the Recent
+   *  Features list uses emerald while the default is indigo). */
+  iconClassName?: string;
   className?: string;
 }
 
@@ -28,6 +32,7 @@ export function EmptyState({
   action,
   icon,
   secondaryAction,
+  iconClassName,
   className,
 }: EmptyStateProps) {
   return (
@@ -39,7 +44,12 @@ export function EmptyState({
       role="status"
     >
       {icon && (
-        <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300">
+        <div
+          className={cn(
+            "mb-5 flex h-14 w-14 items-center justify-center rounded-xl bg-primary-muted text-primary",
+            iconClassName,
+          )}
+        >
           {icon}
         </div>
       )}

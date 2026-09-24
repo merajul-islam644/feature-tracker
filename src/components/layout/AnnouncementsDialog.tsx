@@ -83,7 +83,7 @@ export function AnnouncementsDialog({
             be cross-coupled with anything inside the modal. */}
         <DialogPrimitive.Overlay
           className={cn(
-            "fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-[2px]",
+            "fixed inset-0 z-50 bg-[hsl(var(--overlay))]/60",
             "data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out",
           )}
         />

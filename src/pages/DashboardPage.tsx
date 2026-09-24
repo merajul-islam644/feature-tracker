@@ -4,7 +4,6 @@ import {
   Bug,
   FolderKanban,
   GitBranch,
-  Layers,
   ListChecks,
   Users,
   ArrowRight,
@@ -74,6 +73,15 @@ export function DashboardPage() {
   );
 
   const recentFeatures = recentFeaturesQuery.data ?? [];
+
+  // `useRecentFeatures` filters by `scope.projectIds` but doesn't join the
+  // project record, so each item only carries `feature.projectId`. The
+  // workspace projects are already loaded for the metrics + recent-projects
+  // card, so we just project them into a lookup table — no extra round-trip.
+  const projectNameById = useMemo(
+    () => new Map(projects.map((p) => [p.id, p.name] as const)),
+    [projects],
+  );
 
   // All four metrics are sourced from real hooks — never show zeros when
   // a query is still loading. The previous version mapped the spec's
@@ -215,7 +223,7 @@ export function DashboardPage() {
                       >
                         <div className="flex min-w-0 items-center gap-3">
                           <div
-                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300"
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary-muted text-primary"
                             aria-hidden="true"
                           >
                             <FolderKanban className="h-4 w-4" />
@@ -252,7 +260,7 @@ export function DashboardPage() {
                 id="recent-features-heading"
                 className="flex items-center gap-2 text-base font-semibold"
               >
-                <ListChecks className="h-4 w-4 text-primary" aria-hidden="true" />
+                <ListChecks className="h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
                 {t("dashboard.recentFeatures", "Recent Features")}
               </CardTitle>
             </CardHeader>
@@ -272,6 +280,7 @@ export function DashboardPage() {
                     "Add the capabilities your team is building across projects.",
                   )}
                   icon={<ListChecks className="h-6 w-6" aria-hidden="true" />}
+                  iconClassName="bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300"
                   className="m-5 min-h-[200px]"
                 />
               ) : (
@@ -295,17 +304,27 @@ export function DashboardPage() {
                         className="flex items-center gap-3 px-5 py-3"
                       >
                         <div
-                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300"
                           aria-hidden="true"
                         >
-                          <Layers className="h-4 w-4" />
+                          <ListChecks className="h-4 w-4" />
                         </div>
-                        <p
-                          className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
-                          title={feature.name}
-                        >
-                          {feature.name}
-                        </p>
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className="truncate text-sm font-medium text-foreground"
+                            title={feature.name}
+                          >
+                            {feature.name}
+                          </p>
+                          <p
+                            className="truncate text-xs text-muted-foreground"
+                            title={
+                              projectNameById.get(feature.projectId) ?? ""
+                            }
+                          >
+                            {projectNameById.get(feature.projectId) ?? ""}
+                          </p>
+                        </div>
                         <div className="flex shrink-0 items-center gap-2">
                           <EnvChip
                             env={canonicalEnv}

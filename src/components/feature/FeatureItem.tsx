@@ -110,7 +110,7 @@ const OTHER_COUNTS: OtherCount[] = [
     key: "frontend",
     i18n: "flowStack",
     i18nKey: "frontend",
-    className: "border-indigo-300 bg-indigo-50 text-indigo-700",
+    className: "border-primary-border bg-primary-muted text-primary",
   },
   {
     key: "backend",

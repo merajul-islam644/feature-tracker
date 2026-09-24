@@ -74,12 +74,13 @@ export function ChatLauncher({
           // colliding with any other `group` ancestor (e.g. the parent
           // sidebar's collapse group).
           "group/launcher fixed bottom-6 right-6 z-40 inline-flex h-12 items-center rounded-full",
-          // The static shadow-ai is overridden by the animated neon
-          // halo below — both are box-shadows, and Tailwind's last-
-          // applied class wins. We keep `shadow-ai` as the fallback
-          // baseline for users with `prefers-reduced-motion: reduce`,
-          // where the animation collapses to its first frame.
-          "bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-ai",
+          // Solid primary per DESIGN-SYSTEM-REWRITE.md §3 — the
+          // indigo→violet gradient was retired in favour of the
+          // signature single-accent system. The animate-ai-glow keyframe
+          // still breathes a subtle halo around the button so the
+          // launcher reads as the "AI is alive" affordance; users with
+          // `prefers-reduced-motion: reduce` see a static shadow.
+          "bg-primary text-primary-foreground",
           "animate-ai-glow",
           // Animate padding + gap together so the icon stays pinned
           // to the left as the label slides out. Width comes from
@@ -144,7 +145,7 @@ export function ChatLauncher({
             ? "Close chat"
             : showActiveStatus
               ? `Verifying · ${Math.round(runProgressPct!)}%`
-              : "Ask Feature Tracker"}
+              : "Ask Lattice"}
         </span>
       </button>
     </>

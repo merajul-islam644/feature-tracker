@@ -106,15 +106,23 @@ export function ChatMessage({
       )}
       <div
         className={cn(
-          "relative px-3.5 py-2.5 text-sm leading-relaxed",
-          // User: indigo bubble, asymmetric rounded corners per §9.3.
+          // `min-w-0` lets the bubble shrink below its intrinsic content
+          // size; without it, a long unbroken token (URL, code, hash)
+          // can push the bubble past max-w-* and force a horizontal
+          // scrollbar on the chat scroll container.
+          "relative min-w-0 max-w-full px-3.5 py-2.5 text-sm leading-relaxed",
+          // Chat bubble styles per DESIGN-SYSTEM-REWRITE.md §3 "Chat":
+          //   Human   : bg-primary-muted (subtle indigo tint)
+          //   System/AI: bg-surface-muted + border
+          // Restrained rounded-md per spec — not large pill bubbles.
           isUser
-            ? "max-w-[82%] rounded-2xl rounded-br-md bg-indigo-500 text-white"
-            : // Assistant: muted bubble.
-              "max-w-[88%] rounded-2xl rounded-bl-md bg-muted text-foreground",
+            ? "w-fit max-w-[82%] rounded-md bg-primary-muted text-foreground"
+            : "w-fit max-w-[88%] rounded-md border border-border bg-surface-muted text-foreground",
         )}
       >
-        <p className="whitespace-pre-wrap">{message.content}</p>
+        <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+          {message.content}
+        </p>
 
         {/* Inline target picker — attached to the assistant reply that
             asks "which app should I verify?". The gateway is never

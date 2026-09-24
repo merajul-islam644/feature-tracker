@@ -2,7 +2,7 @@
 //
 // Severity rail (3px) on the left; type + environment + flow + feature on
 // top; title + description; occurrences + timestamp + actions at the
-// bottom. Hover lifts shadow-card-hover; selected uses indigo ring.
+// bottom. Hover surfaces the accent background; selected uses indigo ring.
 
 import {
   AlertOctagon,
@@ -77,11 +77,11 @@ export function IssueCard({ issue, onOpen, selected, canApprove = false, onAppro
     // open-drawer button as a sibling (a button can't nest a button).
     <div
       className={cn(
-        "group flex w-full overflow-hidden rounded-xl border bg-card text-left shadow-soft",
-        "transition-all duration-200 hover:shadow-card-hover",
+        "group flex w-full overflow-hidden rounded-lg border bg-card text-left",
+        "transition-colors duration-200 hover:bg-accent/40",
         selected
-          ? "border-indigo-500 ring-1 ring-indigo-500/20"
-          : "border-border hover:border-indigo-500/40",
+          ? "border-primary ring-1 ring-primary/30"
+          : "border-border hover:border-primary/50",
       )}
     >
       {/* Severity rail — 3px wide per §7.27 */}

@@ -3,8 +3,8 @@ import {
   LayoutDashboard,
   FolderKanban,
   Bug,
-  ChevronsLeft,
-  ChevronsRight,
+  PanelLeftClose,
+  PanelLeftOpen,
   FolderTree,
   MessageSquare,
   PlayCircle,
@@ -25,9 +25,8 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useAuth } from "@/hooks/useAuth";
-import { useToast } from "@/hooks/useToast";
-import { useWorkspaceTotals } from "@/lib/blocks/hooks";
 import { useLocale, useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 
@@ -158,26 +157,69 @@ function BrandHeader() {
       className="flex items-center gap-2 rounded-md px-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
     >
       <div
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground"
+        className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md"
         aria-hidden="true"
       >
+        {/* Lattice mark — five colored nodes connected by white lines,
+            arranged so the geometry forms an "L" inside a square (the
+            L emerges from the left-vertical + bottom-horizontal pair,
+            the other two edges complete the network feel). Each node
+            wears its own accent color with a soft outer glow for depth;
+            deeper indigo gradient + faint inner border for refinement. */}
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+          viewBox="0 0 32 32"
+          width="32"
+          height="32"
         >
-          <path d="M9 11l3 3L22 4" />
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1-2-2h11" />
+          <defs>
+            <linearGradient id="latticeBg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#3730A3" />
+              <stop offset="100%" stopColor="#1E1B4B" />
+            </linearGradient>
+          </defs>
+          <rect width="32" height="32" rx="9" fill="url(#latticeBg)" />
+          <rect
+            x="0.5"
+            y="0.5"
+            width="31"
+            height="31"
+            rx="8.5"
+            fill="none"
+            stroke="#FFFFFF"
+            strokeWidth="0.5"
+            opacity="0.08"
+          />
+          <g
+            stroke="#FFFFFF"
+            strokeLinecap="round"
+            strokeWidth="1.25"
+            opacity="0.35"
+          >
+            <line x1="9" y1="8" x2="9" y2="23" />
+            <line x1="9" y1="23" x2="23" y2="23" />
+            <line x1="9" y1="8" x2="23" y2="8" />
+            <line x1="23" y1="8" x2="23" y2="23" />
+            <line x1="9" y1="8" x2="16" y2="23" />
+          </g>
+          <g>
+            <circle cx="9" cy="8" r="3.5" fill="#818CF8" opacity="0.25" />
+            <circle cx="23" cy="8" r="3.5" fill="#C084FC" opacity="0.25" />
+            <circle cx="9" cy="23" r="3.5" fill="#34D399" opacity="0.25" />
+            <circle cx="16" cy="23" r="3.5" fill="#FBBF24" opacity="0.25" />
+            <circle cx="23" cy="23" r="3.5" fill="#FB7185" opacity="0.25" />
+          </g>
+          <g>
+            <circle cx="9" cy="8" r="2.25" fill="#818CF8" />
+            <circle cx="23" cy="8" r="2.25" fill="#C084FC" />
+            <circle cx="9" cy="23" r="2.25" fill="#34D399" />
+            <circle cx="16" cy="23" r="2.25" fill="#FBBF24" />
+            <circle cx="23" cy="23" r="2.25" fill="#FB7185" />
+          </g>
         </svg>
       </div>
-      <span className="truncate text-sm font-semibold text-sidebar-foreground group-data-[collapsible=icon]:hidden">
-        Feature Tracker
+      <span className="truncate bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 bg-clip-text text-sm font-bold tracking-tight text-transparent group-data-[collapsible=icon]:hidden">
+        Lattice
       </span>
     </NavLink>
   );
@@ -190,7 +232,7 @@ function NavToggle() {
   const { state, toggleSidebar } = useSidebar();
   const t = useT();
   const collapsed = state === "collapsed";
-  const Icon = collapsed ? ChevronsRight : ChevronsLeft;
+  const Icon = collapsed ? PanelLeftOpen : PanelLeftClose;
   const label = collapsed
     ? t("nav.expandSidebar", "Expand sidebar")
     : t("nav.collapseSidebar", "Collapse sidebar");
@@ -212,122 +254,37 @@ function NavToggle() {
 }
 
 function FooterUser() {
-  const { currentUser, logout } = useAuth();
-  const t = useT();
-  const totals = useWorkspaceTotals();
-  const navigate = useNavigate();
-  const toast = useToast();
+  const { currentUser } = useAuth();
   const { state } = useSidebar();
-  const { language, setLanguage, availableLanguages } = useLocale();
 
   if (!currentUser) return null;
 
-  const handleSignOut = async () => {
-    await logout();
-    navigate("/login", { replace: true });
-  };
-
-  // Tenant languages, in stable order: current language first, then the
-  // rest alphabetically by code. Falls back to a single entry that just
-  // shows the current code so the toggle never collapses entirely.
-  const allLanguages =
-    availableLanguages.length > 0
-      ? availableLanguages
-      : [{ languageCode: language, languageName: language, isDefault: true }];
-
-  const handleCycleLanguage = () => {
-    if (allLanguages.length < 2) return;
-    const idx = allLanguages.findIndex((l) => l.languageCode === language);
-    const next =
-      allLanguages[(idx + 1) % allLanguages.length] ?? allLanguages[0];
-    if (!next) return;
-    setLanguage(next.languageCode);
-    toast.info(
-      t("auth.switchLanguageToast", "Language switched to {language}.", {
-        language: next.languageName,
-      }),
-    );
-  };
-
-  const currentLanguageLabel =
-    allLanguages.find((l) => l.languageCode === language)?.languageName ??
-    language;
-
+  // Just an identity card — actions (sign out, language, settings) live
+  // in the profile / settings pages, so the footer stays a calm read.
   return (
     <SidebarMenu>
       <SidebarMenuItem>
         <SidebarMenuButton
-          tooltip={`${totals.data?.flows ?? 0} flows across ${totals.data?.features ?? 0} features`}
+          size="lg"
+          tooltip={currentUser.email}
+          className="cursor-default"
+          asChild
         >
-          <span className="flex flex-col items-start truncate leading-tight">
-            <span className="truncate font-medium text-sidebar-foreground">
-              {currentUser.name}
-            </span>
-            {state !== "collapsed" && (
-              <span className="truncate text-xs text-sidebar-foreground/70">
-                {currentUser.email}
+          <div>
+            <UserAvatar userId={currentUser.id} name={currentUser.name} size="md" />
+            <div className="flex min-w-0 flex-1 flex-col items-start leading-tight">
+              <span className="truncate text-sm font-semibold text-sidebar-foreground">
+                {currentUser.name}
               </span>
-            )}
-          </span>
+              {state !== "collapsed" && (
+                <span className="truncate text-xs text-sidebar-foreground/70">
+                  {currentUser.email}
+                </span>
+              )}
+            </div>
+          </div>
         </SidebarMenuButton>
-      </SidebarMenuItem>
-
-      <SidebarMenuItem>
-        <SidebarMenuButton
-          tooltip={
-            state === "collapsed"
-              ? t("languageSwitcher", "Language")
-              : undefined
-          }
-          onClick={handleCycleLanguage}
-          disabled={allLanguages.length < 2}
-        >
-          <span className="text-xs uppercase tracking-wider text-sidebar-foreground/60">
-            {currentLanguageLabel}
-          </span>
-          {state !== "collapsed" && allLanguages.length > 1 && (
-            <span className="ml-auto text-xs">↻</span>
-          )}
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-
-      <SidebarMenuItem>
-        <SidebarMenuButton
-          tooltip={t("signOut", "Sign out")}
-          onClick={handleSignOut}
-        >
-          <LogOut className="h-4 w-4" aria-hidden="true" />
-          <span>{t("signOut", "Sign out")}</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-
-      <SidebarMenuItem>
-        <CollapseToggleInline />
       </SidebarMenuItem>
     </SidebarMenu>
-  );
-}
-
-function CollapseToggleInline() {
-  const { state, toggleSidebar } = useSidebar();
-  const t = useT();
-  const collapsed = state === "collapsed";
-  const Icon = collapsed ? ChevronsRight : ChevronsLeft;
-  const label = collapsed
-    ? t("nav.expandSidebar", "Expand sidebar")
-    : t("nav.collapseSidebar", "Collapse sidebar");
-  return (
-    <SidebarMenuButton
-      tooltip={label}
-      onClick={toggleSidebar}
-      aria-label={label}
-    >
-      <Icon aria-hidden="true" />
-      <span>
-        {collapsed
-          ? t("nav.expandSidebar", "Expand")
-          : t("nav.collapseSidebar", "Collapse")}
-      </span>
-    </SidebarMenuButton>
   );
 }

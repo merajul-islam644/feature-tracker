@@ -32,7 +32,7 @@ export function CallbackPage() {
   if (error) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4 py-12">
-        <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6 shadow-soft">
+        <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-6">
           <h1 className="text-lg font-semibold text-foreground">
             Sign-in failed
           </h1>

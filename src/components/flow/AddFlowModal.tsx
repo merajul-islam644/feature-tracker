@@ -73,11 +73,17 @@ export function AddFlowModal({
   useEffect(() => {
     if (open) {
       setName("");
-      setFeatureId(defaultFeatureId ?? (features[0]?.id ?? ""));
+      // On page-level "Add Flow" (no defaultFeatureId) we deliberately
+      // leave the dropdown empty so its "Tag a feature" placeholder is
+      // what the user lands on. They pick; submit validates. When the
+      // modal was opened from a specific feature (defaultFeatureId set)
+      // that value wins — the dropdown is hidden behind a tag in that
+      // case anyway, so this only really matters for consistency.
+      setFeatureId(defaultFeatureId ?? "");
       setNameError(null);
       setFeatureError(null);
     }
-  }, [open, defaultFeatureId, features]);
+  }, [open, defaultFeatureId]);
 
   const featureOptions = useMemo(
     () => features.map((f) => ({ value: f.id, label: f.name })),
@@ -181,31 +187,61 @@ export function AddFlowModal({
               autoFocus
               maxLength={100}
             />
-            <Select
-              label={t("addFlow.featureLabel", "Feature")}
-              required
-              options={featureOptions}
-              placeholder={
-                features.length === 0
-                  ? envLabel
-                    ? t(
-                        "addFlow.featurePlaceholderEmpty",
-                        "No features in this environment — add one first",
-                      )
-                    : t(
-                        "addFlow.featurePlaceholderEmpty",
-                        "No features available — add one first",
-                      )
-                  : t("addFlow.featurePlaceholder", "Select a feature")
-              }
-              value={featureId}
-              onChange={(e) => {
-                setFeatureId(e.target.value);
-                if (featureError) setFeatureError(null);
-              }}
-              error={featureError ?? undefined}
-              disabled={features.length === 0}
-            />
+            {defaultFeatureId ? (
+              // Opened from a specific feature (e.g. "+ Add another flow"
+              // on a feature row, which always passes defaultFeatureId).
+              // The feature is locked by context — no real choice to make
+              // — so render a read-only "tag" row instead of a dropdown.
+              // We still resolve the name from the env-scoped list so it
+              // tracks whatever label the feature is currently using;
+              // fall back to featuresAll so a stale filter doesn't leave
+              // us showing the id; fall back to the id verbatim last.
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-foreground">
+                  {t("addFlow.featureLabel", "Feature")}
+                  <span
+                    className="ml-0.5 text-destructive"
+                    aria-hidden="true"
+                  >
+                    *
+                  </span>
+                </span>
+                <div className="flex h-10 w-full items-center rounded-md border border-dashed border-border bg-muted/40 px-3 text-sm font-medium text-foreground">
+                  <span className="truncate">
+                    {featuresAll.find((f) => f.id === featureId)?.name ??
+                      featuresAll.find((f) => f.id === defaultFeatureId)
+                        ?.name ??
+                      defaultFeatureId}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <Select
+                label={t("addFlow.featureLabel", "Feature")}
+                required
+                options={featureOptions}
+                placeholder={
+                  features.length === 0
+                    ? envLabel
+                      ? t(
+                          "addFlow.featurePlaceholderEmpty",
+                          "No features in this environment — add one first",
+                        )
+                      : t(
+                          "addFlow.featurePlaceholderEmpty",
+                          "No features available — add one first",
+                        )
+                    : "Tag a feature"
+                }
+                value={featureId}
+                onChange={(e) => {
+                  setFeatureId(e.target.value);
+                  if (featureError) setFeatureError(null);
+                }}
+                error={featureError ?? undefined}
+                disabled={features.length === 0}
+              />
+            )}
             {features.length === 0 && (
               <p className="text-xs text-muted-foreground">
                 {envLabel

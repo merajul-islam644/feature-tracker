@@ -16,7 +16,7 @@ export function AppLayout() {
           <AppSidebar />
           <SidebarInset>
             <Topbar />
-            <div className="flex-1">
+            <div className="flex-1 bg-background">
               <div className="mx-auto max-w-6xl px-4 py-6 md:px-8 md:py-8">
                 <Outlet />
               </div>

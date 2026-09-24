@@ -3,124 +3,262 @@
 @tailwind utilities;
 
 /*
- * Design tokens — see DESIGN-APP-v1.md §2.
- * Indigo = identity. Violet = AI. Cyan = environment.
- * Red is reserved for actual failures. No decorative red.
+ * Design tokens — see DESIGN-SYSTEM-REWRITE.md.
+ *
+ * Mode-agnostic "Structured Engineering Workspace" system.
+ * Light + dark are two equal native surface palettes, not one
+ * being a transformed version of the other. Technical surfaces
+ * (code/logs/AI/evidence) intentionally stay dark in both modes.
+ *
+ * Indigo = identity / primary interaction / focus.
+ * Cyan   = environment semantics (DEV/STAGING/PROD) only.
+ * Status colors reserved for actual statuses.
  */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    /* ========== CORE SURFACES ========== */
+
+    --background: 40 20% 97%;
+    --foreground: 240 10% 12%;
+
+    --surface: 0 0% 100%;
+    --surface-muted: 40 14% 94%;
+    --surface-subtle: 40 12% 91%;
+    --surface-raised: 0 0% 100%;
+
+    /* ========== CARD / POPOVER / PANEL ========== */
 
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 240 10% 12%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
+    --popover-foreground: 240 10% 12%;
 
-    /* Indigo signature */
-    --primary: 239 84% 67%;             /* #6366F1 */
-    --primary-foreground: 210 40% 98%;
+    --panel: 40 16% 95%;
+    --panel-foreground: 240 10% 14%;
 
-    --secondary: 220 14% 96%;
-    --secondary-foreground: 222 47% 11%;
+    /* ========== BORDERS ========== */
 
-    --muted: 220 14% 96%;
-    --muted-foreground: 220 9% 46%;
+    --border: 40 9% 84%;
+    --border-strong: 40 7% 74%;
+    --border-subtle: 40 10% 89%;
 
-    --accent: 220 14% 96%;
-    --accent-foreground: 222 47% 11%;
+    /* ========== TEXT HIERARCHY ========== */
 
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
+    --muted: 40 12% 94%;
+    --muted-foreground: 240 5% 42%;
 
-    --success: 160 84% 39%;
-    --success-foreground: 210 40% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 222 47% 11%;
-    --info: 199 89% 48%;
-    --info-foreground: 210 40% 98%;
-    --error: 0 72% 51%;
-    --error-foreground: 210 40% 98%;
-    --ai: 258 90% 66%;                  /* #8B5CF6 */
-    --ai-foreground: 210 40% 98%;
-    --environment: 189 94% 43%;         /* #06B6D4 */
-    --environment-foreground: 210 40% 98%;
+    --subtle-foreground: 240 5% 53%;
 
-    --border: 220 13% 91%;
-    --input: 220 13% 91%;
-    --ring: 239 84% 67%;
+    /* ========== PRIMARY / SIGNATURE ACCENT ========== */
 
-    --radius: 0.625rem;                 /* 10px */
+    --primary: 243 75% 59%;
+    --primary-foreground: 0 0% 100%;
 
-    /* Sidebar keeps its own palette so it can stay light while the app goes dark. */
+    --primary-muted: 243 80% 96%;
+    --primary-border: 243 70% 82%;
+
+    /* ========== SECONDARY ========== */
+
+    --secondary: 40 10% 92%;
+    --secondary-foreground: 240 8% 22%;
+
+    /* ========== INTERACTIVE STATES ========== */
+
+    --accent: 40 10% 93%;
+    --accent-foreground: 240 8% 16%;
+
+    --ring: 243 75% 59%;
+
+    /* ========== STATUS ========== */
+
+    --success: 152 55% 36%;
+    --success-muted: 152 45% 94%;
+    --success-border: 152 40% 80%;
+    --success-foreground: 152 55% 36%;
+
+    --warning: 35 85% 42%;
+    --warning-muted: 35 80% 94%;
+    --warning-border: 35 65% 78%;
+    --warning-foreground: 35 85% 42%;
+
+    --destructive: 0 68% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --destructive-muted: 0 70% 95%;
+    --destructive-border: 0 55% 82%;
+
+    --info: 199 75% 42%;
+    --info-muted: 199 70% 94%;
+    --info-border: 199 55% 80%;
+    --info-foreground: 199 75% 42%;
+
+    --error: 0 68% 48%;
+    --error-foreground: 0 0% 100%;
+
+    /* ========== LEGACY AI / ENVIRONMENT ACCENTS ========== */
+
+    --ai: 243 75% 59%;                  /* AI surfaces now use --technical */
+    --ai-foreground: 0 0% 100%;
+    --environment: 189 94% 43%;
+    --environment-foreground: 0 0% 100%;
+
+    /* ========== INPUTS ========== */
+
+    --input: 40 8% 79%;
+    --input-background: 0 0% 100%;
+    --input-placeholder: 240 5% 55%;
+
+    /* ========== TECHNICAL SURFACES (code/logs/AI/evidence)
+                  same in both modes ========== */
+
+    --technical: 240 10% 8%;
+    --technical-foreground: 240 8% 92%;
+    --technical-muted: 240 5% 62%;
+    --technical-border: 240 5% 22%;
+
+    /* ========== OVERLAY ========== */
+
+    --overlay: 240 10% 8%;
+
+    /* ========== RADIUS ========== */
+
+    --radius: 0.75rem;
+
+    /* ========== SIDEBAR — inherits the application palette but
+                  uses its own tokens so the rail can stay neutral. ========== */
+
     --sidebar-background: 0 0% 100%;
-    --sidebar-foreground: 222 47% 11%;
-    --sidebar-primary: 239 84% 67%;
-    --sidebar-primary-foreground: 210 40% 98%;
-    --sidebar-accent: 239 100% 96%;     /* indigo-50 */
-    --sidebar-accent-foreground: 239 84% 30%;  /* indigo-900-ish, stays high-contrast on light bg */
-    --sidebar-border: 220 13% 91%;
-    --sidebar-ring: 239 84% 67%;
+    --sidebar-foreground: 240 10% 12%;
+    --sidebar-primary: 243 75% 59%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 243 80% 96%;
+    --sidebar-accent-foreground: 243 75% 30%;
+    --sidebar-border: 40 9% 84%;
+    --sidebar-ring: 243 75% 59%;
 
-    /* Highlight color for selected rows, search hits, etc. */
-    --highlight: 239 100% 96%;
-    --highlight-foreground: 239 84% 30%;
+    /* ========== HIGHLIGHT (selected rows, search hits) ========== */
+
+    --highlight: 243 80% 96%;
+    --highlight-foreground: 243 75% 30%;
   }
 
   .dark {
-    --background: 222 47% 6%;
-    --foreground: 210 40% 98%;
+    /* ========== CORE SURFACES ========== */
 
-    --card: 222 47% 9%;
-    --card-foreground: 210 40% 98%;
+    --background: 240 7% 9%;
+    --foreground: 240 8% 94%;
 
-    --popover: 222 47% 9%;
-    --popover-foreground: 210 40% 98%;
+    --surface: 240 7% 12%;
+    --surface-muted: 240 6% 15%;
+    --surface-subtle: 240 5% 18%;
+    --surface-raised: 240 7% 14%;
 
-    --primary: 239 84% 74%;
-    --primary-foreground: 222 47% 11%;
+    /* ========== CARD / POPOVER / PANEL ========== */
 
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
+    --card: 240 7% 12%;
+    --card-foreground: 240 8% 94%;
 
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
+    --popover: 240 7% 12%;
+    --popover-foreground: 240 8% 94%;
 
-    --accent: 217 33% 17%;
-    --accent-foreground: 210 40% 98%;
+    --panel: 240 6% 14%;
+    --panel-foreground: 240 8% 92%;
 
-    --destructive: 0 63% 50%;
-    --destructive-foreground: 210 40% 98%;
+    /* ========== BORDERS ========== */
 
-    --success: 160 84% 45%;
-    --success-foreground: 222 47% 6%;
-    --warning: 38 92% 60%;
-    --warning-foreground: 222 47% 11%;
-    --info: 199 89% 60%;
-    --info-foreground: 222 47% 11%;
-    --error: 0 63% 50%;
-    --error-foreground: 210 40% 98%;
-    --ai: 258 90% 74%;
-    --ai-foreground: 222 47% 11%;
+    --border: 240 5% 25%;
+    --border-strong: 240 5% 34%;
+    --border-subtle: 240 5% 20%;
+
+    /* ========== TEXT HIERARCHY ========== */
+
+    --muted: 240 6% 16%;
+    --muted-foreground: 240 5% 68%;
+
+    --subtle-foreground: 240 5% 57%;
+
+    /* ========== PRIMARY / SIGNATURE ACCENT ========== */
+
+    --primary: 243 80% 68%;
+    --primary-foreground: 240 10% 10%;
+
+    --primary-muted: 243 35% 20%;
+    --primary-border: 243 45% 36%;
+
+    /* ========== SECONDARY ========== */
+
+    --secondary: 240 5% 19%;
+    --secondary-foreground: 240 8% 90%;
+
+    /* ========== INTERACTIVE STATES ========== */
+
+    --accent: 240 5% 19%;
+    --accent-foreground: 240 8% 94%;
+
+    --ring: 243 80% 68%;
+
+    /* ========== STATUS ========== */
+
+    --success: 152 55% 52%;
+    --success-muted: 152 30% 17%;
+    --success-border: 152 35% 30%;
+    --success-foreground: 152 55% 52%;
+
+    --warning: 38 88% 60%;
+    --warning-muted: 35 30% 18%;
+    --warning-border: 35 40% 32%;
+    --warning-foreground: 38 88% 60%;
+
+    --destructive: 0 70% 62%;
+    --destructive-foreground: 0 0% 100%;
+    --destructive-muted: 0 30% 18%;
+    --destructive-border: 0 38% 32%;
+
+    --info: 199 75% 58%;
+    --info-muted: 199 30% 17%;
+    --info-border: 199 38% 30%;
+    --info-foreground: 199 75% 58%;
+
+    --error: 0 70% 62%;
+    --error-foreground: 0 0% 100%;
+
+    /* ========== LEGACY AI / ENVIRONMENT ACCENTS ========== */
+
+    --ai: 243 80% 68%;
+    --ai-foreground: 240 10% 10%;
     --environment: 189 94% 55%;
-    --environment-foreground: 222 47% 11%;
+    --environment-foreground: 240 10% 10%;
 
-    --border: 217 33% 20%;
-    --input: 217 33% 20%;
-    --ring: 239 84% 74%;
+    /* ========== INPUTS ========== */
 
-    --sidebar-background: 222 47% 9%;
-    --sidebar-foreground: 210 40% 98%;
-    --sidebar-primary: 239 84% 74%;
-    --sidebar-primary-foreground: 222 47% 11%;
-    --sidebar-accent: 239 50% 25%;
-    --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 217 33% 20%;
-    --sidebar-ring: 239 84% 74%;
+    --input: 240 5% 32%;
+    --input-background: 240 7% 10%;
+    --input-placeholder: 240 5% 52%;
 
-    --highlight: 239 50% 25%;
-    --highlight-foreground: 210 40% 98%;
+    /* ========== TECHNICAL SURFACE — SAME IN BOTH MODES ========== */
+
+    --technical: 240 10% 8%;
+    --technical-foreground: 240 8% 92%;
+    --technical-muted: 240 5% 62%;
+    --technical-border: 240 5% 22%;
+
+    --overlay: 240 10% 4%;
+
+    /* ========== SIDEBAR ========== */
+
+    --sidebar-background: 240 7% 12%;
+    --sidebar-foreground: 240 8% 94%;
+    --sidebar-primary: 243 80% 68%;
+    --sidebar-primary-foreground: 240 10% 10%;
+    --sidebar-accent: 243 35% 20%;
+    --sidebar-accent-foreground: 240 8% 94%;
+    --sidebar-border: 240 5% 25%;
+    --sidebar-ring: 243 80% 68%;
+
+    /* ========== HIGHLIGHT ========== */
+
+    --highlight: 243 35% 20%;
+    --highlight-foreground: 240 8% 94%;
   }
 }
 
@@ -222,7 +360,7 @@
 
   /* Subtle indigo highlight rail used by announcement + featured cards. */
   .accent-rail-indigo {
-    @apply w-1 self-stretch rounded-full bg-indigo-500;
+    @apply w-1 self-stretch rounded-full bg-primary;
   }
 
   /* Verification severity rails */
@@ -236,9 +374,11 @@
     @apply w-[3px] self-stretch rounded-full bg-sky-500;
   }
 
-  /* Card hover lift utility — used by interactive cards. */
+  /* Card hover lift utility — used by interactive cards.
+     Per DESIGN-SYSTEM-REWRITE.md cards use borders + accent surface
+     on hover, not lifted shadows. */
   .card-interactive {
-    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover;
+    @apply transition-colors duration-200 hover:bg-accent/40;
   }
 
   /* Dot indicator for status chips */
