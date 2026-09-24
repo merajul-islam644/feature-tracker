@@ -460,6 +460,16 @@ const DIST_DIR = path.resolve(process.cwd(), "dist");
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const AVATAR_MAX_BODY_BYTES = 10 * 1024 * 1024;
 const AVATAR_TIMEOUT_MS = 65_000;
+// /api/ai/chat upstream fetch cap. Must be strictly less than both:
+//   • Azure App Gateway request timeout (30 s on Standard v2, 4 min on
+//     WAF_v2) — the load balancer in front of this app terminates the
+//     client connection when this fires, so by then `disconnected` is
+//     already true and we'd serve an empty 200 to nothing.
+//   • Cloud Run default request timeout (60 s for the prod env) —
+//     same story, just at a different layer.
+// 25 s leaves room for the body parse + serialise round trip before any
+// load balancer would reap the request from under the chat client.
+const CHAT_TIMEOUT_MS = 25_000;
 // requestTimeout: 90 s. Anthropic with max_tokens 4096 + tools can run 30–60 s.
 // SSE endpoint overrides this per-request via res.setTimeout(0) below.
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -870,14 +880,27 @@ async function proxyAiChat(req, res) {
     return;
   }
 
-  // One AbortSignal per request: fires when the browser disconnects
-  // mid-call so the upstream fetch stops streaming. Mirrors the avatar
-  // proxy's pattern (see `proxyAiAvatar` below).
+  // One AbortSignal per request, shared by three abort sources:
+  //   1. `req.on("close")` fires when the browser disconnects mid-call.
+  //   2. `setTimeout(CHAT_TIMEOUT_MS)` caps the upstream fetch so a slow
+  //      AI gateway can't hang the proxy forever — Cloud Run's default
+  //      request timeout is 60s, and Azure App Gateway's is 30s, so we
+  //      bail out well before either would reap the request from under
+  //      us and surface the slowdown as a 502 the chat client can retry.
+  //   3. `provider.sendChat` itself aborts on signal.
   const abort = new AbortController();
   let disconnected = false;
-  req.on("close", () => {
-    disconnected = true;
+  let abortedReason = null;
+  const chatTimer = setTimeout(() => {
+    abortedReason = "upstream_timeout";
     abort.abort();
+  }, CHAT_TIMEOUT_MS);
+  req.on("close", () => {
+    if (!disconnected) {
+      disconnected = true;
+      abortedReason = "client_disconnected";
+      abort.abort();
+    }
   });
 
   try {
@@ -921,14 +944,36 @@ async function proxyAiChat(req, res) {
       },
       abort.signal,
     );
+    clearTimeout(chatTimer);
     if (disconnected || abort.signal.aborted) {
-      // Browser went away; nothing to send back.
+      // Browser went away OR the upstream timeout fired. Don't try to
+      // write a 200-with-empty-body — that's the bug that broke the
+      // chat UI (the client called `res.json()` on an empty payload
+      // and threw "Unexpected end of JSON input"). Send 499
+      // (Nginx-style "Client Closed Request") so the socket is
+      // cleanly closed AND the chat client's retry loop — which only
+      // retries on 502/503/504/429 — falls straight through to its
+      // local mock fallback instead of bouncing off the same broken
+      // path three times.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) — returning 499`,
+      );
+      res.statusCode = 499;
       res.end();
       return;
     }
     sendJson(res, 200, response);
   } catch (err) {
+    clearTimeout(chatTimer);
     if (disconnected || abort.signal.aborted) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) mid-error: ${
+          err instanceof Error ? err.message : String(err)
+        } — returning 499`,
+      );
+      res.statusCode = 499;
       res.end();
       return;
     }
@@ -1045,7 +1090,9 @@ async function proxyAiAvatar(req, res) {
     );
     clearTimeout(timer);
     if (disconnected) {
-      // Browser went away; nothing to send back.
+      // Browser hung up. Set 499 before res.end() so we never emit
+      // an empty 200 — same defensive pattern as proxyAiChat.
+      res.statusCode = 499;
       res.end();
       return;
     }
@@ -1053,6 +1100,7 @@ async function proxyAiAvatar(req, res) {
   } catch (err) {
     clearTimeout(timer);
     if (disconnected || abort.signal.aborted) {
+      res.statusCode = 499;
       res.end();
       return;
     }
