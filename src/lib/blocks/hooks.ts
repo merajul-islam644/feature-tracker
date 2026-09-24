@@ -615,7 +615,10 @@ export function useWorkspaceTotals(): UseQueryResult<{
 // than 500 projects, the silent truncation would be visible as features
 // and flows under the 501st-and-onward projects failing to surface on
 // the dashboard, which is preferable to an unbounded fetch.
-function useAliveScope(userId: string): UseQueryResult<{
+// `useAliveScope` was previously file-local — it powers the dashboard
+// totals card and the recent-feeds hooks. `useProjectsDevCounts` below
+// reuses the same alive-set, so it's now exported for shared use.
+export function useAliveScope(userId: string): UseQueryResult<{
   projectIds: Set<string>;
   featureIds: Set<string>;
 }> {
@@ -667,6 +670,120 @@ function useAliveScope(userId: string): UseQueryResult<{
     // `useDeleteProject.onSuccess`, so the user always sees fresh
     // numbers after a delete — the stale window only affects reads
     // without an intervening mutation.)
+    staleTime: 60_000,
+  });
+}
+
+// Per-project feature/flow counts in the dev env (or env-less legacy
+// records). Used by the Projects page card AND the list-row layout so
+// both surfaces share one fetch instead of N×2 — the per-card
+// `useProjectFeatures(id, "dev")` + `useProjectFlows(id, "dev")` calls
+// would otherwise turn a 20-project workspace into 40 round trips on
+// first paint.
+//
+// Dev-only scoping: matches `ProjectCardWithCounts` (formerly in
+// `ProjectList.tsx`). Counting across every env would inflate totals
+// because cloning a flow to stg/uat/prod produces duplicates of the
+// same dev source via `clonedFromXxxId` — see the doc comment there.
+//
+// Cache key is rooted under `queryKeys.projects(userId)` so the same
+// project mutations that invalidate the project list also invalidate
+// these counts. `staleTime: 60_000` matches `useAliveScope`.
+//
+// Returns `Map<projectId, { features: number; flows: number }>`. A
+// project with no entries simply has no entry in the map; callers
+// default to zero via `counts.get(id)?.features ?? 0`.
+export function useProjectsDevCounts(): UseQueryResult<
+  Map<string, { features: number; flows: number }>
+> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  const scopeQuery = useAliveScope(userId);
+  return useQuery({
+    queryKey: [...queryKeys.projects(userId), "devCounts"] as const,
+    enabled: Boolean(userId) && (scopeQuery.isSuccess || scopeQuery.isError),
+    queryFn: async () => {
+      const scope = scopeQuery.data;
+      if (!scope) return new Map();
+      const { projectIds, featureIds: aliveFeatureIds } = scope;
+      // Short-circuit: no alive projects → no features or flows can
+      // belong to a live parent. Skips the two feature/flow list
+      // round trips entirely.
+      if (projectIds.size === 0) return new Map();
+
+      // Pass 1 — features. Workspace-wide list, narrowed client-side
+      // because the gateway filter parser drops operator objects (see
+      // `createdByFilter`). We collect three things:
+      //   - `featureProjectById` for the flows pass to look up parents,
+      //   - the feature counts per project,
+      //   - a Set of featureIds scoped to dev sources (so the flows
+      //     pass knows which features belong to the dev env).
+      const featuresRaw = await featuresCollection.list({
+        pageNo: 1,
+        pageSize: 1000,
+      });
+      const featureItems = unwrapPaged<{
+        ItemId: string;
+        projectId?: string;
+        envSlug?: string;
+      }>(featuresRaw).items;
+      const featureProjectById = new Map<string, string>();
+      const devFeatureIds = new Set<string>();
+      const featureCounts = new Map<string, number>();
+      for (const f of featureItems) {
+        const pid = f.projectId;
+        if (!pid || !projectIds.has(pid)) continue;
+        if (!isDevSource(f.envSlug)) continue;
+        featureProjectById.set(f.ItemId, pid);
+        devFeatureIds.add(f.ItemId);
+        featureCounts.set(pid, (featureCounts.get(pid) ?? 0) + 1);
+      }
+
+      // Pass 2 — flows. Workspace-wide list, narrowed to dev-source
+      // flows whose `featureId` is in our dev-feature set. A flow
+      // without a known dev feature has no parent to count under and
+      // is skipped — that catches orphans from deletes or migrations.
+      if (devFeatureIds.size === 0) {
+        return new Map(
+          Array.from(featureCounts.entries()).map(([pid, features]) => [
+            pid,
+            { features, flows: 0 },
+          ]),
+        );
+      }
+      const flowsRaw = await flowsCollection.list({
+        pageNo: 1,
+        pageSize: 1000,
+      });
+      const flowItems = unwrapPaged<{
+        ItemId: string;
+        featureId?: string;
+        envSlug?: string;
+      }>(flowsRaw).items;
+      const flowCounts = new Map<string, number>();
+      for (const fl of flowItems) {
+        const fid = fl.featureId;
+        if (!fid || !devFeatureIds.has(fid)) continue;
+        if (!isDevSource(fl.envSlug)) continue;
+        const pid = featureProjectById.get(fid);
+        if (!pid) continue;
+        flowCounts.set(pid, (flowCounts.get(pid) ?? 0) + 1);
+      }
+
+      // Merge: every project with features or flows gets an entry.
+      const merged = new Map<string, { features: number; flows: number }>();
+      const allPids = new Set<string>([
+        ...featureCounts.keys(),
+        ...flowCounts.keys(),
+      ]);
+      for (const pid of allPids) {
+        merged.set(pid, {
+          features: featureCounts.get(pid) ?? 0,
+          flows: flowCounts.get(pid) ?? 0,
+        });
+      }
+      return merged;
+    },
     staleTime: 60_000,
   });
 }
