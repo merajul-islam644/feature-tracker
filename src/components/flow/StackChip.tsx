@@ -53,7 +53,7 @@ interface StackVisual {
 const STACK_VISUALS: Record<FlowStack, StackVisual> = {
   frontend: {
     className:
-      "border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100",
+      "border-primary-border bg-primary-muted text-primary hover:bg-primary-muted/80",
     i18nKey: "frontend",
   },
   backend: {

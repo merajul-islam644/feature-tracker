@@ -28,7 +28,7 @@ export interface RunProgressRingProps {
 
 const stateStroke: Record<NonNullable<RunProgressRingProps["state"]>, string> = {
   idle: "text-muted-foreground/40",
-  running: "text-indigo-500",
+  running: "text-primary",
   success: "text-emerald-500",
   warning: "text-amber-500",
   error: "text-red-500",
@@ -107,7 +107,7 @@ export function RunProgressRing({
           )}
           {isActive && (
             <Loader2
-              className="absolute right-2 top-2 h-3.5 w-3.5 animate-spin text-indigo-500"
+              className="absolute right-2 top-2 h-3.5 w-3.5 animate-spin text-primary"
               aria-hidden="true"
             />
           )}

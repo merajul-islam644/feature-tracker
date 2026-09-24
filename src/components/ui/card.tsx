@@ -2,29 +2,23 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 /*
- * Card — see DESIGN-APP-v1.md §7.2.
+ * Card — see DESIGN-SYSTEM-REWRITE.md §3 "Cards".
  *
- * Default: rounded-xl, bg-card, shadow-card.
- * Interactive: add `card-interactive` (hover lift + shadow-card-hover).
- * Variants:
- *   - default  : rounded-xl border bg-card shadow-card
- *   - flat     : rounded-xl bg-card border (no shadow)
- *   - elevated : rounded-xl bg-card shadow-elevated
+ * Cards feel like structured documents, not floating blobs.
+ * Default: rounded-lg border border-border bg-card — no shadow.
+ * Borders + spacing separate cards from the page; shadows are
+ * reserved for elements that physically float (dropdowns, dialogs).
+ *
+ * For interactive cards (hover lift), opt in via the global
+ * `.card-interactive` utility — see index.css.
  */
 const Card = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement> & {
-    variant?: "default" | "flat" | "elevated";
-  }
->(({ className, variant = "default", ...props }, ref) => (
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn(
-      "rounded-lg border bg-card text-card-foreground",
-      variant === "default" && "shadow-card",
-      variant === "elevated" && "shadow-elevated",
-      className,
-    )}
+    className={cn("rounded-lg border border-border bg-card text-card-foreground", className)}
     {...props}
   />
 ));
@@ -49,7 +43,7 @@ const CardTitle = React.forwardRef<
   <h3
     ref={ref}
     className={cn(
-      "text-lg font-semibold leading-tight tracking-tight",
+      "text-base font-semibold leading-tight tracking-tight",
       className,
     )}
     {...props}

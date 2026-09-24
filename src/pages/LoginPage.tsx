@@ -22,7 +22,7 @@ export function LoginPage() {
   const t = useT();
 
   useEffect(() => {
-    document.title = `${t("auth.loginTitle", "Sign in to Feature Tracker")} — Feature Tracker`;
+    document.title = `${t("auth.loginTitle", "Sign in to Lattice")} — Lattice`;
   }, [t]);
 
   if (isHydrated && isAuthenticated) {
@@ -50,40 +50,67 @@ export function LoginPage() {
   const callbackUrl = `${window.location.origin}/login/callback`;
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-gradient-to-br from-indigo-50 via-white to-violet-50 px-4 py-12 dark:from-indigo-950/30 dark:via-background dark:to-violet-950/20">
-      {/* Subtle background ornaments — soft indigo + violet blobs */}
-      <div
-        className="pointer-events-none absolute -left-32 top-1/3 h-96 w-96 rounded-full bg-indigo-200/30 blur-3xl dark:bg-indigo-500/10"
-        aria-hidden="true"
-      />
-      <div
-        className="pointer-events-none absolute -right-32 bottom-1/4 h-96 w-96 rounded-full bg-violet-200/30 blur-3xl dark:bg-violet-500/10"
-        aria-hidden="true"
-      />
-
-      <div className="relative z-10 w-full max-w-md rounded-2xl border border-border bg-card/95 p-8 shadow-elevated backdrop-blur">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-12">
+      <div className="relative z-10 w-full max-w-md rounded-xl border border-border bg-surface p-8 shadow-lg">
         <div className="mb-7 flex flex-col items-center text-center">
           <div
-            className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-ai"
+            className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-md"
             aria-hidden="true"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+              viewBox="0 0 32 32"
+              width="48"
+              height="48"
             >
-              <path d="M9 11l3 3L22 4" />
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1-2-2h11" />
+              <defs>
+                <linearGradient id="latticeBgLogin" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stopColor="#3730A3" />
+                  <stop offset="100%" stopColor="#1E1B4B" />
+                </linearGradient>
+              </defs>
+              <rect width="32" height="32" rx="9" fill="url(#latticeBgLogin)" />
+              <rect
+                x="0.5"
+                y="0.5"
+                width="31"
+                height="31"
+                rx="8.5"
+                fill="none"
+                stroke="#FFFFFF"
+                strokeWidth="0.5"
+                opacity="0.08"
+              />
+              <g
+                stroke="#FFFFFF"
+                strokeLinecap="round"
+                strokeWidth="1.25"
+                opacity="0.35"
+              >
+                <line x1="9" y1="8" x2="9" y2="23" />
+                <line x1="9" y1="23" x2="23" y2="23" />
+                <line x1="9" y1="8" x2="23" y2="8" />
+                <line x1="23" y1="8" x2="23" y2="23" />
+                <line x1="9" y1="8" x2="16" y2="23" />
+              </g>
+              <g>
+                <circle cx="9" cy="8" r="3.5" fill="#818CF8" opacity="0.25" />
+                <circle cx="23" cy="8" r="3.5" fill="#C084FC" opacity="0.25" />
+                <circle cx="9" cy="23" r="3.5" fill="#34D399" opacity="0.25" />
+                <circle cx="16" cy="23" r="3.5" fill="#FBBF24" opacity="0.25" />
+                <circle cx="23" cy="23" r="3.5" fill="#FB7185" opacity="0.25" />
+              </g>
+              <g>
+                <circle cx="9" cy="8" r="2.25" fill="#818CF8" />
+                <circle cx="23" cy="8" r="2.25" fill="#C084FC" />
+                <circle cx="9" cy="23" r="2.25" fill="#34D399" />
+                <circle cx="16" cy="23" r="2.25" fill="#FBBF24" />
+                <circle cx="23" cy="23" r="2.25" fill="#FB7185" />
+              </g>
             </svg>
           </div>
           <h1 className="mt-4 text-2xl font-semibold tracking-tight text-foreground">
-            {t("auth.loginTitle", "Welcome to Feature Tracker")}
+            {t("auth.loginTitle", "Welcome to Lattice")}
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {t(

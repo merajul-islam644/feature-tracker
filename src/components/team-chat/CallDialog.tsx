@@ -655,7 +655,7 @@ export function CallDialog({
                       className="absolute inset-0 h-full w-full object-cover"
                     />
                     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                      <span className="rounded bg-slate-900/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-200">
+                      <span className="rounded bg-technical/70 px-1.5 py-0.5 text-[10px] font-medium text-technical-foreground">
                         {meName}
                       </span>
                     </div>
@@ -696,7 +696,7 @@ export function CallDialog({
         {/* Footer — control bar. Mute / Camera toggles + End Call.
             End Call turns red and reads "Close" once the call has
             already ended, so the user has a single clear exit. */}
-        <div className="flex items-center justify-center gap-3 bg-slate-900 px-6 py-5">
+        <div className="flex items-center justify-center gap-3 bg-technical px-6 py-5">
           <Button
             type="button"
             variant="outline"

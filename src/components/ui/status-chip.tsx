@@ -42,7 +42,7 @@ const statusStyles: Record<
   neutral: {
     icon: Minus,
     classes:
-      "bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700",
+      "bg-muted text-muted-foreground border-border",
     label: "Neutral",
   },
 };

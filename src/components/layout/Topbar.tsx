@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "react-router-dom";
-import { LogOut, User as UserIcon, Volume2 } from "lucide-react";
+import { LogOut, User as UserIcon, Megaphone } from "lucide-react";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import {
   DropdownMenu,
@@ -40,7 +40,7 @@ export function Topbar() {
   };
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-border bg-background/80 px-4 backdrop-blur md:px-6">
+    <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-border bg-surface px-4 md:px-6">
       {/* Left: hamburger toggle + brand */}
       <div className="flex items-center gap-2">
         {/* <SidebarTrigger
@@ -84,8 +84,8 @@ export function Topbar() {
               title={t("announcements.openModal", "Open announcements")}
               className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <Volume2
-                className="h-4 w-4 -scale-x-100"
+              <Megaphone
+                className="h-4 w-4 -rotate-30 -scale-x-100"
                 aria-hidden="true"
               />
             </button>

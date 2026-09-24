@@ -56,14 +56,14 @@ function renderBody(evidence: Evidence) {
       return <Placeholder label="Video playback unavailable in mock" sublabel={evidence.storageRef ?? evidence.value} />;
     case "console":
       return (
-        <pre className="max-h-40 overflow-auto rounded bg-zinc-950 px-2 py-1 font-mono text-xs leading-relaxed text-zinc-100">
-          {evidence.value || <span className="text-zinc-400">[content stored at /api/evidence/{evidence.storageRef}]</span>}
+        <pre className="max-h-40 overflow-auto rounded-md bg-technical px-2 py-1 font-mono text-xs leading-relaxed text-technical-foreground">
+          {evidence.value || <span className="text-technical-muted">[content stored at /api/evidence/{evidence.storageRef}]</span>}
         </pre>
       );
     case "network":
       return (
-        <pre className="max-h-40 overflow-auto rounded bg-zinc-950 px-2 py-1 font-mono text-xs leading-relaxed text-zinc-100">
-          {evidence.value || <span className="text-zinc-400">[content stored at /api/evidence/{evidence.storageRef}]</span>}
+        <pre className="max-h-40 overflow-auto rounded-md bg-technical px-2 py-1 font-mono text-xs leading-relaxed text-technical-foreground">
+          {evidence.value || <span className="text-technical-muted">[content stored at /api/evidence/{evidence.storageRef}]</span>}
         </pre>
       );
     case "url":

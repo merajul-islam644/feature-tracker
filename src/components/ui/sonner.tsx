@@ -4,9 +4,10 @@ import { useThemeStore, applyTheme } from "@/store/themeStore";
 type ToasterProps = React.ComponentProps<typeof Sonner>;
 
 /*
- * Sonner toaster — see DESIGN-APP-v1.md §7.21.
- * Toasts: rounded-xl border shadow-elevated.
- * Icons: success CheckCircle2, error CircleAlert, warning TriangleAlert.
+ * Sonner toaster — see DESIGN-SYSTEM-REWRITE.md §3 "Toasts".
+ * Compact system messages: rounded-lg, surface bg, border, shadow-lg.
+ * Success / error / info / warning only tint the BORDER, so the surface
+ * stays neutral and the icon carries the meaning.
  */
 const Toaster = ({ ...props }: ToasterProps) => {
   const mode = useThemeStore((s) => s.mode);
@@ -28,16 +29,16 @@ const Toaster = ({ ...props }: ToasterProps) => {
       toastOptions={{
         classNames: {
           toast:
-            "group toast group-[.toaster]:bg-card group-[.toaster]:text-card-foreground group-[.toaster]:border-border group-[.toaster]:shadow-elevated group-[.toaster]:rounded-xl",
+            "group toast group-[.toaster]:bg-surface group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg group-[.toaster]:rounded-lg",
           description: "group-[.toast]:text-muted-foreground",
           actionButton:
             "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground",
           cancelButton:
             "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
-          success: "group-[.toaster]:border-emerald-500/40",
-          error: "group-[.toaster]:border-destructive/40",
-          info: "group-[.toaster]:border-sky-500/40",
-          warning: "group-[.toaster]:border-amber-500/40",
+          success: "group-[.toaster]:border-success-border",
+          error: "group-[.toaster]:border-destructive-border",
+          info: "group-[.toaster]:border-info-border",
+          warning: "group-[.toaster]:border-warning-border",
         },
       }}
       {...props}

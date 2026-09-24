@@ -10,7 +10,11 @@ export default {
     },
     extend: {
       colors: {
-        border: "hsl(var(--border))",
+        border: {
+          DEFAULT: "hsl(var(--border))",
+          strong: "hsl(var(--border-strong))",
+          subtle: "hsl(var(--border-subtle))",
+        },
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
@@ -19,6 +23,8 @@ export default {
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
+          muted: "hsl(var(--primary-muted))",
+          border: "hsl(var(--primary-border))",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
@@ -27,6 +33,8 @@ export default {
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
+          muted: "hsl(var(--destructive-muted))",
+          border: "hsl(var(--destructive-border))",
         },
         muted: {
           DEFAULT: "hsl(var(--muted))",
@@ -45,23 +53,55 @@ export default {
           foreground: "hsl(var(--card-foreground))",
         },
 
-        /* Semantic tokens — see DESIGN-APP-v1.md §2.2 */
+        /* Mode-agnostic surface tokens — see DESIGN-SYSTEM-REWRITE.md */
+        surface: {
+          DEFAULT: "hsl(var(--surface))",
+          muted: "hsl(var(--surface-muted))",
+          subtle: "hsl(var(--surface-subtle))",
+          raised: "hsl(var(--surface-raised))",
+        },
+        panel: {
+          DEFAULT: "hsl(var(--panel))",
+          foreground: "hsl(var(--panel-foreground))",
+        },
+        subtle: {
+          foreground: "hsl(var(--subtle-foreground))",
+        },
+
+        /* Semantic tokens — see DESIGN-APP-v1.md §2.2 + DESIGN-SYSTEM-REWRITE.md */
         success: {
           DEFAULT: "hsl(var(--success))",
           foreground: "hsl(var(--success-foreground))",
+          muted: "hsl(var(--success-muted))",
+          border: "hsl(var(--success-border))",
         },
         warning: {
           DEFAULT: "hsl(var(--warning))",
           foreground: "hsl(var(--warning-foreground))",
+          muted: "hsl(var(--warning-muted))",
+          border: "hsl(var(--warning-border))",
         },
         info: {
           DEFAULT: "hsl(var(--info))",
           foreground: "hsl(var(--info-foreground))",
+          muted: "hsl(var(--info-muted))",
+          border: "hsl(var(--info-border))",
         },
         error: {
           DEFAULT: "hsl(var(--error))",
           foreground: "hsl(var(--error-foreground))",
         },
+
+        /* Technical surface — same in both modes (code/logs/AI/evidence) */
+        technical: {
+          DEFAULT: "hsl(var(--technical))",
+          foreground: "hsl(var(--technical-foreground))",
+          muted: "hsl(var(--technical-muted))",
+          border: "hsl(var(--technical-border))",
+        },
+
+        /* Input background — distinct from page background */
+        "input-background": "hsl(var(--input-background))",
         ai: {
           DEFAULT: "hsl(var(--ai))",
           foreground: "hsl(var(--ai-foreground))",

@@ -5,37 +5,43 @@ import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /*
- * Button — see DESIGN-APP-v1.md §7.1.
+ * Button — see DESIGN-SYSTEM-REWRITE.md §3 "Buttons".
  *
- * Variants: default | destructive | outline | secondary | ghost | link | danger | ai
- *   ai = indigo → violet gradient; reserved for AI surfaces.
+ * Variants: default | destructive | outline | secondary | ghost | link
+ *   - default     : primary indigo, single solid color
+ *   - destructive : red, only when the action is actually destructive
+ *   - outline     : neutral surface, used for secondary actions
+ *   - secondary   : muted surface, used in toolbars / data rows
+ *   - ghost       : hover surface only, used for utility icons
+ *   - link        : text-only with underline-on-hover
  *
  * Sizes mirror the spec: sm (h-8), default (h-9), lg (h-10), xl (h-11),
  * icon (h-9 w-9), icon-sm (h-8 w-8).
+ *
+ * AI surfaces use --technical tokens via the AI Assistant component, NOT a
+ * gradient button — the gradient was retired in the 2026-09 design rewrite.
  */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground hover:bg-indigo-600 dark:hover:bg-indigo-500",
+          "bg-primary text-primary-foreground hover:bg-primary/90",
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive/90",
         outline:
-          "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+          "border border-border bg-surface text-foreground hover:bg-accent",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        ghost: "hover:bg-accent hover:text-accent-foreground",
+        ghost: "text-muted-foreground hover:bg-accent hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
-        danger: "bg-red-600 text-white hover:bg-red-700 active:bg-red-800",
-        ai: "bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-ai hover:shadow-elevated hover:from-indigo-600 hover:to-violet-700",
       },
       size: {
         default: "h-9 px-4 text-sm",
         sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-10 rounded-lg px-5 text-sm",
-        xl: "h-11 rounded-xl px-6 text-sm",
+        lg: "h-10 rounded-md px-5 text-sm",
+        xl: "h-11 rounded-md px-6 text-sm",
         icon: "h-9 w-9",
         "icon-sm": "h-8 w-8",
       },

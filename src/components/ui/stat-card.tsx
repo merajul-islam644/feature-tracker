@@ -18,7 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 type Tone = "default" | "success" | "warning" | "error" | "info";
 
 const toneStyles: Record<Tone, string> = {
-  default: "bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300",
+  default: "bg-primary-muted text-primary",
   success: "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300",
   warning: "bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300",
   error: "bg-red-50 text-red-600 dark:bg-red-500/15 dark:text-red-300",
@@ -60,9 +60,9 @@ export const StatCard = React.forwardRef<HTMLDivElement, StatCardProps>(
     ref
   ) => {
     const cardClasses = cn(
-      "group rounded-xl border bg-card p-5 shadow-card",
-      "transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover",
-      hero && "rounded-2xl p-6",
+      "group rounded-lg border border-border bg-card p-5",
+      "transition-colors duration-200 hover:bg-accent/40",
+      hero && "p-6",
       href && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
       className
     );

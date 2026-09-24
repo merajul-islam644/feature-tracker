@@ -99,9 +99,11 @@ export function ChatPanel({
       {/* Header — 56px height per §9.1 */}
       <header className="flex h-14 items-center justify-between gap-2 border-b border-border bg-card px-4">
         <div className="flex min-w-0 items-center gap-2">
-          {/* AI mark — 28×28 rounded-lg indigo→violet gradient per §9.1 */}
+          {/* AI mark — solid primary indigo per DESIGN-SYSTEM-REWRITE.md §3.
+              The indigo→violet gradient was retired in favour of the
+              signature single-accent system. */}
           <div
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-ai"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground"
             aria-hidden="true"
           >
             <Bot className="h-3.5 w-3.5" />
@@ -152,7 +154,14 @@ export function ChatPanel({
 
       <div
         ref={scrollRef}
-        className="flex-1 space-y-3 overflow-y-auto bg-muted/20 p-4"
+        // `min-h-0` is required on a flex item with overflow so the
+        // scroll container actually clips instead of growing to fit
+        // its content (which would push the page itself into
+        // vertical scroll). `overflow-x-hidden` guards against any
+        // child that somehow exceeds the panel width (long URLs,
+        // wide tool cards, etc.) and would otherwise introduce a
+        // horizontal scrollbar.
+        className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto bg-muted/20 p-4"
         aria-live="polite"
         aria-relevant="additions"
       >
@@ -170,13 +179,13 @@ export function ChatPanel({
         {sending && (
           <div className="flex w-full items-end gap-2" aria-live="polite">
             <div
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary"
               aria-hidden="true"
             >
               <Bot className="h-3.5 w-3.5" />
             </div>
             <div
-              className="flex items-center gap-1.5 rounded-2xl rounded-bl-md border border-border bg-card px-3.5 py-2.5"
+              className="flex items-center gap-1.5 rounded-md border border-border bg-surface-muted px-3.5 py-2.5"
               aria-label="Assistant is thinking"
             >
               {[0, 150, 300].map((delay) => (
@@ -190,7 +199,7 @@ export function ChatPanel({
           </div>
         )}
         {activityLog.length > 0 && (
-          <div className="rounded-xl border border-border bg-card p-3">
+          <div className="rounded-md border border-border bg-surface-muted p-3">
             <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               {runActive ? (
                 <>

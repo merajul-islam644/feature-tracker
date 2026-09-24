@@ -34,7 +34,7 @@ export function IssueTrackerHeader({
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <span
-            className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300"
+            className="flex h-8 w-8 items-center justify-center rounded-md bg-primary-muted text-primary"
             aria-hidden="true"
           >
             <Bug className="h-4 w-4" />
@@ -85,7 +85,7 @@ export function IssueTrackerHeader({
           </>
         )}
         {!isRunning && !isPaused && (
-          <Button variant="ai" size="lg" onClick={onStart} disabled={loading}>
+          <Button variant="default" size="lg" onClick={onStart} disabled={loading}>
             {loading ? (
               <>
                 <Spinner className="h-4 w-4" aria-hidden="true" />
