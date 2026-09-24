@@ -890,12 +890,30 @@ async function proxyAiChat(req, res) {
   //   3. `provider.sendChat` itself aborts on signal.
   const abort = new AbortController();
   let disconnected = false;
+  let responseStarted = false;
   let abortedReason = null;
+  let bodyReadMs = null;
+  let upstreamMs = null;
+  const reqStartedAt = Date.now();
   const chatTimer = setTimeout(() => {
     abortedReason = "upstream_timeout";
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[prod-backend] /api/ai/chat upstream timeout fired after ${CHAT_TIMEOUT_MS}ms (provider=${providerId}, url=${cfg.url})`,
+    );
     abort.abort();
   }, CHAT_TIMEOUT_MS);
   req.on("close", () => {
+    // Node emits 'close' on the IncomingMessage TWICE in normal HTTP/1.1
+    // keep-alive: once when the request is "completed" (we sent our
+    // response), and again when the underlying socket closes. The first
+    // is expected and not a bug; only the pre-response one is interesting.
+    if (responseStarted) return;
+    const sinceStart = Date.now() - reqStartedAt;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[prod-backend] /api/ai/chat req.close fired (pre-response) after ${sinceStart}ms — bodyReadMs=${bodyReadMs}, upstreamMs=${upstreamMs}, provider=${providerId}, url=${cfg.url}`,
+    );
     if (!disconnected) {
       disconnected = true;
       abortedReason = "client_disconnected";
@@ -904,7 +922,9 @@ async function proxyAiChat(req, res) {
   });
 
   try {
+    const bodyReadStart = Date.now();
     const raw = await readBodyCapped(req, MAX_BODY_BYTES);
+    bodyReadMs = Date.now() - bodyReadStart;
     const parsed = raw ? safeJsonParse(raw) : {};
     const userText = typeof parsed?.text === "string" ? parsed.text : "";
     const systemPrompt =
@@ -933,6 +953,7 @@ async function proxyAiChat(req, res) {
     // Provider receives an Anthropic-format body; each provider
     // factory translates to its native wire (or passes through for
     // Anthropic) and returns Anthropic-format JSON.
+    const upstreamStart = Date.now();
     const response = await provider.sendChat(
       cfg,
       {
@@ -943,6 +964,11 @@ async function proxyAiChat(req, res) {
         ...(tools ? { tools } : {}),
       },
       abort.signal,
+    );
+    upstreamMs = Date.now() - upstreamStart;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[prod-backend] /api/ai/chat upstream returned in ${upstreamMs}ms (provider=${providerId}, responseKeys=${response && typeof response === "object" ? Object.keys(response).join(",") : typeof response})`,
     );
     clearTimeout(chatTimer);
     if (disconnected || abort.signal.aborted) {
@@ -957,12 +983,14 @@ async function proxyAiChat(req, res) {
       // path three times.
       // eslint-disable-next-line no-console
       console.warn(
-        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) — returning 499`,
+        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) after upstream=${upstreamMs}ms bodyRead=${bodyReadMs}ms — returning 499`,
       );
+      responseStarted = true;
       res.statusCode = 499;
       res.end();
       return;
     }
+    responseStarted = true;
     sendJson(res, 200, response);
   } catch (err) {
     clearTimeout(chatTimer);
@@ -971,12 +999,20 @@ async function proxyAiChat(req, res) {
       console.warn(
         `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) mid-error: ${
           err instanceof Error ? err.message : String(err)
-        } — returning 499`,
+        } (upstreamMs=${upstreamMs}, bodyReadMs=${bodyReadMs}) — returning 499`,
       );
+      responseStarted = true;
       res.statusCode = 499;
       res.end();
       return;
     }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[prod-backend] /api/ai/chat upstream failure (provider=${providerId}, url=${cfg.url}): ${
+        err instanceof Error ? err.message : String(err)
+      } (upstreamMs=${upstreamMs}, bodyReadMs=${bodyReadMs})`,
+    );
+    responseStarted = true;
     sendUpstreamError(res, err);
   }
 }
@@ -1074,7 +1110,12 @@ async function proxyAiAvatar(req, res) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), AVATAR_TIMEOUT_MS);
   let disconnected = false;
+  let responseStarted = false;
   req.on("close", () => {
+    // See proxyAiChat for the responseStarted rationale — Node fires
+    // 'close' once at request completion (post-response, normal) and
+    // again at socket teardown. Only the pre-response one is interesting.
+    if (responseStarted) return;
     disconnected = true;
     abort.abort();
   });
@@ -1092,18 +1133,22 @@ async function proxyAiAvatar(req, res) {
     if (disconnected) {
       // Browser hung up. Set 499 before res.end() so we never emit
       // an empty 200 — same defensive pattern as proxyAiChat.
+      responseStarted = true;
       res.statusCode = 499;
       res.end();
       return;
     }
+    responseStarted = true;
     sendJson(res, 200, result);
   } catch (err) {
     clearTimeout(timer);
     if (disconnected || abort.signal.aborted) {
+      responseStarted = true;
       res.statusCode = 499;
       res.end();
       return;
     }
+    responseStarted = true;
     sendJson(res, 502, {
       error: "upstream_failure",
       message: err instanceof Error ? err.message : String(err),
