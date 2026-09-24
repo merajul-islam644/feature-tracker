@@ -53,13 +53,24 @@ const GATEWAY_MODEL =
   process.env.ANTHROPIC_MODEL ??
   "claude-sonnet-4-5";
 const VERIFY_URL = (process.env.VERIFY_BACKEND_URL ?? "").replace(/\/+$/, "");
+const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN ?? "";
+const REPLICATE_MODEL =
+  process.env.REPLICATE_AVATAR_MODEL ?? "fofr/face-to-many";
+const REPLICATE_VERSION = process.env.REPLICATE_AVATAR_MODEL_VERSION ?? "";
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = "0.0.0.0";
 const DIST_DIR = path.resolve(process.cwd(), "dist");
 
 // Belt-and-braces: cap request bodies. Anthropic + tool-catalog bodies stay
 // well under 1 MB; 5 MB is generous headroom for any future expansion.
+// The AI avatar endpoint needs more — the source photo is 4 MB at the
+// picker and base64 inflates to ~5.3 MB on the wire; 10 MB gives a safety
+// margin. Each handler that needs the wider cap passes the constant in
+// directly; the chat / verify / secrets / evidence paths keep the 5 MB
+// default by reading from `MAX_BODY_BYTES` explicitly.
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const AVATAR_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const AVATAR_TIMEOUT_MS = 65_000;
 // requestTimeout: 90 s. Anthropic with max_tokens 4096 + tools can run 30–60 s.
 // SSE endpoint overrides this per-request via res.setTimeout(0) below.
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -142,6 +153,10 @@ server.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(`[prod-backend]   VERIFY_BACKEND_URL=${VERIFY_URL || "(unset — /api/verify/* returns 503)"}`);
   // eslint-disable-next-line no-console
+  console.log(`[prod-backend]   REPLICATE_API_TOKEN=${REPLICATE_TOKEN ? "(set)" : "(unset — /api/ai/avatar returns 503)"}`);
+  // eslint-disable-next-line no-console
+  console.log(`[prod-backend]   REPLICATE_AVATAR_MODEL=${REPLICATE_MODEL}`);
+  // eslint-disable-next-line no-console
   console.log(`[prod-backend]   DIST_DIR=${DIST_DIR}`);
 });
 
@@ -166,6 +181,18 @@ function handleApi(req, res, pathname, reqUrl) {
       return;
     }
     proxyAiChat(req, res);
+    return;
+  }
+
+  // POST /api/ai/avatar — Replicate face stylization. Returns the
+  // generated image as a data URL so the browser can render it without a
+  // CORS round-trip.
+  if (pathname === "/api/ai/avatar") {
+    if (method !== "POST") {
+      sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+    proxyAiAvatar(req, res);
     return;
   }
 
@@ -288,6 +315,215 @@ async function proxyAiChat(req, res) {
   } catch (err) {
     sendUpstreamError(res, err);
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  POST /api/ai/avatar — port of vite.config.ts aiAvatarProxy.
+//
+//  Wire shape (JSON, matches the dev proxy so the client is the same
+//  in both environments):
+//    request:   { imageBase64: string, style?: string }
+//    response:  { avatarDataUrl: string, contentType: string, durationMs: number }
+//  Error codes: `avatar_not_configured` (503), `payload_too_large` (413),
+//  `bad_request` (400), `avatar_timeout` (504), `upstream_failure` (502).
+// ────────────────────────────────────────────────────────────────────────────
+async function proxyAiAvatar(req, res) {
+  if (!REPLICATE_TOKEN) {
+    sendJson(res, 503, {
+      error: "avatar_not_configured",
+      message:
+        "REPLICATE_API_TOKEN is not set on the prod-backend process. Set it (and optionally REPLICATE_AVATAR_MODEL / REPLICATE_AVATAR_MODEL_VERSION) to enable AI avatar generation.",
+    });
+    return;
+  }
+
+  let raw;
+  try {
+    raw = await readBodyCapped(req, AVATAR_MAX_BODY_BYTES);
+  } catch (err) {
+    // readBodyCapped throws a statusCode-bearing Error on cap trips; route
+    // it through the shared helper so 413 lands as `payload_too_large`,
+    // not the generic 502.
+    if (err && err.statusCode === 413) {
+      sendJson(res, 413, {
+        error: "payload_too_large",
+        message: "Avatar request body too large",
+      });
+      return;
+    }
+    sendUpstreamError(res, err);
+    return;
+  }
+
+  const parsed = raw ? safeJsonParse(raw) : {};
+  const imageBase64 =
+    typeof parsed?.imageBase64 === "string" ? parsed.imageBase64 : "";
+  const style = typeof parsed?.style === "string" ? parsed.style : "3D";
+  if (!imageBase64) {
+    sendJson(res, 400, {
+      error: "bad_request",
+      message: "imageBase64 is required",
+    });
+    return;
+  }
+
+  const inputImage = imageBase64.startsWith("data:")
+    ? imageBase64
+    : `data:image/jpeg;base64,${imageBase64}`;
+
+  // Pin version when set; otherwise send the model name so Replicate
+  // resolves the latest version. Identical policy to the dev proxy.
+  const createBody = {
+    input: {
+      image: inputImage,
+      style,
+      prompt: "",
+      prompt_strength: 0.9,
+      number_of_images: 1,
+      disable_safety_checker: true,
+    },
+    ...(REPLICATE_VERSION
+      ? { version: REPLICATE_VERSION }
+      : { model: REPLICATE_MODEL }),
+  };
+
+  const start = Date.now();
+  let createRes;
+  try {
+    createRes = await fetch("https://api.replicate.com/v1/predictions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Token ${REPLICATE_TOKEN}`,
+      },
+      body: JSON.stringify(createBody),
+    });
+  } catch (err) {
+    sendUpstreamError(res, err);
+    return;
+  }
+
+  if (!createRes.ok) {
+    const text = await createRes.text();
+    sendJson(res, createRes.status, {
+      error: "upstream_failure",
+      message: `Replicate create failed: ${text.slice(0, 500)}`,
+    });
+    return;
+  }
+
+  const prediction = await createRes.json();
+  const predictionId = prediction?.id;
+  if (!predictionId) {
+    sendJson(res, 502, {
+      error: "upstream_failure",
+      message: "Replicate returned no prediction id",
+    });
+    return;
+  }
+
+  // Poll until settled / timeout / browser disconnect. The chat / verify
+  // helpers don't need this; the avatar handler is the only one whose
+  // upstream is genuinely async. req.on("close") is best-effort — Node
+  // keeps the connection alive for the duration of the wait regardless,
+  // but if the client disconnects we stop polling.
+  let final = prediction;
+  let aborted = false;
+  req.on("close", () => {
+    aborted = true;
+  });
+
+  while (!aborted) {
+    if (Date.now() - start > AVATAR_TIMEOUT_MS) {
+      fetch(
+        `https://api.replicate.com/v1/predictions/${predictionId}/cancel`,
+        {
+          method: "POST",
+          headers: { authorization: `Token ${REPLICATE_TOKEN}` },
+        },
+      ).catch(() => {});
+      sendJson(res, 504, {
+        error: "avatar_timeout",
+        message:
+          "AI avatar generation took too long. Try again with a different photo or style.",
+      });
+      return;
+    }
+    if (
+      final.status === "succeeded" ||
+      final.status === "failed" ||
+      final.status === "canceled"
+    ) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+    const pollRes = await fetch(
+      `https://api.replicate.com/v1/predictions/${predictionId}`,
+      { headers: { authorization: `Token ${REPLICATE_TOKEN}` } },
+    );
+    if (pollRes.ok) {
+      final = await pollRes.json();
+    }
+  }
+  if (aborted) {
+    fetch(
+      `https://api.replicate.com/v1/predictions/${predictionId}/cancel`,
+      {
+        method: "POST",
+        headers: { authorization: `Token ${REPLICATE_TOKEN}` },
+      },
+    ).catch(() => {});
+    res.end();
+    return;
+  }
+  if (final.status !== "succeeded") {
+    sendJson(res, 502, {
+      error: "upstream_failure",
+      message:
+        typeof final?.error === "string"
+          ? final.error
+          : `prediction ${final.status}`,
+    });
+    return;
+  }
+
+  const output = final.output;
+  const firstUrl = Array.isArray(output)
+    ? output.find((v) => typeof v === "string")
+    : typeof output === "string"
+      ? output
+      : null;
+  if (!firstUrl) {
+    sendJson(res, 502, {
+      error: "upstream_failure",
+      message: "Replicate returned no output URL",
+    });
+    return;
+  }
+
+  let dlRes;
+  try {
+    dlRes = await fetch(firstUrl);
+  } catch (err) {
+    sendUpstreamError(res, err);
+    return;
+  }
+  if (!dlRes.ok) {
+    sendJson(res, 502, {
+      error: "upstream_failure",
+      message: `Failed to download avatar (${dlRes.status})`,
+    });
+    return;
+  }
+  const mime = dlRes.headers.get("content-type") ?? "image/png";
+  const buf = Buffer.from(await dlRes.arrayBuffer());
+  const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+  const durationMs = Date.now() - start;
+  sendJson(res, 200, {
+    avatarDataUrl: dataUrl,
+    contentType: mime,
+    durationMs,
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────

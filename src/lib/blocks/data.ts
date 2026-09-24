@@ -1026,6 +1026,12 @@ export interface CloudUserProfile {
   ItemId: string;
   userId: string;
   imageFileId?: string;
+  /** Origin of the current picture — "original" (raw upload) or "ai"
+   *  (Replicate-stylized). Optional so legacy rows keep parsing. */
+  source?: string;
+  /** Style preset the AI avatar was generated with. Only meaningful when
+   *  `source === "ai"`. */
+  style?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
@@ -1037,13 +1043,27 @@ export interface UserProfilePic {
   userId: string;
   /** Blocks Data Storage file id of the picture; null while unset. */
   imageFileId: string | null;
+  /** Origin of the current picture. Defaults to `"original"` when the
+   *  field is missing on legacy rows (see `toUserProfilePic`). */
+  source: "original" | "ai";
+  /** Style preset — only meaningful when `source === "ai"`. */
+  style: string | null;
 }
 
 export function toUserProfilePic(c: CloudUserProfile): UserProfilePic {
+  // Defensive parse: legacy rows pre-dating the `source` field come back
+  // with `source: undefined`. Default to `"original"` so existing UI
+  // paths (and any future "is this an AI avatar?" filter) keep working
+  // without a backfill migration.
+  const rawSource = c.source;
+  const source: "original" | "ai" =
+    rawSource === "ai" ? "ai" : "original";
   return {
     id: c.ItemId,
     userId: c.userId ?? "",
     imageFileId: c.imageFileId || null,
+    source,
+    style: c.style || null,
   };
 }
 
@@ -1217,7 +1237,11 @@ export const announcementsCollection = blocksClient.data.collection<CloudAnnounc
 // caller's own row for the upload upsert (an unselected filter column is
 // silently dropped by the gateway — the duplicate-rows lesson from Issue).
 export const userProfilesCollection = blocksClient.data.collection<CloudUserProfile>("UserProfile", {
-  fields: ["userId", "imageFileId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  // `source` and `style` MUST be selected — `useProfilePics` reads them via
+  // the `toUserProfilePic` adapter to surface the "AI-generated" badge and
+  // any future re-render flows. An unselected column reads as `undefined`,
+  // which would silently drop the AI marker on every read.
+  fields: ["userId", "imageFileId", "source", "style", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` is in `fields` for the same filter reason as `userProfiles` —
 // the upsert looks up the member's row by `userId`. `projectIdsJson` is

@@ -5,6 +5,8 @@
   "description": "Per-user profile extras the IAM record doesn't carry. Today that's the profile picture: the image bytes live in Blocks Data Storage (files) and this row maps an IAM user id to the uploaded file's id, so every avatar surface in the app can resolve userId → picture. One row per user (upsert by the app layer).",
   "fields": [
     { "name": "userId", "type": "String", "requiredOn": 3, "description": "IAM user id (OIDC `sub`) this profile belongs to. The app layer treats it as unique — upsert semantics, not append." },
-    { "name": "imageFileId", "type": "String", "requiredOn": 0, "description": "Blocks Data Storage file id of the user's profile picture (returned by the presign/upload flow). Empty while the user hasn't uploaded one — surfaces render the initials fallback." }
+    { "name": "imageFileId", "type": "String", "requiredOn": 0, "description": "Blocks Data Storage file id of the user's profile picture (returned by the presign/upload flow). Empty while the user hasn't uploaded one — surfaces render the initials fallback." },
+    { "name": "source", "type": "String", "requiredOn": 0, "description": "Origin of the current picture: `\"original\"` (raw upload via the file picker) or `\"ai\"` (AI-stylized avatar generated through Replicate). Defaults to `\"original\"` for rows created before this field existed — `useUserProfilePic` falls back when missing." },
+    { "name": "style", "type": "String", "requiredOn": 0, "description": "Style preset the AI avatar was generated with (only meaningful when `source === \"ai\"`). One of `3D | Anime | Emoji | Pixel art | Video game | Clay | Illustration | Toy` — see `avatarGenerator.ts` for the canonical list." }
   ]
 }

@@ -24,6 +24,7 @@ import {
   UserAvatar,
 } from "@/components/ui/UserAvatar";
 import { Button } from "@/components/ui/button";
+import { AIAvatarButton } from "@/components/settings/AIAvatarButton";
 import {
   Card,
   CardContent,
@@ -415,7 +416,7 @@ function ProfilePictureUpload() {
   };
 
   return (
-    <div className="mt-3">
+    <div className="mt-3 flex flex-wrap items-center gap-2">
       <input
         ref={inputRef}
         type="file"
@@ -437,6 +438,11 @@ function ProfilePictureUpload() {
           ? t("settings.account.uploading", "Uploading…")
           : t("settings.account.upload", "Upload picture")}
       </Button>
+      {/* AI-stylized avatar flow. Renders nothing when the proxy
+          reports `REPLICATE_API_TOKEN` is unset — capability probe
+          lives inside `AIAvatarButton` so the Settings page doesn't
+          have to gate on it. */}
+      <AIAvatarButton />
     </div>
   );
 }

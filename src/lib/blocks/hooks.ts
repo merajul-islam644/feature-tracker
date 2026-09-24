@@ -4574,13 +4574,22 @@ export function useFileDownloadUrl(
 export function useUploadProfilePic(): UseMutationResult<
   { fileId: string },
   Error,
-  { file: File }
+  {
+    file: File;
+    /**
+     * Optional metadata for AI-generated avatars. When provided, the
+     * `UserProfile` row is stamped with `source: "ai"` and the chosen
+     * `style` so downstream UI can branch on it. Defaults to `"original"`
+     * for the plain upload flow (the file picker path).
+     */
+    aiMeta?: { source: "ai"; style: string };
+  }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
   return useMutation({
-    mutationFn: async ({ file }) => {
+    mutationFn: async ({ file, aiMeta }) => {
       if (!userId) {
         throw new Error("You must be signed in to upload a profile picture.");
       }
@@ -4599,9 +4608,17 @@ export function useUploadProfilePic(): UseMutationResult<
       const presign = await presignUpload({
         fileName,
         contentType: file.type,
-        tags: "profile-pic",
+        tags: aiMeta ? "profile-pic-ai" : "profile-pic",
       });
       await uploadToPresignedUrl(presign.uploadUrl, file, file.type);
+
+      // AI-stamped uploads also persist `source` and `style` on the row
+      // so the rest of the app (and any future re-render flows) knows
+      // how the picture was produced. `source` defaults to `"original"`
+      // when omitted — the `toUserProfilePic` adapter applies the same
+      // fallback for legacy rows.
+      const source = aiMeta ? "ai" : "original";
+      const style = aiMeta?.style ?? "";
 
       // Upsert the caller's OWN row: find by userId, update if present
       // (full patch — `userId` is requiredOn 3), create otherwise.
@@ -4615,11 +4632,15 @@ export function useUploadProfilePic(): UseMutationResult<
         await userProfilesCollection.update(existing.ItemId, {
           userId,
           imageFileId: presign.fileId,
+          source,
+          style,
         });
       } else {
         await userProfilesCollection.create({
           userId,
           imageFileId: presign.fileId,
+          source,
+          style,
         });
       }
       return { fileId: presign.fileId };
@@ -4631,6 +4652,65 @@ export function useUploadProfilePic(): UseMutationResult<
         queryKey: queryKeys.fileDownloadUrl(fileId),
         queryFn: () => fetchFileDownloadUrl(fileId),
       });
+    },
+  });
+}
+
+// Upload an AI-generated avatar blob (from the preview modal) to Blocks
+// Storage and stamp the row with `source: "ai"` + the chosen style. The
+// caller passes the data URL the proxy returned; we convert it to a Blob
+// and reuse the existing presign+PUT pipeline via `useUploadProfilePic`.
+// Kept separate from `useUploadProfilePic` so the file-picker flow stays
+// a single, simple `File`-typed input — the AI blob path needs a MIME
+// type and filename derived from the data URL header rather than a real
+// File's metadata.
+export function useUploadAiAvatar(): UseMutationResult<
+  { fileId: string },
+  Error,
+  {
+    dataUrl: string;
+    style: string;
+  }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const upload = useUploadProfilePic();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    // Delegate the storage write to `useUploadProfilePic` so the
+    // presign+PUT+upsert contract lives in exactly one place.
+    mutationFn: async ({ dataUrl, style }) => {
+      // Parse `data:<mime>;base64,<payload>` into a real Blob the
+      // mutation can upload. Mime defaults to png because Replicate
+      // usually returns PNG even when the upstream model advertises
+      // JPEG — matches the chat attachment path's tolerance.
+      const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
+      const mime = match?.[1] || "image/png";
+      const b64 = match?.[2] || "";
+      if (!b64) {
+        throw new Error("Avatar data URL was empty.");
+      }
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: mime });
+      const ext = mime.split("/")[1] || "png";
+      // Wrap the Blob in a File so `useUploadProfilePic`'s type check
+      // (`file.type.startsWith("image/")`) accepts it. The File name is
+      // stamped with user + time by the hook, but the explicit name here
+      // keeps the storage record consistent with the chat-attachment
+      // naming pattern if anyone inspects it later.
+      const file = new File([blob], `avatar.${ext}`, { type: mime });
+      return upload.mutateAsync({
+        file,
+        aiMeta: { source: "ai", style },
+      });
+    },
+    onSuccess: () => {
+      // `useUploadProfilePic` already invalidates `profilePics` and
+      // prefills the download URL — nothing to do here. Re-invalidate
+      // for symmetry in case the inner mutation ever changes shape.
+      qc.invalidateQueries({ queryKey: queryKeys.profilePics(userId) });
     },
   });
 }

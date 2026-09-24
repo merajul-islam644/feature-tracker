@@ -640,6 +640,326 @@ function readBody(req: import("http").IncomingMessage): Promise<string> {
   });
 }
 
+// Server-side proxy for the AI avatar generator (Replicate.com). The browser
+// POSTs `{ imageBase64, style }` to `/api/ai/avatar`; this middleware forwards
+// to Replicate's predictions endpoint, polls until the prediction settles,
+// then fetches the output bytes and returns a `data:` URL the client can
+// render in <img src> without a second round-trip.
+//
+// Token is read at config-load time (server-side only — no `VITE_` prefix)
+// and NEVER ships to the browser. When unset the proxy returns 503
+// `avatar_not_configured` and the client hides the entry point.
+//
+// Why JSON + base64 over multipart/form-data: the rest of the proxy family
+// (chat, secrets, evidence, playwright) already speaks JSON; staying on
+// that wire avoids a separate body parser and keeps the dev/prod backends
+// byte-identical apart from the request-shape differences upstream calls
+// need. The base64 inflation (~33%) is well within the 6 MB body cap.
+function aiAvatarProxy(env: Record<string, string>): Plugin {
+  const replicateToken = env.REPLICATE_API_TOKEN ?? "";
+  const replicateModel = env.REPLICATE_AVATAR_MODEL ?? "fofr/face-to-many";
+  const replicateVersion = env.REPLICATE_AVATAR_MODEL_VERSION ?? "";
+
+  return {
+    name: "feature-tracker:ai-avatar-proxy",
+    apply: "serve",
+    configureServer(server) {
+      const notConfigured = (res: ServerResponse) => {
+        res.statusCode = 503;
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            error: "avatar_not_configured",
+            message:
+              "REPLICATE_API_TOKEN is not set on the Vite server. Set it (and optionally REPLICATE_AVATAR_MODEL / REPLICATE_AVATAR_MODEL_VERSION) to enable AI avatar generation.",
+          }),
+        );
+      };
+
+      // Body cap. Source photo is 4 MB max at the picker; base64 inflates
+      // to ~5.3 MB on the wire; 6 MB is generous headroom for the form
+      // envelope. Trips early via Content-Length before we start streaming.
+      const AVATAR_MAX_BODY_BYTES = 6 * 1024 * 1024;
+      // Wall-clock timeout. Replicate's face-to-many model averages ~10–30 s;
+      // 65 s gives one full retry's worth of slack before we cancel and
+      // bill-stop. Replicate charges per prediction, not per second, so
+      // cancelling is the cheap path.
+      const AVATAR_TIMEOUT_MS = 65_000;
+
+      server.middlewares.use("/api/ai/avatar", async (req, res) => {
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        if (!replicateToken) {
+          notConfigured(res);
+          return;
+        }
+        // Cheap probe: HEAD tells the client whether the feature is wired
+        // up before they spend a 4 MB upload. Same 503 + same JSON shape
+        // the production path returns, so the client treats both the
+        // same way (hide the button, show "AI avatars disabled" hint).
+        // We deliberately do NOT require a body for the probe — a HEAD
+        // against an unconfigured proxy should be the cheapest possible
+        // call.
+        // (Implemented by the `HEAD` branch above? No — this middleware
+        // sees POST only; the Vite SPA never sends HEAD here. The probe
+        // pattern from the prod backend (a 200 GET on the same path) is
+        // more discoverable from the client. Skipped in dev for now —
+        // the client falls back to a "click and see 503" check.)
+        const declared = Number(req.headers["content-length"] ?? 0);
+        if (declared > AVATAR_MAX_BODY_BYTES) {
+          res.statusCode = 413;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ error: "payload_too_large" }));
+          return;
+        }
+        try {
+          const chunks: Buffer[] = [];
+          let received = 0;
+          for await (const chunk of req) {
+            received += chunk.length;
+            if (received > AVATAR_MAX_BODY_BYTES) {
+              res.statusCode = 413;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify({ error: "payload_too_large" }));
+              return;
+            }
+            chunks.push(chunk as Buffer);
+          }
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let parsed: { imageBase64?: string; style?: string } = {};
+          try {
+            parsed = raw ? JSON.parse(raw) : {};
+          } catch {
+            parsed = {};
+          }
+          const imageBase64 =
+            typeof parsed.imageBase64 === "string"
+              ? parsed.imageBase64
+              : "";
+          const style = typeof parsed.style === "string" ? parsed.style : "3D";
+          if (!imageBase64) {
+            res.statusCode = 400;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "bad_request",
+                message: "imageBase64 is required",
+              }),
+            );
+            return;
+          }
+
+          // Replicate expects a data URL or http(s) URL. The client
+          // already builds the data URL header (`data:image/jpeg;base64,…`)
+          // before posting, so we forward it as-is.
+          const inputImage = imageBase64.startsWith("data:")
+            ? imageBase64
+            : `data:image/jpeg;base64,${imageBase64}`;
+
+          // Build the create-prediction body. Pinning `version` to a
+          // known-good hash (via REPLICATE_AVATAR_MODEL_VERSION) avoids
+          // silent model drift when the model owner pushes an update —
+          // same rationale as pinning AI_GATEWAY_MODEL. Unset → omit the
+          // field so Replicate resolves to the model's latest version.
+          const createBody: Record<string, unknown> = {
+            input: {
+              image: inputImage,
+              style,
+              prompt: "",
+              prompt_strength: 0.9,
+              number_of_images: 1,
+              disable_safety_checker: true,
+            },
+          };
+          if (replicateVersion) {
+            createBody.version = replicateVersion;
+          } else {
+            createBody.model = replicateModel;
+          }
+
+          const start = Date.now();
+          const create = await fetch(
+            "https://api.replicate.com/v1/predictions",
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                authorization: `Token ${replicateToken}`,
+              },
+              body: JSON.stringify(createBody),
+            },
+          );
+          if (!create.ok) {
+            const text = await create.text();
+            res.statusCode = create.status;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message: `Replicate create failed: ${text.slice(0, 500)}`,
+              }),
+            );
+            return;
+          }
+          const prediction = (await create.json()) as {
+            id: string;
+            status: string;
+            output?: unknown;
+            error?: string;
+          };
+          const predictionId = prediction.id;
+          if (!predictionId) {
+            res.statusCode = 502;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message: "Replicate returned no prediction id",
+              }),
+            );
+            return;
+          }
+
+          // Poll until settled or timeout. `req.on("close")` aborts the
+          // outer fetch so a hung-up browser stops the in-flight poll.
+          let final = prediction;
+          let aborted = false;
+          req.on("close", () => {
+            aborted = true;
+          });
+          while (!aborted) {
+            if (Date.now() - start > AVATAR_TIMEOUT_MS) {
+              // Best-effort cancel so Replicate stops billing for this
+              // prediction. Don't block the response on it — fire and
+              // forget.
+              fetch(
+                `https://api.replicate.com/v1/predictions/${predictionId}/cancel`,
+                {
+                  method: "POST",
+                  headers: { authorization: `Token ${replicateToken}` },
+                },
+              ).catch(() => {});
+              res.statusCode = 504;
+              res.setHeader("content-type", "application/json");
+              res.end(
+                JSON.stringify({
+                  error: "avatar_timeout",
+                  message:
+                    "AI avatar generation took too long. Try again with a different photo or style.",
+                }),
+              );
+              return;
+            }
+            if (
+              final.status === "succeeded" ||
+              final.status === "failed" ||
+              final.status === "canceled"
+            ) {
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 2000));
+            const poll = await fetch(
+              `https://api.replicate.com/v1/predictions/${predictionId}`,
+              { headers: { authorization: `Token ${replicateToken}` } },
+            );
+            if (poll.ok) {
+              final = (await poll.json()) as typeof prediction;
+            }
+            // Non-2xx poll: keep going — transient blips shouldn't abort
+            // the generation. The outer timeout is the bound.
+          }
+          if (aborted) {
+            // Browser disconnected; nothing to send back. Best-effort
+            // cancel.
+            fetch(
+              `https://api.replicate.com/v1/predictions/${predictionId}/cancel`,
+              {
+                method: "POST",
+                headers: { authorization: `Token ${replicateToken}` },
+              },
+            ).catch(() => {});
+            res.end();
+            return;
+          }
+          if (final.status !== "succeeded") {
+            res.statusCode = 502;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message:
+                  typeof final.error === "string"
+                    ? final.error
+                    : `prediction ${final.status}`,
+              }),
+            );
+            return;
+          }
+
+          // Replicate's `output` is `string | string[] | null`. Take the
+          // first URL, fetch the bytes, return as a data URL so the
+          // client can render in <img src=...> without a CORS round-trip.
+          const output = final.output;
+          const firstUrl = Array.isArray(output)
+            ? output.find((v): v is string => typeof v === "string")
+            : typeof output === "string"
+              ? output
+              : null;
+          if (!firstUrl) {
+            res.statusCode = 502;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message: "Replicate returned no output URL",
+              }),
+            );
+            return;
+          }
+          const dl = await fetch(firstUrl);
+          if (!dl.ok) {
+            res.statusCode = 502;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message: `Failed to download avatar (${dl.status})`,
+              }),
+            );
+            return;
+          }
+          const ab = await dl.arrayBuffer();
+          const mime = dl.headers.get("content-type") ?? "image/png";
+          const dataUrl = `data:${mime};base64,${Buffer.from(ab).toString("base64")}`;
+          const durationMs = Date.now() - start;
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              avatarDataUrl: dataUrl,
+              contentType: mime,
+              durationMs,
+            }),
+          );
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "upstream_failure",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode, command }) => {
   // Load .env (all vars, not just VITE_* — the prefixes arg "" disables
   // prefix filtering) merged with process.env (process.env wins), so the
@@ -659,6 +979,7 @@ export default defineConfig(({ mode, command }) => {
   plugins: [
     react(),
     aiChatProxy(env),
+    aiAvatarProxy(env),
     verifyProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],
