@@ -535,10 +535,15 @@ process.on("SIGTERM", () => {
 server.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(`[prod-backend] listening on http://${HOST}:${PORT}`);
+  // The AI chat gateway is intentionally NOT read from env — each user
+  // supplies URL / model / token via Settings → AI Gateway, and the SPA
+  // forwards them as `x-ai-gateway-*` headers on every chat request
+  // (see the comment block at the top of this file). If a request
+  // arrives without those headers, `proxyAiChat` returns 503
+  // `ai_not_configured`. The startup log just notes that the gateway is
+  // user-supplied rather than printing a (nonexistent) env value.
   // eslint-disable-next-line no-console
-  console.log(`[prod-backend]   AI_GATEWAY_URL=${GATEWAY_URL || "(unset — /api/ai/chat returns 503)"}`);
-  // eslint-disable-next-line no-console
-  console.log(`[prod-backend]   AI_GATEWAY_TOKEN=${GATEWAY_TOKEN ? "(set)" : "(unset — /api/ai/chat returns 503)"}`);
+  console.log(`[prod-backend]   AI_GATEWAY=user-supplied via Settings → AI Gateway (no env read — per-user only)`);
   // eslint-disable-next-line no-console
   console.log(`[prod-backend]   VERIFY_BACKEND_URL=${VERIFY_URL || "(unset — /api/verify/* returns 503)"}`);
   // eslint-disable-next-line no-console
