@@ -888,8 +888,19 @@ async function proxyAiChat(req, res) {
   //      bail out well before either would reap the request from under
   //      us and surface the slowdown as a 502 the chat client can retry.
   //   3. `provider.sendChat` itself aborts on signal.
+  //
+  // IMPORTANT: `req.on("close")` in production also fires spuriously
+  // during normal HTTP/1.1 keep-alive cleanup, or when an intermediate
+  // hop (Azure ALB → Cloud Run → container) tears down its hop-level
+  // connection for reasons unrelated to the user's intent (idle
+  // reaper, instance recycling, response-was-already-streamed, etc).
+  // The visible symptom is a 499 returned ~500 ms after the request
+  // lands even though the browser never actually navigated away. We
+  // treat that as a SOFT disconnect: we still tear down `res`, but we
+  // keep the upstream call running so a client-side retry (now in the
+  // 499 retry list) gets a fresh request that isn't fighting the dead
+  // socket. The original response is logged-and-dropped.
   const abort = new AbortController();
-  let disconnected = false;
   let responseStarted = false;
   let abortedReason = null;
   let bodyReadMs = null;
@@ -903,6 +914,13 @@ async function proxyAiChat(req, res) {
     );
     abort.abort();
   }, CHAT_TIMEOUT_MS);
+  // Disconnect-only flag — flipped when the request body is closed
+  // before we've sent a response. We do NOT abort the upstream fetch
+  // here (see the IMPORTANT comment above); we just stop trying to
+  // write to `res`. The upstream promise still resolves and the result
+  // is logged-and-dropped.
+  let disconnected = false;
+  let dropResponse = false;
   req.on("close", () => {
     // Node emits 'close' on the IncomingMessage TWICE in normal HTTP/1.1
     // keep-alive: once when the request is "completed" (we sent our
@@ -914,11 +932,9 @@ async function proxyAiChat(req, res) {
     console.warn(
       `[prod-backend] /api/ai/chat req.close fired (pre-response) after ${sinceStart}ms — bodyReadMs=${bodyReadMs}, upstreamMs=${upstreamMs}, provider=${providerId}, url=${cfg.url}`,
     );
-    if (!disconnected) {
-      disconnected = true;
-      abortedReason = "client_disconnected";
-      abort.abort();
-    }
+    disconnected = true;
+    abortedReason = "client_disconnected";
+    dropResponse = true;
   });
 
   try {
@@ -971,19 +987,31 @@ async function proxyAiChat(req, res) {
       `[prod-backend] /api/ai/chat upstream returned in ${upstreamMs}ms (provider=${providerId}, responseKeys=${response && typeof response === "object" ? Object.keys(response).join(",") : typeof response})`,
     );
     clearTimeout(chatTimer);
-    if (disconnected || abort.signal.aborted) {
-      // Browser went away OR the upstream timeout fired. Don't try to
-      // write a 200-with-empty-body — that's the bug that broke the
-      // chat UI (the client called `res.json()` on an empty payload
-      // and threw "Unexpected end of JSON input"). Send 499
-      // (Nginx-style "Client Closed Request") so the socket is
-      // cleanly closed AND the chat client's retry loop — which only
-      // retries on 502/503/504/429 — falls straight through to its
-      // local mock fallback instead of bouncing off the same broken
-      // path three times.
+    if (dropResponse) {
+      // Client (or an intermediate hop) closed the socket before we
+      // could write — but the upstream call already produced a real
+      // answer. We log the success and drop it on the floor rather
+      // than write into a dead socket. The client's retry loop now
+      // includes 499 in its retry list, so the next request will
+      // either succeed or surface the upstream error properly.
+      // eslint-disable-next-line no-console
+      console.log(
+        `[prod-backend] /api/ai/chat dropping successful response (upstream=${upstreamMs}ms, bodyRead=${bodyReadMs}ms) — socket already closed`,
+      );
+      responseStarted = true;
+      return;
+    }
+    if (abort.signal.aborted) {
+      // Upstream timeout fired. Don't try to write a 200-with-empty-body
+      // — that's the bug that broke the chat UI (the client called
+      // `res.json()` on an empty payload and threw "Unexpected end of
+      // JSON input"). Send 499 (Nginx-style "Client Closed Request") so
+      // the socket is cleanly closed AND the chat client's retry loop
+      // — which now retries on 499/502/503/504/429 — has a chance to
+      // succeed before falling through to its local mock fallback.
       // eslint-disable-next-line no-console
       console.warn(
-        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) after upstream=${upstreamMs}ms bodyRead=${bodyReadMs}ms — returning 499`,
+        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "upstream_timeout"}) after upstream=${upstreamMs}ms bodyRead=${bodyReadMs}ms — returning 499`,
       );
       responseStarted = true;
       res.statusCode = 499;
@@ -994,10 +1022,10 @@ async function proxyAiChat(req, res) {
     sendJson(res, 200, response);
   } catch (err) {
     clearTimeout(chatTimer);
-    if (disconnected || abort.signal.aborted) {
+    if (dropResponse || abort.signal.aborted) {
       // eslint-disable-next-line no-console
       console.warn(
-        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? "client_disconnected"}) mid-error: ${
+        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? (abort.signal.aborted ? "upstream_timeout" : "client_disconnected")}) mid-error: ${
           err instanceof Error ? err.message : String(err)
         } (upstreamMs=${upstreamMs}, bodyReadMs=${bodyReadMs}) — returning 499`,
       );

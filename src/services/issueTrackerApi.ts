@@ -510,12 +510,21 @@ export const issueTrackerApi = {
       // state changes happen only on an Allow click — so retry transient
       // statuses with short exponential backoff (1s, 2s; 3 attempts
       // total) before falling through to the offline matcher.
+      //
+      // 499 (Nginx-style "Client Closed Request") is included because the
+      // prod proxy emits it whenever `req.on("close")` fires pre-response
+      // — which in production happens transiently when an intermediate hop
+      // (Azure ALB / Cloud Run) closes the underlying socket without
+      // actually forwarding a disconnect signal. A single retry gives the
+      // second hop a fresh connection and almost always succeeds; without
+      // it, the chat panel would fall through to the local mock on
+      // benign infra noise.
       let res = await chatFetch();
       for (
         let attempt = 1;
         attempt <= 2 &&
         !res.ok &&
-        [502, 503, 504, 429].includes(res.status);
+        [499, 502, 503, 504, 429].includes(res.status);
         attempt++
       ) {
         options.onRetry?.(attempt + 1, 3);

@@ -627,24 +627,39 @@ function AiGatewayConfigSection() {
     }
     setTestStatus({ kind: "testing" });
     try {
-      const res = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-ai-chat-provider": snapshot.provider,
-          "x-ai-gateway-url": snapshot.gatewayUrl,
-          "x-ai-gateway-model": snapshot.model,
-          "x-ai-gateway-token": snapshot.token,
-        },
-        // Tiny prompt: 1-token expected reply, no tool calls. `system` is the
-        // bare minimum the proxy needs to build an Anthropic-format body.
-        body: JSON.stringify({
-          text: "Reply with the single word OK.",
-          system: "You are a connectivity probe. Reply with just OK.",
-          history: [],
-          tools: [],
-        }),
-      });
+      const chatFetch = () =>
+        fetch("/api/ai/chat", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-ai-chat-provider": snapshot.provider,
+            "x-ai-gateway-url": snapshot.gatewayUrl,
+            "x-ai-gateway-model": snapshot.model,
+            "x-ai-gateway-token": snapshot.token,
+          },
+          // Tiny prompt: 1-token expected reply, no tool calls. `system` is the
+          // bare minimum the proxy needs to build an Anthropic-format body.
+          body: JSON.stringify({
+            text: "Reply with the single word OK.",
+            system: "You are a connectivity probe. Reply with just OK.",
+            history: [],
+            tools: [],
+          }),
+        });
+      // Mirror the chat client's retry list (see issueTrackerApi.ts
+      // sendChatMessage): 499/502/503/504/429 are transient infra
+      // hiccups — one retry on the same socket failure masks Azure ALB
+      // / Cloud Run keep-alive noise that otherwise surfaces here as
+      // "Connection failed with status 499".
+      let res = await chatFetch();
+      for (
+        let attempt = 1;
+        attempt <= 2 && !res.ok && [499, 502, 503, 504, 429].includes(res.status);
+        attempt++
+      ) {
+        await new Promise((r) => setTimeout(r, attempt * 1000));
+        res = await chatFetch();
+      }
       if (!res.ok) {
         const text = await res.text();
         // The proxy wraps upstream failures as `upstream_<status>: <body>` —
