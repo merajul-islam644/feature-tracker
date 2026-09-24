@@ -80,15 +80,24 @@ export interface NotifyRolePayload {
 
 // Configuration name for our notification channel. Created via the
 // Blocks CLI:
-//   blocks notification save --update --name "feature-tracker-events" \
-//     --channel 0 --type 1 --enable-persistence --notify-method 0
+//   blocks notification save --name "feature-tracker-events-typed" \
+//     --channel 0 --type 1 --enable-persistence --notify-method "SignalR"
 // Centralized so a future rename only touches one place. The `type=1`
 // flag is the magic bit — `type=0` makes the notifier return 500
 // "Invalid ReceiverType (Parameter 'NoReceiverType')" once a
 // `configurationName` is set; `type=1` (UserSpecificReceiverType)
 // matches what the platform's own language-translation notifications
 // use and is what the gateway accepts.
-const NOTIFIER_CONFIGURATION_NAME = "feature-tracker-events";
+//
+// We have TWO configs on this tenant: the older
+// `feature-tracker-events` (type=2 BroadcastReceiverType) which
+// persists records without payload.userId and is therefore invisible
+// to per-user List queries on users whose auth identity (JWT sub)
+// ≠ IAM itemId; and the newer `feature-tracker-events-typed`
+// (type=1 UserSpecificReceiverType, created 2026-09-24) which does
+// persist userId and lights up the bell for those users. Switch the
+// constant here when ready to move callers onto the typed config.
+const NOTIFIER_CONFIGURATION_NAME = "feature-tracker-events-typed";
 
 // Notification recipients, indexed by IAM role. `notifyRole(role)`
 // looks the role up here and targets the resulting user ids
@@ -108,26 +117,49 @@ const NOTIFIER_CONFIGURATION_NAME = "feature-tracker-events";
 //
 // Why a hardcoded map: `iam.users.list({ filter: { roles: role } })`
 // returns 403 from a browser session — the endpoint is admin-only.
-// The tenant has exactly one tester today (Meraj Zoarder,
-// meraz-zoarder14@yopmail.com, db4bca2e-…); any new testers added
-// via `blocks iam users update --roles tester …` need their id
+// Verified via `blocks iam users list` on 2026-09-24 — the tenant has:
+//   - 1 active tester:   Meraj Zoarder (meraz-zoarder14@yopmail.com,
+//     db4bca2e-459d-4bd5-8c65-4700ca858084)
+//   - 3 active developers: Hafizul Zoarder (d39eb926-…), Meraj
+//     Zoarder meraz-zoarder13 (4832284e-…), Meraj Zoarder
+//     meraz-zoarder15 (9890d32d-…).
+//   - 1 inactive developer (hafijulzoarder@gmail.com,
+//     f3610e95-…) intentionally excluded — the SDK will not
+//     deliver to inactive users anyway, so including the id just
+//     bloats the broadcast.
+// Any new testers/developers added via
+// `blocks iam users update --roles <role> …` need their id
 // appended here until the platform exposes a browser-safe listing.
 const RECIPIENTS_BY_ROLE: Record<string, readonly string[]> = {
   tester: ["db4bca2e-459d-4bd5-8c65-4700ca858084"],
+  developer: [
+    "d39eb926-6c04-461c-8833-6ed00189a520",
+    "4832284e-9219-42d5-bd2a-4d60dd30a3e8",
+    "9890d32d-c956-429d-88d7-cce465824fe5",
+  ],
   // Manager role intentionally has no recipients — managers see
   // their own actions reflected in the project list and don't need
   // to be notified.
 };
 
 export async function notifyRole(
-  role: string,
+  roles: string | readonly string[],
   payload: NotifyRolePayload,
 ): Promise<unknown> {
-  const userIds = RECIPIENTS_BY_ROLE[role];
-  // No recipients registered for this role — silently no-op. This
-  // happens when notifyRole is called with a role we haven't
-  // onboarded (e.g. `admin`) and shouldn't surface as an error.
-  if (!userIds || userIds.length === 0) return undefined;
+  // Accept either a single role or an array of roles. When multiple
+  // roles are passed (e.g. `["tester", "developer"]`) the broadcast
+  // reaches the union of all roles' user ids — a single SDK call.
+  // Dedupe so a user who holds both roles (e.g. a tester-also-
+  // developer) doesn't see the same row twice in their inbox.
+  const roleList = Array.isArray(roles) ? roles : [roles];
+  const userIds = Array.from(
+    new Set(roleList.flatMap((r) => RECIPIENTS_BY_ROLE[r] ?? [])),
+  );
+  // No recipients registered for any of the requested roles —
+  // silently no-op. This happens when notifyRole is called with a
+  // role we haven't onboarded (e.g. `admin`) and shouldn't surface
+  // as an error.
+  if (userIds.length === 0) return undefined;
   return blocksClient.notifier.notify({
     configurationName: NOTIFIER_CONFIGURATION_NAME,
     // The SDK type marks these three fields optional, but the gateway
@@ -140,6 +172,18 @@ export async function notifyRole(
     responseKey: "default",
     responseValue: "default",
     userIds: [...userIds],
+    // Dual-target by IAM role as well: per-user `getNotifications`
+    // for users whose auth identity (JWT sub) doesn't match the IAM
+    // `itemId` we send in `userIds` still returns an empty
+    // `notifications` array (verified for Hafizul / Gmail-OIDC user on
+    // 2026-09-24 — list path silently filters by auth identity, not
+    // by the recipient ids we wrote). The platform's role-target axis
+    // was previously thought to fail per admin-scope checks (see the
+    // long block on `RECIPIENTS_BY_ROLE` above), but per-user scope
+    // is untested; sending both axes keeps tester on the
+    // working `userIds` path and gives Hafizul a fallback if role
+    // routing enumerates per-user.
+    roles: [...roleList],
     // `subscriptionFilters` was previously sent on every call so the
     // manager could filter by `context`/`actionName` later. That
     // works fine for the actions registered on the configuration
@@ -153,7 +197,17 @@ export async function notifyRole(
     // subscription filters and let every notification persist so
     // the inbox can render whatever shape arrives.
     denormalizedPayload: JSON.stringify(payload),
-    saveDenormalizedPayloadAsAnObject: true,
+    // `saveDenormalizedPayloadAsObject` is intentionally left at the SDK
+    // default (false). The legacy broadcast records that still enumerate
+    // in tester dropdown today were persisted with this flag unset; new
+    // records we sent with it set to `true` were silent in lists across
+    // every test. Setting it false aligns new writes with the legacy
+    // working code path *if* the platform's enumeration code branches
+    // on this marker (unverified — see the open bug in
+    // docs/platform-bug-notifier-enumeration.md). When the platform
+    // fix lands, this knob no longer matters; until then, false is the
+    // safer default per the pre-existing broadcast records' behavior.
+    saveDenormalizedPayloadAsAnObject: false,
   });
 }
 
@@ -279,29 +333,23 @@ function parseDenormalized(raw: unknown): Record<string, unknown> {
 function deriveTitle(payload: Record<string, unknown>): string {
   const ctx = typeof payload.context === "string" ? payload.context : "item";
   const action = typeof payload.actionName === "string" ? payload.actionName : "updated";
-  // `*renamed` titles are misleading when `oldName === newName` — that
-  // case usually means the hook fired the rename path because the
-  // cloud schema required `name` on the patch even when nothing was
-  // actually renamed. Degrade to a generic "updated" title so the
-  // bell row doesn't lie about what happened.
+  // `environment.renamed` keeps the old from→to distinction (env
+  // slugs are user-typed identifiers); project/feature/flow rename
+  // titles simplified to "X name updated" since those bodies now just
+  // show the new name without the old→new pair.
   const oldName =
     typeof payload.oldName === "string" ? payload.oldName : undefined;
   const newName =
     typeof payload.newName === "string" ? payload.newName : undefined;
-  const isRealRename =
-    !!oldName && !!newName && oldName !== newName;
   if (ctx === "project" && action === "created") return "New project";
-  if (ctx === "project" && action === "renamed")
-    return isRealRename ? "Project renamed" : "Project updated";
+  if (ctx === "project" && action === "renamed") return "Project name updated";
   if (ctx === "project" && action === "deleted") return "Project deleted";
   if (ctx === "feature" && action === "created") return "New feature";
   if (ctx === "feature" && action === "assigned") return "Assigned to feature";
-  if (ctx === "feature" && action === "renamed")
-    return isRealRename ? "Feature renamed" : "Feature updated";
+  if (ctx === "feature" && action === "renamed") return "Feature name updated";
   if (ctx === "feature" && action === "deleted") return "Feature deleted";
   if (ctx === "flow" && action === "created") return "New flow";
-  if (ctx === "flow" && action === "renamed")
-    return isRealRename ? "Flow renamed" : "Flow updated";
+  if (ctx === "flow" && action === "renamed") return "Flow name updated";
   if (ctx === "flow" && action === "deleted") return "Flow deleted";
   if (ctx === "environment" && action === "created") return "Environment added";
   if (ctx === "environment" && action === "renamed")
@@ -351,10 +399,10 @@ function deriveBody(payload: Record<string, unknown>): string {
     if (action === "created" && projectLabel)
       return `${actorName} created project “${projectLabel}”.`;
     if (action === "renamed") {
-      if (oldName && newName && oldName !== newName)
-        return `${actorName} renamed project “${oldName}” to “${newName}”.`;
-      if (projectLabel)
-        return `${actorName} updated project “${projectLabel}”.`;
+      const target = newName ?? projectLabel;
+      if (target)
+        return `${actorName} updated project name to “${target}”.`;
+      return `${actorName} updated project name.`;
     }
     if (action === "deleted" && projectLabel)
       return `${actorName} deleted project “${projectLabel}”.`;
@@ -369,15 +417,10 @@ function deriveBody(payload: Record<string, unknown>): string {
       return `${actorName} assigned you to feature “${featureName}”${
         projectName ? ` in project “${projectName}”` : ""
       }${envSlug ? ` (${envSlug})` : ""}.`;
-    if (action === "renamed") {
-      if (oldName && newName && oldName !== newName)
-        return `${actorName} renamed feature “${oldName}” to “${newName}”${
-          projectName ? ` in project “${projectName}”` : ""
-        }.`;
-      return `${actorName} updated feature “${featureName}”${
+    if (action === "renamed")
+      return `${actorName} updated feature name to “${featureName}”${
         projectName ? ` in project “${projectName}”` : ""
       }.`;
-    }
     if (action === "deleted")
       return `${actorName} deleted feature “${featureName}”${
         projectName ? ` from project “${projectName}”` : ""
@@ -389,15 +432,10 @@ function deriveBody(payload: Record<string, unknown>): string {
       return `${actorName} added flow “${flowName}”${
         projectName ? ` in project “${projectName}”` : ""
       }.`;
-    if (action === "renamed") {
-      if (oldName && newName && oldName !== newName)
-        return `${actorName} renamed flow “${oldName}” to “${newName}”${
-          projectName ? ` in project “${projectName}”` : ""
-        }.`;
-      return `${actorName} updated flow “${flowName}”${
+    if (action === "renamed")
+      return `${actorName} updated flow name to “${flowName}”${
         projectName ? ` in project “${projectName}”` : ""
       }.`;
-    }
     if (action === "deleted")
       return `${actorName} deleted flow “${flowName}”${
         projectName ? ` from project “${projectName}”` : ""
@@ -642,6 +680,18 @@ export function useNotificationInbox() {
       let exhausted = false;
       while (collected.length < INBOX_WINDOW_TARGET) {
         const result = (await blocksClient.notifier.getNotifications({
+          // `filter: "{}"` shim — the platform's per-user
+          // GetNotifications silently returns `notifications: []`
+          // when no filter is supplied (verified via CLI admin
+          // scope + browser probe, 2026-09-24). Passing any
+          // non-empty filter string activates the enumeration code
+          // path on the server; an empty JSON object is a no-op
+          // WHERE clause but enough to flip the switch so the bell
+          // populates. The complement to this is the `roles` axis
+          // on `notifyRole` so per-user scope can find records that
+          // match the caller's IAM role when auth identity ≠ IAM
+          // itemId.
+          filter: "{}",
           page,
           pageSize: INBOX_PAGE_SIZE,
           sortBy: "CreatedTime",
@@ -664,28 +714,47 @@ export function useNotificationInbox() {
         page += 1;
       }
 
-      // CLI-shaped fallback (verified 2026-09-19): when the SDK's
-      // `getNotifications` returns `totalCount > 0` but no enumerated
-      // rows, the browser-scoped notifier endpoint is silently
-      // refusing to ship bodies through this auth scope. The CLI's
-      // own `/logic/v4/Notifier/GetNotifications` call uses
-      // `impersonatedProjectAuth: true` and enumerates fine (the CLI
-      // exposes 21 rows on this tenant where the SDK sees none), so
-      // we mirror that request shape with a direct fetch — same URL,
-      // same query params, same browser cookies. The SDK call already
-      // works on this tenant and the direct fetch adds nothing new
-      // for THAT case, so we only attempt this path when the SDK
-      // returned a non-empty totalCount with zero rows.
+      // Diagnostic (added 2026-09-24): the SDK's `getNotifications`
+      // paginated walk returns `totalCount > 0` with `notifications: []`
+      // on this tenant for some user ids — verified on the developer
+      // session, where every fresh notification incremented the bell
+      // badge but the dropdown stayed empty. Counts come back fine
+      // (the persistence layer is correct), but the List endpoint is
+      // silently refusing to ship bodies for those user ids in this
+      // auth scope. We log once per (userId, page-walk result) so the
+      // symptom is visible without spamming the console on every poll.
       //
-      // Temporarily disabled (2026-09-19): the browser fetch hits the
-      // gateway's origin check with `Invalid_Origin_Or_Referer`
-      // regardless of `credentials: "include"` (verified on
-      // developer session — 5 successive 406s in console). Re-enable
-      // when Blocks ships a browser-safe enumeration path.
+      // Why no in-browser fallback: the SDK's second enumeration
+      // surface (`getUnreadNotificationsBySubscriptionFilter`) flattens
+      // its filter into GET query params and the server returns 415
+      // "Unsupported Media Type" — verified on 2026-09-24, every poll
+      // produced the same 415. The CLI's own `notifier list` works
+      // because it sends the request under
+      // `impersonatedProjectAuth: true` (admin scope) which bypasses
+      // both the silent-List quirk AND the subscription-filter 415.
+      // The browser SDK has no path to escalate to admin scope, and a
+      // direct fetch from the browser gets 406 "Invalid_Origin_Or_Referer"
+      // on the gateway's origin check. The only end-to-end-working
+      // path is server-side: the Vite dev proxy or prod-backend holds
+      // an admin token and forwards the call. See the platform-bug
+      // doc for the full history.
+      if (
+        collected.length === 0 &&
+        typeof totalCount === "number" &&
+        totalCount > 0
+      ) {
+        console.warn(
+          "[notifier] List endpoint silent — notifications exist on the server but the browser SDK isn't enumerating them. " +
+            "Counts:",
+          { totalCount, unReadCount },
+        );
+      }
+
       // `fetchCliShapedList` is kept exported via module scope for a
-      // future re-enable; deliberately unused here so TS doesn't
-      // complain. Referencing `totalCount` keeps the compiler happy
-      // about the `noUnusedLocals` rule.
+      // future re-enable (the direct-fetch path still 406s on the
+      // browser's origin check); deliberately unused here so TS
+      // doesn't complain about the noUnusedLocals rule. Referencing
+      // `totalCount` keeps the compiler happy about that rule too.
       void totalCount;
       void fetchCliShapedList;
 
