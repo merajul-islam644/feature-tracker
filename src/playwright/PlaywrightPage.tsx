@@ -225,7 +225,10 @@ export function RunSummary({
           ? "RUNNING"
           : "—";
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs" aria-live="polite">
+    <div
+      className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs"
+      aria-live="polite"
+    >
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
           {passed} passed
@@ -568,7 +571,9 @@ export function PlaywrightPage() {
             <span>Script</span>
             {running ? <Loader2 size={14} className="animate-spin" /> : null}
           </header>
-          <div className={`flex-1 overflow-auto pw-editor ${running ? "pointer-events-none opacity-60" : ""}`}>
+          <div
+            className={`flex-1 overflow-auto pw-editor ${running ? "pointer-events-none opacity-60" : ""}`}
+          >
             <CodeMirror
               value={code}
               theme={oneDark}
@@ -591,7 +596,10 @@ export function PlaywrightPage() {
             />
           </div>
         </div>
-        <div className="flex max-h-[60vh] flex-col rounded-lg border border-border bg-card overflow-hidden pw-output-card" ref={consoleRef}>
+        <div
+          className="flex max-h-[60vh] flex-col rounded-lg border border-border bg-card overflow-hidden pw-output-card"
+          ref={consoleRef}
+        >
           <header className="flex items-center justify-between gap-2 border-b border-border px-4 py-2 text-sm font-medium text-foreground pw-card-header">
             <span>Output</span>
             {running ? <Loader2 size={14} className="animate-spin" /> : null}
@@ -609,14 +617,19 @@ export function PlaywrightPage() {
               />
               <ul className="flex-1 overflow-y-auto p-2 space-y-1 text-xs">
                 {logs.map((log) => (
-                  <li key={log.id} className={`flex flex-col gap-1 rounded-md border border-border bg-background px-3 py-2 pw-log pw-log-${log.kind}${
-                    log.kind === "error"
-                      ? " border-red-500/30 bg-red-500/5"
-                      : log.kind === "expect"
-                        ? " border-blue-500/30 bg-blue-500/5"
-                        : ""
-                  }`}>
-                    <span className="inline-flex w-fit items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{log.kind}</span>
+                  <li
+                    key={log.id}
+                    className={`flex flex-col gap-1 rounded-md border border-border bg-background px-3 py-2 pw-log pw-log-${log.kind}${
+                      log.kind === "error"
+                        ? " border-red-500/30 bg-red-500/5"
+                        : log.kind === "expect"
+                          ? " border-blue-500/30 bg-blue-500/5"
+                          : ""
+                    }`}
+                  >
+                    <span className="inline-flex w-fit items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                      {log.kind}
+                    </span>
                     <span className="flex flex-col gap-1">
                       {log.text}
                       {log.detail ? (
@@ -687,7 +700,9 @@ function HighlightOverlay({ info }: { info: HighlightInfo }) {
       }}
       data-pw-action={info.action}
     >
-      <span className="absolute -top-6 left-0 inline-flex items-center gap-1 rounded bg-blue-500 px-2 py-0.5 text-[10px] font-medium text-white shadow">{info.label}</span>
+      <span className="absolute -top-6 left-0 inline-flex items-center gap-1 rounded bg-blue-500 px-2 py-0.5 text-[10px] font-medium text-white shadow">
+        {info.label}
+      </span>
     </div>
   );
 }

@@ -620,7 +620,7 @@ function AiGatewayConfigSection() {
         kind: "fail",
         message: t(
           "settings.aiGateway.testMissingFields",
-          "Fill in Gateway URL and Bearer token first.",
+          "Fill in Gateway URL and API Key first.",
         ),
       });
       return;
@@ -854,7 +854,7 @@ function AiGatewayConfigSection() {
       />
       <Input
         type="password"
-        label={t("settings.aiGateway.token", "Bearer token")}
+        label={t("settings.aiGateway.token", "API Key")}
         placeholder={t(
           "settings.aiGateway.tokenPlaceholder",
           "Paste a token for the selected provider",

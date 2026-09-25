@@ -16,7 +16,17 @@ interface ThemeState {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      mode: "system",
+      // Default theme for first-time visitors and any user without a
+      // persisted `ft-theme` entry in localStorage. Was `"system"`
+      // (which falls back to the OS preference), but the product
+      // team wanted the warm-cream light theme as the canonical
+      // baseline — every new login lands on the same brand palette
+      // regardless of the device's dark/light setting, and the user
+      // can opt back into "System" (or pure Dark) from Settings if
+      // they want. Existing users with a persisted `"system"` /
+      // `"dark"` choice keep their setting — `persist` rehydrates
+      // before this default ever takes effect.
+      mode: "light",
       accentColor: null,
       setMode: (mode) => set({ mode }),
       // Persist + apply in one step. Callers don't have to remember to

@@ -4,7 +4,6 @@ import {
   Bug,
   FolderKanban,
   GitBranch,
-  FlaskConical,
   ListChecks,
   Megaphone,
   Users,
@@ -70,8 +69,19 @@ export function DashboardPage() {
   // the broadcast channel. Sharing the hook keeps the "fresh arrival
   // pops the dialog" behaviour intact without forcing the user to
   // hunt for the trigger somewhere else on the dashboard.
-  const [announcementsOpen, setAnnouncementsOpen] =
-    useAnnouncementsAutoOpen();
+  //
+  // Behaviour update: the auto-open target used to be the
+  // `AnnouncementsDialog` drawer, but per the latest product call
+  // the TestConfirmationDialog is now the primary "fresh delivery"
+  // surface — every non-poster member sees the smoke-test modal pop
+  // as soon as a manager posts or reposts an announcement. The
+  // drawer stays on the dashboard as a manual deep-dive into the
+  // archive (still resolves the latest row the same way it always
+  // did), so the broadcast history is still one click away. We
+  // share the same hook state across both surfaces — the modal
+  // opens on a fresh delivery, the drawer follows if and when the
+  // member chooses to open it.
+  const [testModalOpen, setTestModalOpen] = useAnnouncementsAutoOpen();
 
   const projects = projectsQuery.data ?? [];
   const members = useAllJoinedUsers().data ?? [];
@@ -139,43 +149,24 @@ export function DashboardPage() {
             </h1>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {/* Test button — opens the permission-card confirmation
-                modal. Sized to match the Announcements pill (same
-                `h-11`, same border treatment) so the two read as a
-                paired row of utility affordances. The icon (`FlaskConical`)
-                echoes the test/QA semantic of the trigger. */}
-            <TestConfirmationDialog>
-              <button
-                type="button"
-                aria-label={t("dashboard.testButton", "Test")}
-                title={t("dashboard.testButton", "Test")}
-                className={cn(
-                  // Amber treatment mirrors the deployment-notice
-                  // modal the button opens — the pill visually
-                  // previews the card it will reveal. Solid per-mode
-                  // backgrounds (instead of low-opacity washes) keep
-                  // the affordance legible in both themes, and the
-                  // saturated amber border gives the button a
-                  // deliberate edge against the neighbouring
-                  // Announcements pill (which keeps the primary
-                  // tint).
-                  "inline-flex h-11 items-center gap-2 rounded-md border px-4 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2",
-                  "border-amber-500/40 bg-amber-500/10 text-amber-900 hover:bg-amber-500/15 focus-visible:ring-amber-500/60",
-                  "dark:border-amber-500/50 dark:bg-amber-500/15 dark:text-amber-100 dark:hover:bg-amber-500/25 dark:focus-visible:ring-amber-500/70",
-                )}
-              >
-                <FlaskConical
-                  className="h-5 w-5 text-amber-700 dark:text-amber-400"
-                  aria-hidden="true"
-                />
-                <span>{t("dashboard.testButton", "Test")}</span>
-              </button>
-            </TestConfirmationDialog>
+            {/* TestConfirmationDialog — mounted without children so it
+                runs in fully-controlled mode. The auto-open hook
+                (`useAnnouncementsAutoOpen`) drives `open` /
+                `onOpenChange`; the dashboard Test button that used
+                to live here is gone now that the modal pops on its
+                own for every other-role member whenever a manager
+                posts or reposts. No trigger element means no
+                user-initiated manual open path — that's intentional;
+                the modal's contract is "fresh delivery notice" not
+                "manual entry point". The companion drawer
+                (`AnnouncementsDialog` below) is the manual deep-dive
+                into the broadcast history. */}
+            <TestConfirmationDialog
+              open={testModalOpen}
+              onOpenChange={setTestModalOpen}
+            />
 
-            <AnnouncementsDialog
-              open={announcementsOpen}
-              onOpenChange={setAnnouncementsOpen}
-            >
+            <AnnouncementsDialog>
               <button
                 type="button"
                 aria-label={t(

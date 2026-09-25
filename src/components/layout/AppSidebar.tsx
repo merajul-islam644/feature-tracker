@@ -2,7 +2,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   FolderKanban,
-  Bug,
+  ShieldAlert,
   PanelLeftClose,
   PanelLeftOpen,
   FolderTree,
@@ -48,13 +48,12 @@ export function AppSidebar() {
     },
     {
       to: "/issue-tracker",
-      // label: t("nav.issueTracker", "Issue Tracker"),
-      label: t("nav.issueTracker", "Issues"),
-      icon: Bug,
+      label: t("nav.issueTracker", "Issue Tracker"),
+      icon: ShieldAlert,
     },
     {
       to: "/chat",
-      label: t("nav.chat", "Chat"),
+      label: t("nav.chat", "Messages"),
       icon: MessageSquare,
     },
     {

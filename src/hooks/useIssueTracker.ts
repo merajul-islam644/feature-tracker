@@ -119,6 +119,80 @@ function describeStep(step: string): string {
   return check ?? step;
 }
 
+// "Invalid browser observation" detector. Returns true when a browser_*
+// tool's result string shows that the Playwright MCP pointed us at a tab
+// that is NOT our verification page — most commonly about:blank (the MCP
+// opened a fresh tab and the snapshot tool was wired to it) or a
+// snapshot whose accessibility tree is essentially empty. The agent
+// must NOT keep asking for snapshots in that state; it must surface a
+// blocker. Detection is conservative on purpose: we'd rather miss a
+// borderline case than wrongly fire a recovery loop on a normal empty
+// page (a privacy interstitial, an OAuth consent screen, etc.).
+function isInvalidBrowserObservation(toolName: string, result: string): boolean {
+  if (toolName !== "browser_snapshot" && toolName !== "browser_navigate") {
+    return false;
+  }
+  // about:blank is the smoking gun — we never navigate to it on purpose,
+  // and the MCP bridge only ends up there when its internal current-tab
+  // pointer drifted off our verification tab.
+  if (/Page URL:\s*about:blank/.test(result)) return true;
+  // No accessibility tree at all (or a yaml block that's literally just
+  // a single empty line) means the snapshot tool couldn't find elements.
+  if (/```yaml\s*\n\s*-\s*\[?\s*\]?\s*\n?```/.test(result)) return true;
+  if (/```yaml\s*\n\s*```/.test(result)) return true;
+  // Pathological short result with a URL line but no body — almost
+  // always an empty page rendered into about:blank.
+  if (/Page URL:/.test(result) && result.length < 250) return true;
+  return false;
+}
+
+// Browser-verification intent detector. Used by `sendMessage` to decide
+// whether the FIRST turn should carry `tool_choice: any` — without that
+// force, the model can respond with "Acknowledged…" prose and stop, and
+// the auto-continue path (which only triggers AFTER a tool is called)
+// never fires. Plain questions like "what does this app do?" must NOT
+// match — those should keep normal tool_choice=auto behaviour so the
+// model is free to answer with prose.
+//
+// Matches English + Bengali keywords. Bengali verbs use a split() check
+// (\b doesn't work on non-ASCII boundaries) and we normalise the text
+// (lowercased + stripped of punctuation) before matching.
+const BROWSER_VERIFICATION_KEYWORDS = [
+  "verify",
+  "verification",
+  "browser",
+  "navigate",
+  "walk",
+  "walkthrough",
+  "end-to-end",
+  "e2e",
+  "test the app",
+  "check the app",
+  "explore the app",
+  "verify the app",
+  "verify your own",
+  "verify yourself",
+  "verify itself",
+  "verify this app",
+  "verify this site",
+];
+const BROWSER_VERIFICATION_KEYWORDS_BN = [
+  "ভেরিফাই",
+  "যাচাই",
+  "টেস্ট",
+  "ব্রাউজার",
+  "হেঁটে",
+];
+function isBrowserVerificationRequest(message: string): boolean {
+  const lower = message.toLowerCase();
+  if (BROWSER_VERIFICATION_KEYWORDS.some((kw) => lower.includes(kw))) {
+    return true;
+  }
+  // Bengali: split on whitespace + punctuation, then exact-substring match.
+  const tokens = lower.split(/[\s,.!?;:()\[\]{}"'/\\]+/).filter(Boolean);
+  return tokens.some((t) => BROWSER_VERIFICATION_KEYWORDS_BN.includes(t));
+}
+
 // Case-insensitive unique-name matcher for chat-driven feature/flow
 // resolution ("rename the login flow" → which row?). Returns the single
 // row whose name matches, undefined when nothing matches, and THROWS when
@@ -440,6 +514,19 @@ export function useIssueTracker() {
   // continuation injects a forceful reminder. Reset whenever a turn
   // carries at least one tool_use block.
   const narrationOnlyStreakRef = useRef(0);
+  // Consecutive BROWSER observations that came back invalid (about:blank
+  // URL, or a snapshot whose accessibility tree is essentially empty).
+  // Two in a row means the MCP bridge is pointing the snapshot tool at
+  // a tab that isn't our verification page — the agent must NOT keep
+  // asking for snapshots, it must stop and surface the blocker. Reset
+  // on any valid observation.
+  const invalidObservationStreakRef = useRef(0);
+  // Last time a tool call produced REAL progress: navigation landed,
+  // snapshot returned non-trivial content, click produced a state
+  // change, form submission accepted. Combined with narrationOnlyStreak
+  // to distinguish genuine reflection (one narration turn, then act)
+  // from a stuck loop (three narration turns, 15s without progress).
+  const lastProgressAtRef = useRef<number | null>(null);
   // Tracks the most recent auto-continuation's reply. If the model goes
   // silent for `AUTO_CONTINUE_STUCK_MS` without producing a tool_use
   // (i.e. this ref is still pointing at an unanswered turn), a nudge is
@@ -1770,12 +1857,29 @@ export function useIssueTracker() {
       }
       setSendingMessage(true);
       // A fresh user message takes the wheel — reset the auto-continue
-      // budget used by the browser walkthrough loop.
+      // budget used by the browser walkthrough loop. All three
+      // no-progress counters reset together so a stuck state from a
+      // prior walkthrough can't bleed into the new one.
       agentTurnsRef.current = 0;
       narrationOnlyStreakRef.current = 0;
+      invalidObservationStreakRef.current = 0;
+      lastProgressAtRef.current = null;
       lastAutoTurnAtRef.current = null;
+      // Force tool use on the FIRST turn of any browser-verification ask.
+      // Without this, the model can respond with "Acknowledged…"
+      // narration alone and stop — the auto-continue path only fires
+      // AFTER a tool has already been called, so a prose-only opener
+      // leaves the chat idle forever. `tool_choice: any` is the
+      // API-level equivalent of "you MUST emit a tool_use block" —
+      // the model literally cannot comply with prose alone.
+      // Keyword match (vs. always-on) so plain questions like
+      // "what does this app do?" still get a normal answer without a
+      // forced tool call.
+      const isBrowserTask = isBrowserVerificationRequest(trimmed);
       try {
-        await runModelTurn(trimmed);
+        await runModelTurn(trimmed, {
+          toolChoice: isBrowserTask ? { type: "any" } : undefined,
+        });
       } catch {
         toast.error("Unable to send message.");
       } finally {
@@ -2490,6 +2594,19 @@ export function useIssueTracker() {
                 ...browserResultRef.current.slice(-2),
                 `${tool.name} → ${result.slice(0, 4000)}`,
               ];
+              // No-progress tracking for the auto-continue loop: a real
+              // observation (valid snapshot / navigation that landed)
+              // counts as progress; an invalid one (about:blank +
+              // empty snapshot) does NOT. The combined signal lets the
+              // loop distinguish "agent is genuinely reasoning" from
+              // "MCP is pointing at the wrong tab" without forcing the
+              // model to fix infrastructure.
+              if (isInvalidBrowserObservation(tool.name, result)) {
+                invalidObservationStreakRef.current += 1;
+              } else {
+                invalidObservationStreakRef.current = 0;
+                lastProgressAtRef.current = Date.now();
+              }
               return `${browserToolSummary(tool.name, tool.input)} — result: ${result.slice(0, 200)}`;
             } catch (err) {
               return `Playwright tool ${tool.name} failed — ${
@@ -2655,16 +2772,34 @@ export function useIssueTracker() {
                 // continuation prompt, which keeps the AI engaged after
                 // state changes, edits, and chained actions.
                 //
-                // STUCK-DETECTION: if the last few model turns returned
-                // narration-only (no tool_use block), append a forceful
-                // reminder — the walkthrough can't move forward on prose
-                // alone. The streak counter is reset inside runModelTurn
-                // every time a turn carries any tool_use.
+                // STUCK-DETECTION: combine THREE signals so we don't
+                // trigger on a single legitimate reflection pause:
+                //   1. narrationOnlyStreak >= 2 (model returned prose
+                //      without a tool_use block on the last 2+ turns)
+                //   2. invalidObservationStreak >= 2 (MCP pointed us
+                //      at about:blank / an empty tab — the agent MUST
+                //      not keep asking for snapshots)
+                //   3. lastProgressAt is older than 15s (we are
+                //      genuinely idle, not just thinking)
+                // Either (2) or the AND of (1) + (3) triggers the
+                // stuck suffix. A fresh valid observation resets all
+                // three counters in the applyChatAction branch.
                 const narrationStreak = narrationOnlyStreakRef.current;
+                const invalidStreak = invalidObservationStreakRef.current;
+                const lastProgress = lastProgressAtRef.current;
+                const idleMs =
+                  lastProgress === null ? Infinity : Date.now() - lastProgress;
                 const isBrowser = tool.name.startsWith("browser_");
+                const narrationStuck =
+                  narrationStreak >= 2 && idleMs > 15_000;
+                const invalidStuck = invalidStreak >= 2;
                 const stuckSuffix =
-                  narrationStreak >= 2
-                    ? `\n\n⚠️ STUCK-DETECTION: Your last ${narrationStreak} turn(s) returned narration only — no tool_use block. You MUST include exactly ONE tool_use block in THIS reply, paired with ONE narration line. If there is genuinely nothing actionable left, write the FINAL VERIFICATION REPORT (what works, what's broken, evidence you captured) in this same reply — do NOT send another narration-only turn.`
+                  narrationStuck || invalidStuck
+                    ? `\n\n⚠️ STUCK-DETECTION: ${
+                        invalidStuck
+                          ? `The last ${invalidStreak} browser observation(s) returned about:blank or an empty accessibility tree — the Playwright MCP is pointing at the wrong tab. Do NOT request another browser_snapshot. Instead write the FINAL VERIFICATION REPORT in this same reply: list what you observed, what worked, what is blocked, and stop the walkthrough.`
+                          : `Your last ${narrationStreak} turn(s) returned narration only — no tool_use block. You MUST include exactly ONE tool_use block in THIS reply, paired with ONE narration line. If there is genuinely nothing actionable left, write the FINAL VERIFICATION REPORT (what works, what's broken, evidence you captured) in this same reply — do NOT send another narration-only turn.`
+                      }`
                     : "";
                 const continuationPrompt = isBrowser
                   ? `[Continuation] The browser tool "${tool.name}" executed successfully — its result is in the Playwright results block below.
@@ -2707,18 +2842,24 @@ Continue.`;
                 // we are healthy. If it returned narration only and the
                 // user is staring at a stalled chat, schedule a nudge
                 // that fires only if the NEXT turn also stalls (so we
-                // don't interrupt a still-generating reply).
-                if (narrationOnlyStreakRef.current >= 2) {
+                // don't interrupt a still-generating reply). The
+                // invalid-observation streak is included too — two
+                // blank snapshots in a row means even a nudge is
+                // pointless; surface a blocker instead.
+                const needsNudge =
+                  narrationOnlyStreakRef.current >= 2 ||
+                  invalidObservationStreakRef.current >= 2;
+                if (needsNudge) {
                   const turnAt = lastAutoTurnAtRef.current ?? Date.now();
                   window.setTimeout(() => {
                     // Only nudge if no new reply has landed in the
-                    // meantime AND the streak is still at >=2. By then
+                    // meantime AND the streak is still elevated. By then
                     // the AI should have either called a tool or written
                     // the final report — if it hasn't, force it to act.
-                    if (
-                      narrationOnlyStreakRef.current >= 2 &&
-                      lastAutoTurnAtRef.current === turnAt
-                    ) {
+                    const stillStuck =
+                      narrationOnlyStreakRef.current >= 2 ||
+                      invalidObservationStreakRef.current >= 2;
+                    if (stillStuck && lastAutoTurnAtRef.current === turnAt) {
                       // The nudge also uses `tool_choice: any` for the
                       // same reason the auto-continue does: a nudge-only
                       // text reply re-stalls the walkthrough just as
@@ -2728,10 +2869,17 @@ Continue.`;
                       const nudgeToolChoice = isBrowser
                         ? ({ type: "any" } as const)
                         : undefined;
-                      void runModelTurn(
-                        `[Nudge] Your last reply was narration-only and the walkthrough has been idle. Reply with EITHER one tool_use block (next flow, screenshot, console check, etc.) OR the final verification report — no more prose-only turns.`,
-                        { toolChoice: nudgeToolChoice },
-                      ).catch(() => {});
+                      // Pick the right nudge message — an invalid
+                      // browser observation needs a different action
+                      // (write the final report and stop) than a
+                      // generic narration stall (try one more tool).
+                      const nudgeText =
+                        invalidObservationStreakRef.current >= 2
+                          ? `[Nudge] The last ${invalidObservationStreakRef.current} browser observation(s) returned about:blank or an empty accessibility tree — the Playwright MCP is not pointing at the verification tab. Do NOT call browser_snapshot again. Write the FINAL VERIFICATION REPORT now (what you observed, what is blocked, evidence captured) and stop the walkthrough.`
+                          : `[Nudge] Your last reply was narration-only and the walkthrough has been idle. Reply with EITHER one tool_use block (next flow, screenshot, console check, etc.) OR the final verification report — no more prose-only turns.`;
+                      void runModelTurn(nudgeText, {
+                        toolChoice: nudgeToolChoice,
+                      }).catch(() => {});
                     }
                   }, 30_000);
                 }
