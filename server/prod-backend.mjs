@@ -920,12 +920,24 @@ async function proxyAiChat(req, res) {
   // write to `res`. The upstream promise still resolves and the result
   // is logged-and-dropped.
   let disconnected = false;
-  let dropResponse = false;
   req.on("close", () => {
     // Node emits 'close' on the IncomingMessage TWICE in normal HTTP/1.1
     // keep-alive: once when the request is "completed" (we sent our
     // response), and again when the underlying socket closes. The first
     // is expected and not a bug; only the pre-response one is interesting.
+    //
+    // Production note: in production, this fires for LEGITIMATE
+    // requests too (HTTP/1.1 keep-alive cleanup at the Cloud Run or
+    // Azure LB hop, idle reaper, body-already-streamed). The 787007c
+    // "soft disconnect" path was supposed to keep the upstream call
+    // running but ended up also writing 499 on success because of
+    // the dropResponse check below — and that's the bug making every
+    // live chat fail (verified: live /api/ai/chat returns 499 in
+    // 1.5s from Azure LB). We now ONLY set the bookkeeping flag and
+    // log; the response-write paths deliberately ignore `disconnected`
+    // and try to write the response anyway. If the socket really is
+    // dead, sendJson → res.end() throws ERR_STREAM_DESTROYED / EPIPE
+    // which we catch at each write site.
     if (responseStarted) return;
     const sinceStart = Date.now() - reqStartedAt;
     // eslint-disable-next-line no-console
@@ -933,8 +945,6 @@ async function proxyAiChat(req, res) {
       `[prod-backend] /api/ai/chat req.close fired (pre-response) after ${sinceStart}ms — bodyReadMs=${bodyReadMs}, upstreamMs=${upstreamMs}, provider=${providerId}, url=${cfg.url}`,
     );
     disconnected = true;
-    abortedReason = "client_disconnected";
-    dropResponse = true;
   });
 
   try {
@@ -987,19 +997,19 @@ async function proxyAiChat(req, res) {
       `[prod-backend] /api/ai/chat upstream returned in ${upstreamMs}ms (provider=${providerId}, responseKeys=${response && typeof response === "object" ? Object.keys(response).join(",") : typeof response})`,
     );
     clearTimeout(chatTimer);
-    if (dropResponse) {
-      // Client (or an intermediate hop) closed the socket before we
-      // could write — but the upstream call already produced a real
-      // answer. We log the success and drop it on the floor rather
-      // than write into a dead socket. The client's retry loop now
-      // includes 499 in its retry list, so the next request will
-      // either succeed or surface the upstream error properly.
+    if (disconnected) {
+      // Pre-response `req.close` fired but the upstream call already
+      // produced a real answer.  In production the close event fires
+      // spuriously for legitimate requests too (HTTP/1.1 keep-alive
+      // cleanup, Azure ALB hop teardown, Cloud Run idle reaper), and
+      // dropping the response here made every live chat land as 499.
+      // We now TRY to write the response anyway — if the socket is
+      // truly dead, sendJson → res.end() will throw ERR_STREAM_DESTROYED
+      // and we catch it below.
       // eslint-disable-next-line no-console
       console.log(
-        `[prod-backend] /api/ai/chat dropping successful response (upstream=${upstreamMs}ms, bodyRead=${bodyReadMs}ms) — socket already closed`,
+        `[prod-backend] /api/ai/chat attempting write after req.close (upstream=${upstreamMs}ms, bodyRead=${bodyReadMs}ms)`,
       );
-      responseStarted = true;
-      return;
     }
     if (abort.signal.aborted) {
       // Upstream timeout fired. Don't try to write a 200-with-empty-body
@@ -1022,10 +1032,10 @@ async function proxyAiChat(req, res) {
     sendJson(res, 200, response);
   } catch (err) {
     clearTimeout(chatTimer);
-    if (dropResponse || abort.signal.aborted) {
+    if (abort.signal.aborted) {
       // eslint-disable-next-line no-console
       console.warn(
-        `[prod-backend] /api/ai/chat aborted (${abortedReason ?? (abort.signal.aborted ? "upstream_timeout" : "client_disconnected")}) mid-error: ${
+        `[prod-backend] /api/ai/chat upstream_timeout mid-error: ${
           err instanceof Error ? err.message : String(err)
         } (upstreamMs=${upstreamMs}, bodyReadMs=${bodyReadMs}) — returning 499`,
       );
