@@ -434,6 +434,17 @@ export function useIssueTracker() {
   // says stop — the generous cap only guards against a confused model
   // looping forever with nobody watching.
   const agentTurnsRef = useRef(0);
+  // Consecutive model turns that contained NO tool_use blocks (i.e. text
+  // narration only). If this climbs to 2 the AI is stalling — narrating
+  // "I will…" without ever pairing it with a tool call — so the next
+  // continuation injects a forceful reminder. Reset whenever a turn
+  // carries at least one tool_use block.
+  const narrationOnlyStreakRef = useRef(0);
+  // Tracks the most recent auto-continuation's reply. If the model goes
+  // silent for `AUTO_CONTINUE_STUCK_MS` without producing a tool_use
+  // (i.e. this ref is still pointing at an unanswered turn), a nudge is
+  // fired so the walkthrough doesn't appear frozen.
+  const lastAutoTurnAtRef = useRef<number | null>(null);
   // Latest-ref bridge for auto-run browser tools: runModelTurn dispatches
   // them through applyChatAction, but applyChatAction is memoized later in
   // the hook (it depends on runModelTurn), so a direct closure reference
@@ -1555,7 +1566,10 @@ export function useIssueTracker() {
   // auto-continuation after an allowed browser_* tool — same pipeline,
   // different prompt.
   const runModelTurn = useCallback(
-    async (promptForModel: string) => {
+    async (
+      promptForModel: string,
+      runOptions?: { toolChoice?: { type: "any" | "auto" | "tool"; name?: string } },
+    ) => {
       // Snapshot the page state at send-time so the model sees exactly
       // what the user sees. Cheap (one shallow copy + filter pass) and
       // avoids stale-context surprises when a run finishes mid-send.
@@ -1606,6 +1620,14 @@ export function useIssueTracker() {
           gatewayUrl: aiConfigQuery.data?.gatewayUrl ?? "",
           gatewayModel: aiConfigQuery.data?.model ?? "",
           gatewayToken: aiConfigQuery.data?.token ?? "",
+          // Force `tool_choice: any` when the caller asks for it. The
+          // browser_* walkthrough auto-continue uses this so the model
+          // CAN'T respond with prose alone — every turn must carry at
+          // least one tool_use block (typically browser_snapshot or
+          // browser_click, but anything in the browser_* set satisfies
+          // the API). Without this the model happily narrates "I'll
+          // click the next button…" and the walkthrough stalls.
+          toolChoice: runOptions?.toolChoice,
         },
       );
       setAiRetryStatus(null);
@@ -1632,6 +1654,17 @@ export function useIssueTracker() {
         autoRun.length && (!shownActions || shownActions.length === 0)
           ? { ...reply, actions: undefined }
           : { ...reply, actions: shownActions };
+      // Stuck-detection: did this turn actually pair its narration with a
+      // tool call? Anything in `toolUse` (browser or otherwise) counts;
+      // a turn with `reply.toolUse` empty/undefined is narration-only,
+      // which the walkthrough can't move forward on. Counter feeds the
+      // forced-reminder injection in the auto-continue block below.
+      if (reply.toolUse && reply.toolUse.length > 0) {
+        narrationOnlyStreakRef.current = 0;
+      } else {
+        narrationOnlyStreakRef.current += 1;
+      }
+      lastAutoTurnAtRef.current = Date.now();
       setChat((cur) => [...cur, replyToShow]);
       void appendChatMessage.mutateAsync({
         sessionId,
@@ -1739,6 +1772,8 @@ export function useIssueTracker() {
       // A fresh user message takes the wheel — reset the auto-continue
       // budget used by the browser walkthrough loop.
       agentTurnsRef.current = 0;
+      narrationOnlyStreakRef.current = 0;
+      lastAutoTurnAtRef.current = null;
       try {
         await runModelTurn(trimmed);
       } catch {
@@ -2586,20 +2621,25 @@ export function useIssueTracker() {
               role: "system",
               content: doneMsg.content,
             }).catch(() => {});
-            // Agentic continuation: a browser step is always mid-journey.
-            // Fire the model's next turn automatically so the walkthrough
-            // flows card → Allow → next card without the user typing
-            // "continue" between steps. The turn either proposes the next
-            // browser_* call (another permission card) or writes the final
-            // report — the loop naturally ends when no new card appears.
-            // Budget-capped via agentTurnsRef; a fresh user message resets.
-            if (tool.name.startsWith("browser_")) {
+            // Agentic continuation: fire the model's next turn automatically
+            // after a successful tool execution so the conversation flows
+            // card → Allow → next card without the user typing "continue"
+            // between steps. Applies to EVERY tool (not just browser_*),
+            // so the AI follows its Plan→Act→Verify→Loop pattern across
+            // state-changing tools (filters, scope, status, edits), browser
+            // walkthroughs, and chained actions alike.
+            //
+            // EXCEPTIONS — tools whose progress is driven by a separate
+            // long-running stream (the verification run's SSE feed) so the
+            // AI shouldn't kick off another model turn on top of that.
+            const SKIP_CONTINUE = new Set(["start_verification", "verify_live_url"]);
+            if (!SKIP_CONTINUE.has(tool.name)) {
               if (agentTurnsRef.current >= 60) {
                 const stopMsg: ChatMessage = {
                   id: `msg-${Date.now()}`,
                   role: "system",
                   content:
-                    "Walkthrough auto-paused after 60 steps (runaway-loop safety cap) — send any message to continue.",
+                    "Auto-continuation paused after 60 steps (runaway-loop safety cap) — send any message to continue.",
                   timestamp: new Date().toISOString(),
                 };
                 setChat((cur) => [...cur, stopMsg]);
@@ -2608,12 +2648,96 @@ export function useIssueTracker() {
               agentTurnsRef.current += 1;
               setSendingMessage(true);
               try {
-                await runModelTurn(
-                  `[Continuation] The browser tool "${tool.name}" executed successfully — its result is in the Playwright results block below. The walkthrough is CONTINUOUS: first write ONE short line narrating what you are doing right now and why (present tense, e.g. "Clicking the Sign in button to check where it leads…", "Reading the snapshot to pick the next element…"), in the same message as the tool call — then propose exactly ONE next tool call. There is ALWAYS a next step until the user says stop: the next page, link, form or button of this app, then the next verification target. Do NOT end the walkthrough on your own because a journey finished or a step is untestable — note it in one line and move to the next flow. Only write the final verification report (what works, what's broken, evidence you captured) if the user explicitly asked you to stop or summarize, or if you have genuinely exercised every reachable flow on every target (say so explicitly, flow by flow). Do not repeat a call that already succeeded.`,
-                );
+                // Browser tools get the proven walkthrough prompt — it
+                // explicitly nudges the AI to keep clicking through every
+                // reachable flow instead of stopping after one journey.
+                // All other tools get the general Plan→Act→Verify→Loop
+                // continuation prompt, which keeps the AI engaged after
+                // state changes, edits, and chained actions.
+                //
+                // STUCK-DETECTION: if the last few model turns returned
+                // narration-only (no tool_use block), append a forceful
+                // reminder — the walkthrough can't move forward on prose
+                // alone. The streak counter is reset inside runModelTurn
+                // every time a turn carries any tool_use.
+                const narrationStreak = narrationOnlyStreakRef.current;
+                const isBrowser = tool.name.startsWith("browser_");
+                const stuckSuffix =
+                  narrationStreak >= 2
+                    ? `\n\n⚠️ STUCK-DETECTION: Your last ${narrationStreak} turn(s) returned narration only — no tool_use block. You MUST include exactly ONE tool_use block in THIS reply, paired with ONE narration line. If there is genuinely nothing actionable left, write the FINAL VERIFICATION REPORT (what works, what's broken, evidence you captured) in this same reply — do NOT send another narration-only turn.`
+                    : "";
+                const continuationPrompt = isBrowser
+                  ? `[Continuation] The browser tool "${tool.name}" executed successfully — its result is in the Playwright results block below.
+
+RULES for your reply (browser walkthroughs):
+- Your reply MUST contain exactly ONE tool_use block paired with exactly ONE narration line. A narration-only reply (text without a tool_use block) is INVALID — the walkthrough stalls on prose alone.
+- The narration line goes FIRST in the same message as the tool call, present tense, action in progress, AND include WHY (not just what). Example: "Clicking the Sign in button to check where it leads…", "Reading the snapshot to pick the next element…", "Filling the email field with a test value to check validation…".
+- The walkthrough is CONTINUOUS — there is ALWAYS a next step until the user says stop: the next page, link, form, button of this app, then the next verification target.
+- Do NOT end the walkthrough on your own because a journey finished or a step is untestable (e.g. an encrypted credential you cannot type) — note it in one line and move straight on to the next flow.
+- Only write the FINAL VERIFICATION REPORT (what works, what's broken, evidence you captured) if the user explicitly asked you to stop/summarize, or if you have genuinely exercised every reachable flow on every target (say so explicitly, flow by flow).
+- Do not repeat a call that already succeeded.
+- Capture evidence: take screenshots after every action that reveals UI state, and check browser_console_messages after navigation / form submissions / button clicks for unexpected errors.`
+                  : `[Continuation] The tool "${tool.name}" executed successfully — its result summary is in the recent system messages above.
+
+Follow your Plan → Act → Verify → Loop pattern:
+
+1. VERIFY: Did the change actually take effect? For state-changing tools (filters, scope, status updates, edits), the NEXT CURRENT STATE you receive in this turn reflects the result — compare it to what you asked for. For query tools, decide whether the data answers the user's question.
+
+2. DECIDE: If the user's goal is complete AND they have not asked for more, write a final answer (not a tool call). Otherwise propose exactly ONE next step — either a tool call OR a focused clarifying question. DO NOT end a multi-step journey on your own just because one tool succeeded.
+
+3. NARRATE: Before any next tool call, write ONE line in the same message — present tense, action in progress, include WHY (not just what).
+
+Continue.`;
+                // FORCED TOOL USE: for browser_* walkthroughs we set `tool_choice: any`
+                // so the model literally CANNOT produce a narration-only
+                // reply. Even when it thinks the walkthrough should end,
+                // the API forces it to call at least one tool first —
+                // typically browser_take_screenshot or
+                // browser_console_messages, which doubles as cheap
+                // evidence the user can read. Non-browser continuations
+                // intentionally keep `toolChoice` undefined so the model
+                // can legitimately finish a multi-step journey with a
+                // summary instead of another tool call.
+                const toolChoice = isBrowser
+                  ? ({ type: "any" } as const)
+                  : undefined;
+                await runModelTurn(continuationPrompt + stuckSuffix, { toolChoice });
+                // STEP-TIMEOUT SAFETY: if the model produced a tool_use,
+                // `narrationOnlyStreakRef` was reset inside runModelTurn —
+                // we are healthy. If it returned narration only and the
+                // user is staring at a stalled chat, schedule a nudge
+                // that fires only if the NEXT turn also stalls (so we
+                // don't interrupt a still-generating reply).
+                if (narrationOnlyStreakRef.current >= 2) {
+                  const turnAt = lastAutoTurnAtRef.current ?? Date.now();
+                  window.setTimeout(() => {
+                    // Only nudge if no new reply has landed in the
+                    // meantime AND the streak is still at >=2. By then
+                    // the AI should have either called a tool or written
+                    // the final report — if it hasn't, force it to act.
+                    if (
+                      narrationOnlyStreakRef.current >= 2 &&
+                      lastAutoTurnAtRef.current === turnAt
+                    ) {
+                      // The nudge also uses `tool_choice: any` for the
+                      // same reason the auto-continue does: a nudge-only
+                      // text reply re-stalls the walkthrough just as
+                      // quickly as the original narration. Forcing
+                      // tool use keeps the loop honest. Non-browser
+                      // stalls still get to terminate with a summary.
+                      const nudgeToolChoice = isBrowser
+                        ? ({ type: "any" } as const)
+                        : undefined;
+                      void runModelTurn(
+                        `[Nudge] Your last reply was narration-only and the walkthrough has been idle. Reply with EITHER one tool_use block (next flow, screenshot, console check, etc.) OR the final verification report — no more prose-only turns.`,
+                        { toolChoice: nudgeToolChoice },
+                      ).catch(() => {});
+                    }
+                  }, 30_000);
+                }
               } catch {
                 toast.error(
-                  "Couldn't continue the browser walkthrough — send a message to resume.",
+                  "Couldn't continue the conversation — send a message to resume.",
                 );
               } finally {
                 setSendingMessage(false);

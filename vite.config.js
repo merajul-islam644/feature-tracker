@@ -237,7 +237,7 @@ function aiChatProxy(_env) {
         configureServer: function (server) {
             var _this = this;
             server.middlewares.use("/api/ai/chat", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var headerValue, providerId, cfg, provider, abort, disconnected, chunks, chunk, e_1_1, raw, parsed, userText, systemPrompt, tools, history_1, response, err_1;
+                var headerValue, providerId, cfg, provider, abort, disconnected, chunks, chunk, e_1_1, raw, parsed, userText, systemPrompt, tools, rawToolChoice, toolChoice, history_1, response, err_1;
                 var _a, req_1, req_1_1;
                 var _b, e_1, _c, _d;
                 return __generator(this, function (_e) {
@@ -322,6 +322,13 @@ function aiChatProxy(_env) {
                             tools = Array.isArray(parsed === null || parsed === void 0 ? void 0 : parsed.tools)
                                 ? parsed.tools
                                 : undefined;
+                            rawToolChoice = parsed === null || parsed === void 0 ? void 0 : parsed.tool_choice;
+                            toolChoice = rawToolChoice &&
+                                typeof rawToolChoice === "object" &&
+                                typeof rawToolChoice.type === "string" &&
+                                ["any", "auto", "tool"].includes(rawToolChoice.type)
+                                ? rawToolChoice
+                                : undefined;
                             history_1 = Array.isArray(parsed === null || parsed === void 0 ? void 0 : parsed.history)
                                 ? parsed.history
                                     .filter(function (m) {
@@ -336,11 +343,11 @@ function aiChatProxy(_env) {
                                     content: m.content.slice(0, 2000),
                                 }); })
                                 : [];
-                            return [4 /*yield*/, provider.sendChat(cfg, __assign({ model: cfg.model, 
+                            return [4 /*yield*/, provider.sendChat(cfg, __assign(__assign({ model: cfg.model, 
                                     // 4096 — agentic browser walkthroughs end with a long
                                     // evidence report (findings tables + next-step narration),
                                     // which overflowed the older 2048 cap mid-sentence.
-                                    max_tokens: 4096, system: systemPrompt, messages: __spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false) }, (tools ? { tools: tools } : {})), abort.signal)];
+                                    max_tokens: 4096, system: systemPrompt, messages: __spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false) }, (tools ? { tools: tools } : {})), (toolChoice ? { tool_choice: toolChoice } : {})), abort.signal)];
                         case 14:
                             response = _e.sent();
                             if (disconnected || abort.signal.aborted) {

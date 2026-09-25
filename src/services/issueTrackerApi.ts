@@ -460,6 +460,19 @@ export const issueTrackerApi = {
       gatewayUrl?: string;
       gatewayModel?: string;
       gatewayToken?: string;
+      // Anthropic Messages API `tool_choice`. When the caller is running an
+      // auto-continuation inside a browser_* walkthrough we set this to
+      // `{ type: "any" }` to GUARANTEE the model emits at least one
+      // tool_use block — the previous "strengthen the prompt" attempt
+      // still got the AI to produce narration-only turns after a snapshot
+      // because the model treated "MUST contain tool_use" as advisory.
+      // `tool_choice: any` is the API-level equivalent: the model has no
+      // way to comply with a narration-only response.
+      //
+      // For non-browser tools we leave it unset ("auto") so the model can
+      // legitimately end a multi-step journey by writing a summary
+      // instead of a tool call.
+      toolChoice?: { type: "any" | "auto" | "tool"; name?: string };
     } = {},
   ): Promise<ChatMessage> {
     try {
@@ -503,6 +516,13 @@ export const issueTrackerApi = {
             context: options.context,
             tools: options.tools,
             history: options.history,
+            // Pass `tool_choice` through to the upstream Anthropic
+            // Messages API. Undefined = the proxy omits the field, which
+            // is exactly the same as default behaviour (the model decides
+            // whether to call a tool). Only set when the caller actually
+            // wants to FORCE tool use — currently only auto-continuations
+            // inside browser_* walkthroughs.
+            ...(options.toolChoice ? { tool_choice: options.toolChoice } : {}),
           }),
         });
       // The AI gateway intermittently flaps (502/503/504, occasionally

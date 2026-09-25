@@ -326,6 +326,22 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
           const tools = Array.isArray(parsed?.tools)
             ? parsed.tools
             : undefined;
+          // Optional `tool_choice` (Anthropic Messages API). Currently set
+          // by browser_* walkthrough auto-continuations as `{type:"any"}`
+          // to force the model to emit at least one tool_use block —
+          // prompt-level "MUST contain tool_use" instructions were
+          // advisory-only and the AI still produced narration-only turns
+          // after a successful snapshot. An API-level guarantee is what
+          // actually keeps the walkthrough moving. Shape is validated so
+          // a typo in the client can't crash the upstream call.
+          const rawToolChoice = parsed?.tool_choice;
+          const toolChoice =
+            rawToolChoice &&
+            typeof rawToolChoice === "object" &&
+            typeof rawToolChoice.type === "string" &&
+            ["any", "auto", "tool"].includes(rawToolChoice.type)
+              ? rawToolChoice
+              : undefined;
           // Optional short conversation history (the AI call is stateless
           // per message). The Playwright MCP workflow is a cycle —
           // navigate → snapshot → interact with a ref → re-snapshot — so
@@ -366,6 +382,7 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
               system: systemPrompt,
               messages: [...history, { role: "user", content: userText }],
               ...(tools ? { tools } : {}),
+              ...(toolChoice ? { tool_choice: toolChoice } : {}),
             },
             abort.signal,
           );

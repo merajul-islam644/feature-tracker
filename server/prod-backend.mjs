@@ -958,6 +958,21 @@ async function proxyAiChat(req, res) {
         ? parsed.system
         : "You are the AI Assistant inside an Issue Tracker. Help the user understand their verification runs, issues, and configuration. Be concise. Two URL-handling paths exist: (1) if the user names a URL that is NOT in their configured targets and wants it VERIFIED (checks run, issues recorded), call verify_live_url; (2) if the user wants to SEE or INTERACT with a page live (open, show, click, snapshot, screenshot, inspect), call the browser_* tools — they drive a real headed Playwright browser through the official Playwright MCP server, and their results include element refs you can click next turn. When the user mentions Playwright explicitly, always prefer the browser_* tools.";
     const tools = Array.isArray(parsed?.tools) ? parsed.tools : undefined;
+    // Optional `tool_choice` (Anthropic Messages API). Currently set by
+    // browser_* walkthrough auto-continuations as `{type:"any"}` so the
+    // model MUST emit a tool_use block — the previous "strengthen the
+    // prompt" attempt still produced narration-only turns after a
+    // successful snapshot because the model treated prompt instructions
+    // as advisory. Shape-validated so a typo in the client can't crash
+    // the upstream call.
+    const rawToolChoice = parsed?.tool_choice;
+    const toolChoice =
+      rawToolChoice &&
+      typeof rawToolChoice === "object" &&
+      typeof rawToolChoice.type === "string" &&
+      ["any", "auto", "tool"].includes(rawToolChoice.type)
+        ? rawToolChoice
+        : undefined;
 
     // History: last 8 entries, {role:user|assistant, content:string ≤ 2000}.
     const history = Array.isArray(parsed?.history)
@@ -988,6 +1003,7 @@ async function proxyAiChat(req, res) {
         system: systemPrompt,
         messages: [...history, { role: "user", content: userText }],
         ...(tools ? { tools } : {}),
+        ...(toolChoice ? { tool_choice: toolChoice } : {}),
       },
       abort.signal,
     );
