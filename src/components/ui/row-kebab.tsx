@@ -36,6 +36,17 @@ interface RowKebabMenuProps {
   deleteLabel?: string;
   onRename?: () => void;
   onDelete?: () => void;
+  /**
+   * When true, the Delete entry is rendered but disabled (greyed
+   * out, not clickable). Used by the TestCaseSpreadsheet for the
+   * 10 auto-created default rows so the option is visible-but-
+   * blocked: the user can see Delete exists, but the click is
+   * intercepted so the mutation never fires. The mutation handler
+   * itself guards `isDeletable` as defense-in-depth, so a stray
+   * click that bypasses the visual state still no-ops. Defaults
+   * to `false` (Delete enabled).
+   */
+  deleteDisabled?: boolean;
   /** When true, hide Rename/Delete and render only a single "View
    *  Details" entry using `viewDetailsLabel` + `onViewDetails`.
    *  Defaults to false (existing editable-row behavior). */
@@ -60,6 +71,7 @@ export function RowKebabMenu({
   deleteLabel,
   onRename,
   onDelete,
+  deleteDisabled = false,
   readOnly = false,
   viewDetailsLabel,
   onViewDetails,
@@ -104,19 +116,31 @@ export function RowKebabMenu({
           // Editable rows (dev mode): existing behavior — extra
           // items at the top, then Rename, then Delete at the
           // bottom (red) so the destructive action stays anchored.
+          // The Delete entry is always rendered (so the option is
+          // discoverable) but `disabled` when `deleteDisabled` is
+          // true — the user can see Delete exists on the row but
+          // the click is blocked. Rename / extraItems remain
+          // active so the row stays inspectable.
           <>
             {extraItems}
             <DropdownMenuItem onSelect={onRename}>
               <Pencil className="h-4 w-4" aria-hidden="true" />
               <span>{renameLabel}</span>
             </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={onDelete}
-              className="text-red-600 focus:bg-red-50 focus:text-red-700"
-            >
-              <Trash2 className="h-4 w-4" aria-hidden="true" />
-              <span>{deleteLabel}</span>
-            </DropdownMenuItem>
+            {onDelete && (
+              <DropdownMenuItem
+                onSelect={onDelete}
+                disabled={deleteDisabled}
+                // `disabled:` utilities keep the red label legible
+                // but dial back opacity + hover background so the
+                // entry reads as "off" rather than as an active
+                // destructive button.
+                className="text-red-600 focus:bg-red-50 focus:text-red-700 disabled:opacity-50 disabled:focus:bg-transparent"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                <span>{deleteLabel}</span>
+              </DropdownMenuItem>
+            )}
           </>
         )}
       </DropdownMenuContent>

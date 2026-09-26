@@ -1,0 +1,139 @@
+{
+  "collectionName": "blx_TestCases",
+  "fields": [
+    {
+      "name": "featureId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Feature.ItemId. A test case is always attached to a single feature (which itself belongs to a project + environment). Required.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "flowId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Flow.ItemId. Required. Test cases are now scoped to a Flow rather than to the parent Feature — the spreadsheet reads by flowId. The featureId field stays for traceability but is no longer the lookup key.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "title",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Short name of the test case — what is being verified. Required.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "steps",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Numbered list of steps the QA should perform. Free-form text — the spreadsheet cell shows a multi-line editor on focus.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "expectedResult",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "What should happen if the feature works correctly. Free-form text.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "actualResult",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "What actually happened on the most recent run. Free-form text. QA fills this in after execution.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Execution status. One of: untested/pass/fail/blocked/skipped. Default 'untested' on creation.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "priority",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "low/medium/high. Defaults to 'medium' on creation.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "assignedTo",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "OIDC `sub` of the QA who owns this test case. Empty / unset means unassigned.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "order",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display order within the feature's test sheet. Stringified numeric — the app layer stamps it on creation (e.g. '0', '10', '20' for sparse inserts) and sorts lexicographically; smaller values come first. Optional — missing values fall back to insertion order.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "tags",
+      "type": "String",
+      "isArray": true,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Free-form labels for grouping (smoke/regression/e2e/...).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "isDeletable",
+      "type": "Boolean",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "When false, the spreadsheet renders the Delete action as disabled (greyed out, click-blocked) and the delete mutation refuses the row. Used to lock the 10 placeholder rows the spreadsheet auto-creates so they stay visible as an editable skeleton. Optional — missing / unset is treated as true (deletable) so existing rows are unaffected.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "TestCase",
+  "schemaType": 1
+}

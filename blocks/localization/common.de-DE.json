@@ -268,7 +268,7 @@
   "time.minutesAgo": "{count, plural, =1 {vor 1 Minute} other {vor # Minuten}}",
   "time.hoursAgo": "{count, plural, =1 {vor 1 Stunde} other {vor # Stunden}}",
   "time.daysAgo": "{count, plural, =1 {vor 1 Tag} other {vor # Tagen}}",
-  "chat.title": "Chat",
+  "chat.title": "Nachrichten",
   "chat.description": "Direktnachrichten zwischen Arbeitsbereich-Mitgliedern.",
   "chat.searchPlaceholder": "Mitglieder suchen",
   "chat.noMatches": "Keine Mitglieder gefunden.",

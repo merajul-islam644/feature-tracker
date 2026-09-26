@@ -116,7 +116,7 @@ export function ChatPage() {
         title={
           <span className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5" aria-hidden="true" />
-            {t("chat.title", "Chat")}
+            {t("chat.title", "Message")}
           </span>
         }
         subtitle={t(

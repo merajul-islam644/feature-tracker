@@ -33,6 +33,7 @@ import {
   announcementsCollection,
   issuesCollection,
   secretsCollection,
+  testCasesCollection,
   userProfilesCollection,
   memberProjectsCollection,
   userAiConfigsCollection,
@@ -48,6 +49,7 @@ import {
   toMemberProjectAssignment,
   toProject,
   toSecret,
+  toTestCase,
   toUserAiConfig,
   toUserAvatarConfig,
   toUserProfilePic,
@@ -63,6 +65,7 @@ import {
   type CloudFlow,
   type CloudMemberProject,
   type CloudProject,
+  type CloudTestCase,
   type CloudUserAiConfig,
   type CloudUserAvatarConfig,
   type CloudUserProfile,
@@ -76,6 +79,8 @@ import {
   type PersistedChatMessage,
   type Project,
   type ProjectCustomEnv,
+  type TestCase,
+  type TestCaseStatus,
   type UserAiConfig,
   type UserAvatarConfig,
   type UserProfilePic,
@@ -348,6 +353,13 @@ export const queryKeys = {
     ["issue-tracker-secrets", userId] as const,
   issueTrackerIssues: (userId: string) =>
     ["issue-tracker-issues", userId] as const,
+  // Test cases — one spreadsheet per Feature. Keyed per-feature so the
+  // spreadsheet inside FeatureDetailsDrawer caches against the row set
+  // it actually renders, and a switch between two features doesn't
+  // share a stale array. Workspace-wide read (no `createdBy` filter)
+  // because every QA needs to see the case list for features they're
+  // not the author of.
+  testCases: (flowId: string) => ["test-cases", flowId] as const,
 };
 
 // --- Reads ------------------------------------------------------------------
@@ -2120,6 +2132,281 @@ export function useRepostAnnouncement(): UseMutationResult<
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.announcements });
+    },
+  });
+}
+
+// --- Test cases --------------------------------------------------------------
+//
+// Test cases are rows in a Feature's spreadsheet. The list hook returns
+// all rows for one feature sorted by the sparse `order` field (smaller
+// first, missing sorts to the end). Mutations are feature-scoped —
+// every add / update / delete invalidates only the feature's key so
+// adjacent features' sheets don't flicker.
+
+/**
+ * List all test cases attached to a single feature. Empty array when
+ * `featureId` is missing (defensive — the hook is called before the
+ * feature row has resolved). Sorted by `order` ascending (lex on the
+ * stringified integer, which matches numeric order for the "0", "10",
+ * "20" sparse scheme).
+ */
+export function useTestCases(flowId: string): UseQueryResult<TestCase[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery<TestCase[]>({
+    queryKey: queryKeys.testCases(flowId),
+    // Disable until we actually have a flow id — otherwise an
+    // empty-string key fires a no-op request that 400s.
+    enabled: Boolean(userId && flowId),
+    queryFn: async () => {
+      const raw = await testCasesCollection.list({
+        pageNo: 1,
+        pageSize: 500,
+        filter: { flowId },
+      });
+      // Blocks SDK `list()` returns a paged payload
+      // `{ data: { getTestCases: { items, totalCount, ... } } }` —
+      // `unwrapPaged` walks past either wrapper shape and lands on
+      // the bare `{ items, totalCount }` so the rest of the hook
+      // can treat it like every other list hook does.
+      const rows = unwrapPaged<CloudTestCase>(raw).items;
+      return rows
+        .map((r) => toTestCase(r))
+        .sort((a, b) => {
+          if (!a.order && !b.order) return 0;
+          if (!a.order) return 1;
+          if (!b.order) return -1;
+          return a.order.localeCompare(b.order, undefined, { numeric: true });
+        });
+    },
+  });
+}
+
+export interface AddTestCaseInput {
+  featureId: string;
+  flowId: string;
+  title: string;
+  steps?: string;
+  expectedResult?: string;
+  actualResult?: string;
+  status?: TestCaseStatus;
+  priority?: "low" | "medium" | "high";
+  assignedTo?: string;
+  order?: string;
+  tags?: string[];
+  /**
+   * Whether the row can be deleted from the UI. Defaults to `true`
+   * (deletable). The spreadsheet sets this to `false` when
+   * auto-creating its 10 placeholder rows so the Delete option is
+   * shown but rendered as disabled (greyed out, click-blocked) and
+   * the delete mutation refuses the row.
+   */
+  isDeletable?: boolean;
+}
+
+/**
+ * Add a test case row. The `order` defaults to "0" — the spreadsheet
+ * panel re-numbers after every insert so the new row lands at the
+ * end, but a missing field would 400 against the schema's
+ * `requiredOn: "Both"` for `order`-less rows. Pass a sparse string
+ * from the caller if the UI has computed a different slot.
+ */
+export function useAddTestCase(): UseMutationResult<
+  TestCase,
+  Error,
+  AddTestCaseInput
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input) => {
+      await testCasesCollection.create({
+        featureId: input.featureId,
+        flowId: input.flowId,
+        title: input.title,
+        steps: input.steps ?? "",
+        expectedResult: input.expectedResult ?? "",
+        actualResult: input.actualResult ?? "",
+        status: input.status ?? "untested",
+        priority: input.priority ?? "medium",
+        assignedTo: input.assignedTo ?? "",
+        order: input.order ?? "0",
+        tags: input.tags ?? [],
+        // Default to `true` so every existing call site (and
+        // hand-written integrations) keep their current behavior;
+        // only the spreadsheet's auto-create path opts rows out of
+        // deletion by passing `isDeletable: false`.
+        isDeletable: input.isDeletable ?? true,
+      });
+      // The Blocks SDK `insertTestCase` response only echoes
+      // `{ acknowledged, itemId, message, totalImpactedData }` — not
+      // the inserted row. Reconstruct what we know from the input so
+      // callers (and `onSuccess`) have the right ids to invalidate
+      // against and to push into the cache.
+      return toTestCase({
+        ItemId: "",
+        featureId: input.featureId,
+        flowId: input.flowId,
+        title: input.title,
+        steps: input.steps ?? "",
+        expectedResult: input.expectedResult ?? "",
+        actualResult: input.actualResult ?? "",
+        status: input.status ?? "untested",
+        priority: input.priority ?? "medium",
+        assignedTo: input.assignedTo ?? "",
+        order: input.order ?? "0",
+        tags: input.tags ?? [],
+        isDeletable: input.isDeletable ?? true,
+        CreatedDate: new Date().toISOString(),
+        LastUpdatedDate: new Date().toISOString(),
+      });
+    },
+    onSuccess: (_row, input) => {
+      // Invalidate the cached list using the input's flowId. The
+      // SDK's `insertTestCase` response only echoes the new id (no
+      // inserted fields), so `row.flowId` is "" and would hit the
+      // wrong query key — the GET would never refetch and the
+      // spreadsheet would stay empty even though the row exists.
+      qc.invalidateQueries({
+        queryKey: queryKeys.testCases(input.flowId),
+      });
+      // Belt-and-braces: explicitly refetch so the spreadsheet picks
+      // up the new row even if the cache has `staleTime` configured
+      // or the query is currently disabled for some reason. Cheap
+      // (one round-trip) and removes a class of "I clicked but
+      // nothing happened" foot-guns.
+      qc.refetchQueries({
+        queryKey: queryKeys.testCases(input.flowId),
+      });
+    },
+  });
+}
+
+export interface UpdateTestCaseInput {
+  id: string;
+  /**
+   * Owning feature id — `requiredOn: "Both"` in the schema, so the
+   * Blocks API rejects any PATCH that omits it. Callers always have
+   * `row.featureId` available so we forward it on every update even
+   * when the cell being edited has nothing to do with the feature id.
+   * Kept for traceability — the spreadsheet's primary lookup key is
+   * now `flowId` (see below).
+   */
+  featureId: string;
+  /**
+   * Owning flow id — required because the schema marks both id
+   * fields as `requiredOn: "Both"` and the Blocks API rejects any
+   * PATCH that omits a required field. Test cases are now scoped
+   * per-flow (the spreadsheet reads by flowId); the featureId is
+   * forwarded alongside for traceability.
+   */
+  flowId: string;
+  /**
+   * Current `status` — required because the schema marks `status` as
+   * `requiredOn: "Both"` and the Blocks API rejects PATCHes that omit a
+   * required field, even when the caller only meant to change another
+   * column. Callers editing a non-status cell pass `row.status` so the
+   * server sees the unchanged value rather than treating the row as
+   * status-less.
+   */
+  status: TestCaseStatus;
+  /**
+   * Current `title` — `requiredOn: "Both"` like `featureId` and
+   * `status`. Callers editing a non-title cell pass `row.title` so a
+   * priority / status / steps change can't be rejected for "missing
+   * title" — the server treats requiredOn:"Both" fields as required
+   * on PATCH too, not just on create.
+   */
+  title: string;
+  steps?: string;
+  expectedResult?: string;
+  actualResult?: string;
+  priority?: "low" | "medium" | "high";
+  assignedTo?: string;
+  order?: string;
+  tags?: string[];
+}
+
+/**
+ * Update a test case row. Pass the full row snapshot for the three
+ * `requiredOn: "Both"` fields (`featureId`, `status`, `title`) — the
+ * Blocks API treats every required field as required on PATCH too,
+ * so the wire payload must include the unchanged values alongside
+ * whatever the caller is actually changing. We forward the required
+ * fields explicitly here and only spread the optional ones when
+ * defined so a caller never accidentally blanks a column by sending
+ * `undefined`.
+ */
+export function useUpdateTestCase(): UseMutationResult<
+  TestCase,
+  Error,
+  UpdateTestCaseInput
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input) => {
+      const { id, featureId, flowId, status, title, ...patch } = input;
+      const updated = (await testCasesCollection.update(id, {
+        featureId,
+        flowId,
+        status,
+        title,
+        ...(patch.steps !== undefined ? { steps: patch.steps } : {}),
+        ...(patch.expectedResult !== undefined
+          ? { expectedResult: patch.expectedResult }
+          : {}),
+        ...(patch.actualResult !== undefined
+          ? { actualResult: patch.actualResult }
+          : {}),
+        ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
+        ...(patch.assignedTo !== undefined
+          ? { assignedTo: patch.assignedTo }
+          : {}),
+        ...(patch.order !== undefined ? { order: patch.order } : {}),
+        ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
+      } as Partial<CloudTestCase>)) as
+        | { data?: CloudTestCase }
+        | CloudTestCase;
+      const item =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as CloudTestCase);
+      return toTestCase({ ...(item as CloudTestCase), featureId, flowId });
+    },
+    onSuccess: (_row, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.testCases(input.flowId),
+      });
+      // Same belt-and-braces as useAddTestCase — refetch explicitly so
+      // the spreadsheet reflects edits even if the cache has a long
+      // staleTime and the invalidation alone wouldn't trigger a refetch.
+      qc.refetchQueries({
+        queryKey: queryKeys.testCases(input.flowId),
+      });
+    },
+  });
+}
+
+/**
+ * Delete a test case row. Pass `flowId` so the invalidation can
+ * target the right key — the SDK only returns the deleted id.
+ * `featureId` is intentionally omitted from the contract since the
+ * spreadsheet's only post-mutation concern is flushing the cached
+ * list for the owning flow.
+ */
+export function useDeleteTestCase(): UseMutationResult<
+  string,
+  Error,
+  { id: string; flowId: string }
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id }) => {
+      await testCasesCollection.delete(id);
+      return id;
+    },
+    onSuccess: (_id, vars) => {
+      qc.invalidateQueries({ queryKey: queryKeys.testCases(vars.flowId) });
     },
   });
 }

@@ -9,8 +9,9 @@ import {
   MessageSquare,
   PlayCircle,
   Settings as SettingsIcon,
-  Users,
+  Contact,
   LogOut,
+  NotebookPen,
 } from "lucide-react";
 import {
   Sidebar,
@@ -53,13 +54,18 @@ export function AppSidebar() {
     },
     {
       to: "/chat",
-      label: t("nav.chat", "Messages"),
+      label: t("nav.chat", "Message"),
       icon: MessageSquare,
+    },
+    {
+      to: "/notepad",
+      label: t("nav.notepad", "Notepad"),
+      icon: NotebookPen,
     },
     {
       to: "/members",
       label: t("nav.members", "Members"),
-      icon: Users,
+      icon: Contact,
     },
     {
       to: "/settings",
@@ -102,10 +108,11 @@ export function AppSidebar() {
             {navItems.map((item) => {
               const Icon = item.icon;
               // Keep the parent route highlighted on detail pages
-              // (e.g. /projects/:id should highlight "Project").
+              // (e.g. /projects/:id should highlight "Project",
+              // /notepad/text should highlight "Notepad").
               const isActive =
-                item.to === "/projects"
-                  ? location.pathname.startsWith("/projects")
+                item.to === "/projects" || item.to === "/notepad"
+                  ? location.pathname.startsWith(item.to)
                   : location.pathname === item.to;
               return (
                 <SidebarMenuItem key={item.to}>

@@ -139,7 +139,7 @@ export function ChatMemberList({
             {t("chat.noMatches", "No members match your search.")}
           </p>
         ) : (
-          <ul role="listbox" aria-label={t("chat.title", "Chat")}>
+          <ul role="listbox" aria-label={t("chat.title", "Message")}>
             {visible.map((member) => {
               const last = lastByMember.get(member.id);
               const unread = unreadByMember.get(member.id) ?? 0;

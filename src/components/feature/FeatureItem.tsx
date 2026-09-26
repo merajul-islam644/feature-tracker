@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { ChevronRight, GitBranch, Info } from "lucide-react";
 import {
   DropdownMenu,
@@ -192,7 +193,24 @@ export function FeatureItem({
   // `extraItems` slot for the read-only details entry.
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  // Drawer open state lives in URL search params (`?feature=<id>`)
+  // instead of local state so a page refresh, a browser back/forward,
+  // or sharing the URL with a colleague all keep the drawer open on
+  // the same feature. Each FeatureItem watches the param: when it
+  // matches this row's id, this row's drawer is the open one.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openFeatureId = searchParams.get("feature");
+  const detailsOpen = openFeatureId === feature.id;
+  const openDetails = () => {
+    const next = new URLSearchParams(searchParams);
+    next.set("feature", feature.id);
+    setSearchParams(next, { replace: false });
+  };
+  const closeDetails = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("feature");
+    setSearchParams(next, { replace: false });
+  };
 
   // Flow-level rename/delete/details. The row kebab is rendered next
   // to each flow inside the expanded list; one pair of modals serves
@@ -203,7 +221,6 @@ export function FeatureItem({
     { id: string; name: string; status: import("@/lib/blocks/data").FlowStatus } | null
   >(null);
   const [deleteFlow, setDeleteFlow] = useState<{ id: string; name: string } | null>(null);
-  const [detailsFlow, setDetailsFlow] = useState<Flow | null>(null);
 
   // Always fetch flows for this feature so the count badge survives
   // collapse. The list itself is still gated on `expanded` below, so the
@@ -218,6 +235,41 @@ export function FeatureItem({
   const t = useT();
   const { formatRelativeTime } = useLocale();
   const flowList: Flow[] = flows ?? [];
+
+  // Flow Details drawer open state mirrors the Feature Details pattern:
+  // lives in URL search params (`?flow=<id>`) instead of local state
+  // so a page refresh, browser back/forward, or a shared URL all keep
+  // the drawer open on the same flow. Each FeatureItem watches the
+  // param — when it matches one of this row's flows, that flow's
+  // drawer is the open one. `?? null` covers "URL set but flow is no
+  // longer in the cached list" (e.g. flow was deleted) — treat as
+  // closed so the drawer auto-dismisses instead of pointing at a
+  // missing record.
+  const openFlowId = searchParams.get("flow");
+  const detailsFlow =
+    openFlowId !== null
+      ? flowList.find((f) => f.id === openFlowId) ?? null
+      : null;
+  const openFlowDetails = (flow: Flow) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("flow", flow.id);
+    // Clear `tab` and `expanded` so the drawer always opens on the
+    // Details tab — otherwise a stale `?tab=tests` from a previous
+    // session / refresh would carry over (URLSearchParams.clone()
+    // preserves every other key, including tab state) and the user
+    // would land on Test Cases instead of Details when they explicitly
+    // chose "Flow Details" from the kebab. The tab pill on the
+    // drawer's own header lets them switch forward to Tests when they
+    // want it.
+    next.delete("tab");
+    next.delete("expanded");
+    setSearchParams(next, { replace: false });
+  };
+  const closeFlowDetails = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("flow");
+    setSearchParams(next, { replace: false });
+  };
   // When the page is env-scoped, every visible count on this row
   // (badge, status pills, +5 dropdown, expanded list) needs to be
   // filtered to that env — otherwise the badge could say 6 while the
@@ -399,7 +451,7 @@ export function FeatureItem({
             ariaLabel={t("featureItem.menu", "Feature actions")}
             readOnly
             viewDetailsLabel={t("featureItem.details", "Feature Details")}
-            onViewDetails={() => setDetailsOpen(true)}
+            onViewDetails={openDetails}
           />
         ) : (
           <RowKebabMenu
@@ -413,7 +465,7 @@ export function FeatureItem({
             // on every row (not gated on `readOnly`) because inspection
             // is useful regardless of who's looking at the page.
             extraItems={
-              <DropdownMenuItem onSelect={() => setDetailsOpen(true)}>
+              <DropdownMenuItem onSelect={openDetails}>
                 <Info className="h-4 w-4" aria-hidden="true" />
                 <span>{t("featureItem.details", "Feature Details")}</span>
               </DropdownMenuItem>
@@ -481,12 +533,10 @@ export function FeatureItem({
                             "flowItem.details",
                             "Flow Details",
                           )}
-                          // Cache the full flow in state so the
-                          // drawer has every field without a
-                          // re-query; open state is derived from
-                          // the cached flow's presence so closing
-                          // the drawer clears the cache atomically.
-                          onViewDetails={() => setDetailsFlow(flow)}
+                          // Open state is URL-backed (`?flow=<id>`)
+                          // so a refresh / shared link / back-forward
+                          // all re-open the drawer on the same flow.
+                          onViewDetails={() => openFlowDetails(flow)}
                         />
                       ) : (
                         <RowKebabMenu
@@ -505,14 +555,13 @@ export function FeatureItem({
                           }
                           onDelete={() => setDeleteFlow({ id: flow.id, name: flow.name })}
                           // Read-only "Flow Details" parallels the row's
-                          // parent feature row. We cache the full flow in
-                          // state so the drawer has every field without
-                          // a re-query; open state is derived from the
-                          // cached flow's presence so closing the drawer
-                          // clears the cache atomically.
+                          // parent feature row. Open state is URL-backed
+                          // (`?flow=<id>`) so a refresh / shared link /
+                          // back-forward all re-open the drawer on the
+                          // same flow.
                           extraItems={
                             <DropdownMenuItem
-                              onSelect={() => setDetailsFlow(flow)}
+                              onSelect={() => openFlowDetails(flow)}
                             >
                               <Info className="h-4 w-4" aria-hidden="true" />
                               <span>
@@ -583,7 +632,7 @@ export function FeatureItem({
           it agrees with the row's pills and expanded list. */}
       <FeatureDetailsDrawer
         open={detailsOpen}
-        onClose={() => setDetailsOpen(false)}
+        onClose={closeDetails}
         feature={feature}
         visibleFlowCount={visibleFlowList.length}
         statusCounts={statusCounts}
@@ -608,11 +657,15 @@ export function FeatureItem({
       />
 
       {/* Read-only "Flow Details" drawer opened from any per-flow
-          kebab inside the expanded list. The drawer opens whenever
-          `detailsFlow` is non-null and closes by clearing it. */}
+          kebab inside the expanded list. Open state is URL-backed
+          (`?flow=<id>`); `detailsFlow` is derived from the cached
+          flow list so the drawer has every field without a
+          re-query. Closing drops the `?flow=<id>` param only — any
+          concurrent `?feature=<id>` is preserved so a still-open
+          Feature Details drawer stays open. */}
       <FlowDetailsDrawer
         open={detailsFlow !== null}
-        onClose={() => setDetailsFlow(null)}
+        onClose={closeFlowDetails}
         flow={detailsFlow}
       />
     </div>

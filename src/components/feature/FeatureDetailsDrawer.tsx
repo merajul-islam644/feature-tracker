@@ -22,6 +22,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
 import { lookupUserById } from "@/lib/blocks/users";
 import type { Feature } from "@/lib/blocks/data";
+import { cn } from "@/lib/utils";
 import { Github, ExternalLink } from "lucide-react";
 
 interface FeatureDetailsDrawerProps {
@@ -204,6 +205,12 @@ export function FeatureDetailsDrawer({
 }: FeatureDetailsDrawerProps) {
   const t = useT();
   const { currentUser } = useAuth();
+  // Test Cases moved to the Flow Details drawer — see
+  // `FlowDetailsDrawer.tsx`. Tab/expanded URL state used to live
+  // here; it's now managed by the flow drawer (`?tab=tests&expanded=1`)
+  // which is the right home since test cases are now scoped per-flow.
+  // The `feature` URL param (which feature's drawer is open) is still
+  // owned by FeatureItem.
   // Resolve every user-reference on the feature to a friendly
   // name + email against the hardcoded IAM roster
   // (`HARDCODED_USER_BY_ID` — see `users.ts`). When an id matches
@@ -229,10 +236,19 @@ export function FeatureDetailsDrawer({
   const updatedByUser = lookupUserById(feature.updatedBy);
 
   return (
-    <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
-      {/* Right-side drawer, wider than Sheet's stock sm:max-w-sm so the
-          id-style mono fields and the two-column grid breathe. */}
-      <SheetContent side="right" className="sm:max-w-md">
+    <Sheet open={open} onOpenChange={(next) => {
+        if (!next) {
+          onClose();
+        }
+      }}>
+      {/* Right-side drawer. Wider than Sheet's stock `sm:max-w-sm` so
+          the id-style mono fields and the two-column grid breathe.
+          `flex flex-col` so the body flex-1 + footer anchor behave
+          correctly. */}
+      <SheetContent
+        side="right"
+        className={cn("flex flex-col", "sm:max-w-md")}
+      >
         <SheetHeader>
           <SheetTitle>
             {t("featureItem.detailsTitle", "Feature Details")}
@@ -245,14 +261,16 @@ export function FeatureDetailsDrawer({
           </SheetDescription>
         </SheetHeader>
 
-        {/* SheetContent renders `p-6` already; the body scrolls if the
-            feature has a long clone id or many nested fields. Pull the
-            sections off the bottom so the footer stays anchored. */}
-        <div className="flex-1 overflow-y-auto py-2">
-          <dl className="grid gap-4 sm:grid-cols-2">
-            <Field label={t("featureItem.details.name", "Name")}>
-              <span className="font-semibold">{feature.name}</span>
-            </Field>
+        {/* Body — `flex-1 min-h-0` lets the inner scroll container
+            shrink below its content size (the standard flex + scroll
+            pattern). The drawer is now Details-only; Test Cases
+            moved to FlowDetailsDrawer (test cases are scoped per-flow). */}
+        <div className="mt-3 flex-1 min-h-0 overflow-hidden">
+          <div className="h-full overflow-y-auto py-1">
+            <dl className="grid gap-4 sm:grid-cols-2">
+                <Field label={t("featureItem.details.name", "Name")}>
+                  <span className="font-semibold">{feature.name}</span>
+                </Field>
             <Field label={t("featureItem.details.env", "Environment")}>
               {feature.envSlug ? (
                 <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
@@ -409,6 +427,7 @@ export function FeatureDetailsDrawer({
                 </span>
               </li>
             </ul>
+          </div>
           </div>
         </div>
 

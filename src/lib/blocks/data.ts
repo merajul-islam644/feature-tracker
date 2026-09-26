@@ -1016,6 +1016,120 @@ export function toAnnouncement(c: CloudAnnouncement): Announcement {
   };
 }
 
+// --- Test cases --------------------------------------------------------------
+//
+// A `TestCase` is a row in the test-case spreadsheet attached to a Feature.
+// Each case carries the QA-side inputs (steps, expected, actual) and the
+// outcome (status + priority). Rows are owned by a single Feature — the
+// project + env are derivable via `useFeature(featureId)` when the
+// spreadsheet needs to filter or colour by environment. `order` is a
+// sparse stringified integer ("0", "10", "20") so future reorder inserts
+// can slot rows between existing entries without a full re-numbering pass.
+export type TestCaseStatus = "untested" | "pass" | "fail" | "blocked" | "skipped";
+export const TEST_CASE_STATUS_VALUES: readonly TestCaseStatus[] = [
+  "untested",
+  "pass",
+  "fail",
+  "blocked",
+  "skipped",
+];
+export type TestCasePriority = "low" | "medium" | "high";
+export const TEST_CASE_PRIORITY_VALUES: readonly TestCasePriority[] = [
+  "low",
+  "medium",
+  "high",
+];
+
+export interface CloudTestCase {
+  ItemId: string;
+  featureId: string;
+  flowId: string;
+  title: string;
+  steps?: string;
+  expectedResult?: string;
+  actualResult?: string;
+  status: string;
+  priority?: string;
+  assignedTo?: string;
+  order?: string;
+  tags?: string[];
+  isDeletable?: boolean;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+  UpdatedBy?: string;
+}
+
+export interface TestCase {
+  id: string;
+  featureId: string;
+  flowId: string;
+  title: string;
+  steps: string;
+  expectedResult: string;
+  actualResult: string;
+  status: TestCaseStatus;
+  priority: TestCasePriority;
+  assignedTo: string;
+  /** Sparse stringified integer ("0", "10", "20", ...). Smaller sorts first. */
+  order: string;
+  tags: string[];
+  /**
+   * Whether the row can be deleted from the spreadsheet UI. The 10
+   * placeholder rows the spreadsheet auto-creates when a feature
+   * first opens its test sheet are stamped `false` so the Delete
+   * option disappears and `handleDeleteRow` refuses the API call.
+   * Defaults to `true` for any row missing the field (existing
+   * rows, user-inserted rows, future migrations).
+   */
+  isDeletable: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  updatedBy: string;
+}
+
+export function toTestCase(t: CloudTestCase): TestCase {
+  return {
+    id: t.ItemId,
+    featureId: t.featureId ?? "",
+    // Legacy rows predating the flow-scope migration have no `flowId`
+    // column on the wire — default to empty string. Such rows have
+    // no parent flow in `flowsCollection` and will not match any
+    // spreadsheet's filter — they're effectively orphaned data but
+    // the feature-keyed Test Cases tab no longer exists to surface
+    // them, so they're invisible.
+    flowId: t.flowId ?? "",
+    title: t.title ?? "",
+    steps: t.steps ?? "",
+    expectedResult: t.expectedResult ?? "",
+    actualResult: t.actualResult ?? "",
+    status: narrowOr<TestCaseStatus>(
+      t.status,
+      TEST_CASE_STATUS_VALUES,
+      "untested",
+    ),
+    priority: narrowOr<TestCasePriority>(
+      t.priority,
+      TEST_CASE_PRIORITY_VALUES,
+      "medium",
+    ),
+    assignedTo: t.assignedTo ?? "",
+    order: t.order ?? "",
+    tags: Array.isArray(t.tags) ? t.tags : [],
+    // `isDeletable` defaults to `true` when missing. This is a
+    // forward-compat choice: rows written before the field existed
+    // (or by integrations that never stamp it) stay editable, and
+    // the spreadsheet explicitly opts rows *out* of deletion by
+    // setting it to `false` on the 10 auto-created defaults.
+    isDeletable: t.isDeletable !== false,
+    createdAt: t.CreatedDate,
+    updatedAt: t.LastUpdatedDate,
+    createdBy: t.CreatedBy ?? "",
+    updatedBy: t.UpdatedBy ?? "",
+  };
+}
+
 // --- Profile picture adapter --------------------------------------------------
 //
 // The user's profile picture bytes live in Blocks Data Storage (files); this
@@ -1461,6 +1575,34 @@ export const issuesCollection = blocksClient.data.collection<CloudIssue>(
       "seenInRunIdsJson",
       "assignedDeveloperIdsJson",
       "approvedById",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
+export const testCasesCollection = blocksClient.data.collection<CloudTestCase>(
+  "TestCase",
+  {
+    // Field list mirrors the schema in
+    // `blocks/data/schemas/TestCase.json`. The SDK fetch projection
+    // trims the row to just these columns; a column missing here
+    // arrives as `undefined` on every row, which would make every
+    // existing test case appear blank in the spreadsheet.
+    fields: [
+      "featureId",
+      "flowId",
+      "title",
+      "steps",
+      "expectedResult",
+      "actualResult",
+      "status",
+      "priority",
+      "assignedTo",
+      "order",
+      "tags",
+      "isDeletable",
       "CreatedBy",
       "CreatedDate",
       "LastUpdatedBy",

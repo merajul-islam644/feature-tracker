@@ -948,7 +948,12 @@ export function ChatThread({
           </button>
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto bg-gradient-to-b from-muted/30 via-muted/20 to-muted/30 px-4 py-4">
+      {/* `overflow-x-hidden` clips the bubble hover toolbar — it's
+          absolutely positioned and extends past the bubble's right
+          edge, so without this the message pane picks up a horizontal
+          scrollbar (scrollWidth > clientWidth by ~10px). Vertical
+          scrolling stays as-is via `overflow-y-auto`. */}
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-gradient-to-b from-muted/30 via-muted/20 to-muted/30 px-4 py-4">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
             <div className="relative">

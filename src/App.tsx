@@ -14,6 +14,11 @@ import { IssueTrackerPage } from "@/pages/IssueTrackerPage";
 import { ProjectInfoPage } from "@/pages/ProjectInfoPage";
 import { NotificationDetailPage } from "@/pages/NotificationDetailPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
+import { NotepadPage } from "@/pages/NotepadPage";
+import { NotepadTextPage } from "@/pages/NotepadTextPage";
+import { NotepadTextEditorPage } from "@/pages/NotepadTextEditorPage";
+import { NotepadExcelPage } from "@/pages/NotepadExcelPage";
+import { NotepadExcelEditorPage } from "@/pages/NotepadExcelEditorPage";
 import { RequireAuth } from "@/hooks/useAuth";
 import { PlaywrightPage } from "./playwright/PlaywrightPage";
 import { RepoBrowserPage } from "./repo-browser/RepoBrowserPage";
@@ -59,6 +64,17 @@ export default function App() {
             <Route path="/members" element={<MembersPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/issue-tracker" element={<IssueTrackerPage />} />
+            <Route path="/notepad" element={<NotepadPage />} />
+            <Route path="/notepad/text" element={<NotepadTextPage />} />
+            <Route
+              path="/notepad/text/:padId"
+              element={<NotepadTextEditorPage />}
+            />
+            <Route path="/notepad/excel" element={<NotepadExcelPage />} />
+            <Route
+              path="/notepad/excel/:padId"
+              element={<NotepadExcelEditorPage />}
+            />
             <Route
               path="/notifications/:notificationId"
               element={<NotificationDetailPage />}

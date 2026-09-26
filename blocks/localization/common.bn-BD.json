@@ -268,7 +268,7 @@
   "time.minutesAgo": "{count, plural, =1 {১ মিনিট আগে} other {# মিনিট আগে}}",
   "time.hoursAgo": "{count, plural, =1 {১ ঘণ্টা আগে} other {# ঘণ্টা আগে}}",
   "time.daysAgo": "{count, plural, =1 {১ দিন আগে} other {# দিন আগে}}",
-  "chat.title": "চ্যাট",
+  "chat.title": "বার্তা",
   "chat.description": "ওয়ার্কস্পেসের সদস্যদের মধ্যে সরাসরি বার্তা।",
   "chat.searchPlaceholder": "সদস্য খুঁজুন",
   "chat.noMatches": "কোনো সদস্য মেলেনি।",
