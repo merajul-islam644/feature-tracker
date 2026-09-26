@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { LucideIcon } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -12,6 +14,13 @@ import {
   Contact,
   LogOut,
   NotebookPen,
+  ChevronRight,
+  Globe,
+  KeyRound,
+  ListChecks,
+  Activity,
+  History,
+  AlertCircle,
 } from "lucide-react";
 import {
   Sidebar,
@@ -23,6 +32,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
@@ -32,42 +44,131 @@ import { useLocale, useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 
 // `useT` looks up against the loaded `common` module. Nav items map onto
-// the `nav.*` namespace.
+// the `nav.*` namespace. The sidebar supports two shapes of nav item:
+//   - `link`: a normal route entry that highlights when its path is
+//     the current pathname (with the existing startsWith carve-out for
+//     parent routes like `/projects` and `/notepad`).
+//   - `group`: a collapsible parent that has no route of its own —
+//     clicking it only toggles its children's visibility. The
+//     Issue Tracker group is the first user of this shape; if more
+//     groups get added later, promote `expanded` to a
+//     `Record<string, boolean>` keyed on `group.key`.
 export function AppSidebar() {
   const t = useT();
   const location = useLocation();
-  const navItems = [
+
+  type NavItem =
+    | {
+        kind: "link";
+        to: string;
+        label: string;
+        icon: LucideIcon;
+      }
+    | {
+        kind: "group";
+        key: string;
+        label: string;
+        icon: LucideIcon;
+        children: {
+          key: string;
+          label: string;
+          to?: string;
+          icon?: LucideIcon;
+        }[];
+      };
+
+  const navItems: NavItem[] = [
     {
+      kind: "link",
       to: "/dashboard",
       label: t("nav.dashboard", "Dashboard"),
       icon: LayoutDashboard,
     },
     {
+      kind: "link",
       to: "/projects",
       label: t("nav.projects", "Projects"),
       icon: FolderKanban,
     },
     {
-      to: "/issue-tracker",
+      kind: "group",
+      key: "issue-tracker",
       label: t("nav.issueTracker", "Issue Tracker"),
       icon: ShieldAlert,
+      children: [
+        {
+          key: "targets",
+          to: "/issue-tracker/targets",
+          icon: Globe,
+          label: t(
+            "nav.issueTracker.targets",
+            "Verification Targets",
+          ),
+        },
+        {
+          key: "secrets",
+          to: "/issue-tracker/secrets",
+          icon: KeyRound,
+          label: t(
+            "nav.issueTracker.secrets",
+            "Verification Secrets",
+          ),
+        },
+        {
+          key: "scope",
+          to: "/issue-tracker/scope",
+          icon: ListChecks,
+          label: t("nav.issueTracker.scope", "Verification Scopes"),
+        },
+        {
+          key: "panel",
+          to: "/issue-tracker/panel",
+          icon: Activity,
+          label: t(
+            "issueTracker.panel.title",
+            "Verification Panel",
+          ),
+        },
+        {
+          key: "history",
+          to: "/issue-tracker/history",
+          icon: History,
+          label: t(
+            "issueTracker.history.title",
+            "Run History",
+          ),
+        },
+        {
+          key: "issues",
+          to: "/issue-tracker/issues",
+          icon: AlertCircle,
+          label: t(
+            "issueTracker.issues.title",
+            "Issues",
+          ),
+        },
+      ],
     },
     {
+      kind: "link",
       to: "/chat",
       label: t("nav.chat", "Message"),
       icon: MessageSquare,
     },
     {
+      kind: "link",
       to: "/notepad",
       label: t("nav.notepad", "Notepad"),
       icon: NotebookPen,
     },
     {
+      kind: "link",
       to: "/members",
       label: t("nav.members", "Members"),
       icon: Contact,
     },
     {
+      kind: "link",
       to: "/settings",
       label: t("nav.settings", "Settings"),
       icon: SettingsIcon,
@@ -83,6 +184,21 @@ export function AppSidebar() {
     //   icon: PlayCircle,
     // },
   ];
+
+  // The Issue Tracker group is the only collapsible entry today. When
+  // other groups get added, lift this to `Record<string, boolean>`
+  // keyed on `group.key` so they each remember their own state.
+  const [issueTrackerOpen, setIssueTrackerOpen] = useState(false);
+
+  // Auto-open the group when the user is on (or navigates to) the
+  // Issue Tracker page so deep-linking to `/issue-tracker*` always
+  // shows the children the user came looking for. Re-runs on each
+  // pathname change to keep deep links in a consistent state.
+  const isOnIssueTracker = location.pathname.startsWith("/issue-tracker");
+  useEffect(() => {
+    if (isOnIssueTracker) setIssueTrackerOpen(true);
+  }, [isOnIssueTracker]);
+
   return (
     <Sidebar collapsible="icon" variant="sidebar">
       <SidebarHeader className="h-14 justify-center border-b border-sidebar-border">
@@ -111,35 +227,153 @@ export function AppSidebar() {
               // (e.g. /projects/:id should highlight "Project",
               // /notepad/text should highlight "Notepad").
               const isActive =
-                item.to === "/projects" || item.to === "/notepad"
+                item.kind === "link" &&
+                (item.to === "/projects" || item.to === "/notepad"
                   ? location.pathname.startsWith(item.to)
-                  : location.pathname === item.to;
+                  : location.pathname === item.to);
+
+              if (item.kind === "link") {
+                return (
+                  <SidebarMenuItem key={item.to}>
+                    <SidebarMenuButton
+                      asChild
+                      tooltip={item.label}
+                      isActive={isActive}
+                    >
+                      <NavLink to={item.to}>
+                        <Icon
+                          aria-hidden="true"
+                          // Inactive icons render in a muted version of
+                          // the sidebar foreground — a neutral "default"
+                          // color that doesn't fight the user's chosen
+                          // accent. Active icons flip to the
+                          // contrasting foreground because the active
+                          // button paints its own background in
+                          // `--sidebar-accent`.
+                          className={
+                            isActive
+                              ? "text-sidebar-accent-foreground"
+                              : "text-sidebar-foreground/70"
+                          }
+                        />
+                        <span>{item.label}</span>
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              }
+
+              // `kind: "group"` — collapsible parent. No NavLink on the
+              // parent itself: clicking it toggles the sub-menu and
+              // does NOT navigate. The button still uses the same
+              // hover/active background as a regular item so the
+              // chevron affordance reads as part of the row, not as a
+              // separate control.
+              const groupActive = isOnIssueTracker;
               return (
-                <SidebarMenuItem key={item.to}>
+                <SidebarMenuItem key={item.key}>
                   <SidebarMenuButton
-                    asChild
                     tooltip={item.label}
-                    isActive={isActive}
+                    isActive={groupActive}
+                    onClick={() => setIssueTrackerOpen((v) => !v)}
+                    aria-expanded={issueTrackerOpen}
                   >
-                    <NavLink to={item.to}>
-                      <Icon
-                        aria-hidden="true"
-                        // Inactive icons render in a muted version of
-                        // the sidebar foreground — a neutral "default"
-                        // color that doesn't fight the user's chosen
-                        // accent. Active icons flip to the
-                        // contrasting foreground because the active
-                        // button paints its own background in
-                        // `--sidebar-accent`.
-                        className={
-                          isActive
-                            ? "text-sidebar-accent-foreground"
-                            : "text-sidebar-foreground/70"
-                        }
-                      />
-                      <span>{item.label}</span>
-                    </NavLink>
+                    <Icon
+                      aria-hidden="true"
+                      className={
+                        groupActive
+                          ? "text-sidebar-accent-foreground"
+                          : "text-sidebar-foreground/70"
+                      }
+                    />
+                    <span>{item.label}</span>
+                    <ChevronRight
+                      aria-hidden="true"
+                      className={cn(
+                        "ml-auto h-4 w-4 transition-transform",
+                        // Rotated 90° when open — mirrors the
+                        // apps-website folder convention so the cue
+                        // reads at a glance.
+                        issueTrackerOpen && "rotate-90",
+                      )}
+                    />
                   </SidebarMenuButton>
+
+                  {issueTrackerOpen && (
+                    <SidebarMenuSub>
+                      {item.children.map((child) => {
+                        // Children with a `to` route via `NavLink` and
+                        // pick up active styling when their path is the
+                        // current pathname. Children without a `to`
+                        // remain visual-only placeholders for sections
+                        // that haven't been split into routes yet.
+                        //
+                        // Icons render before the label. The
+                        // `SidebarMenuSubButton` primitive applies
+                        // `[&>svg]:text-sidebar-accent-foreground`
+                        // unconditionally to any direct `<svg>`
+                        // descendant, so even an idle row gets an icon
+                        // painted in the accent-foreground colour
+                        // (which only reads against the hover/active
+                        // background, not against the default
+                        // sidebar background, so idle icons effectively
+                        // disappear).
+                        //
+                        // To override that we can't just pass
+                        // `text-sidebar-foreground/70` on the icon —
+                        // CSS class strings don't pierce into a tag
+                        // child from className alone. Instead we attach
+                        // a descendant selector on the wrapper that
+                        // reaches the SVG: `[&>svg]:text-sidebar-foreground/70`
+                        // for idle rows, `[&>svg]:text-sidebar-accent-foreground`
+                        // for active. Same rule as the parent nav rows
+                        // (muted when idle, accent-foreground when
+                        // active) so the visual language is consistent.
+                        const Icon = child.icon;
+                        if (child.to) {
+                          const childActive =
+                            location.pathname === child.to ||
+                            location.pathname.startsWith(`${child.to}/`);
+                          return (
+                            <SidebarMenuSubItem key={child.key}>
+                              <SidebarMenuSubButton
+                                size="sm"
+                                asChild
+                                isActive={childActive}
+                                className={
+                                  childActive
+                                    ? "[&>svg]:text-sidebar-accent-foreground"
+                                    : "[&>svg]:text-sidebar-foreground/70"
+                                }
+                              >
+                                <NavLink to={child.to}>
+                                  {Icon && <Icon aria-hidden="true" />}
+                                  <span>{child.label}</span>
+                                </NavLink>
+                              </SidebarMenuSubButton>
+                            </SidebarMenuSubItem>
+                          );
+                        }
+                        return (
+                          <SidebarMenuSubItem key={child.key}>
+                            <SidebarMenuSubButton
+                              size="sm"
+                              asChild
+                              aria-disabled="true"
+                              // Same descendant rule: muted foreground
+                              // for the disabled placeholder row.
+                              className="[&>svg]:text-sidebar-foreground/70"
+                            >
+                              <span>
+                                {Icon && <Icon aria-hidden="true" />}
+                                {child.label}
+                              </span>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        );
+                      })}
+                    </SidebarMenuSub>
+                  )}
                 </SidebarMenuItem>
               );
             })}

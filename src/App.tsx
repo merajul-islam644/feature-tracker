@@ -10,7 +10,12 @@ import { ProfilePage } from "@/pages/ProfilePage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { MembersPage } from "@/pages/MembersPage";
 import { ChatPage } from "@/pages/ChatPage";
-import { IssueTrackerPage } from "@/pages/IssueTrackerPage";
+import { TargetsPage } from "@/pages/issue-tracker/TargetsPage";
+import { SecretsPage } from "@/pages/issue-tracker/SecretsPage";
+import { ScopePage } from "@/pages/issue-tracker/ScopePage";
+import { PanelPage } from "@/pages/issue-tracker/PanelPage";
+import { HistoryPage } from "@/pages/issue-tracker/HistoryPage";
+import { IssuesPage } from "@/pages/issue-tracker/IssuesPage";
 import { ProjectInfoPage } from "@/pages/ProjectInfoPage";
 import { NotificationDetailPage } from "@/pages/NotificationDetailPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -63,7 +68,37 @@ export default function App() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/members" element={<MembersPage />} />
             <Route path="/chat" element={<ChatPage />} />
-            <Route path="/issue-tracker" element={<IssueTrackerPage />} />
+            {/* Bare `/issue-tracker` redirects to the panel since the
+                Run verification controls live there; each sub-section
+                has its own route under `/issue-tracker/<key>`. */}
+            <Route
+              path="/issue-tracker"
+              element={<Navigate to="/issue-tracker/panel" replace />}
+            />
+            <Route
+              path="/issue-tracker/targets"
+              element={<TargetsPage />}
+            />
+            <Route
+              path="/issue-tracker/secrets"
+              element={<SecretsPage />}
+            />
+            <Route
+              path="/issue-tracker/scope"
+              element={<ScopePage />}
+            />
+            <Route
+              path="/issue-tracker/panel"
+              element={<PanelPage />}
+            />
+            <Route
+              path="/issue-tracker/history"
+              element={<HistoryPage />}
+            />
+            <Route
+              path="/issue-tracker/issues"
+              element={<IssuesPage />}
+            />
             <Route path="/notepad" element={<NotepadPage />} />
             <Route path="/notepad/text" element={<NotepadTextPage />} />
             <Route
