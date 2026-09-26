@@ -134,9 +134,11 @@ export function ProjectsPage() {
       {isLoading ? (
         viewMode === "list" ? (
           // Row-shaped skeletons for list mode — match the 56px row
-          // height so the swap-in doesn't reflow on load.
+          // height so the swap-in doesn't reflow on load. Eleven
+          // rows fills the viewport on a typical laptop without
+          // inviting a layout shift if the real list is shorter.
           <div className="space-y-2" aria-hidden="true">
-            {Array.from({ length: 5 }).map((_, i) => (
+            {Array.from({ length: 11 }).map((_, i) => (
               <div
                 key={i}
                 className="h-14 w-full rounded-md border border-border bg-muted/40"
@@ -144,12 +146,15 @@ export function ProjectsPage() {
             ))}
           </div>
         ) : (
-          // 3-card grid skeleton (default).
+          // 3-column card grid skeleton (default). Nine cards fills
+          // three rows of the 1/2/3-column responsive grid (1 col on
+          // mobile, 2 on sm, 3 on lg) without an awkward last-row
+          // gap during load.
           <div
             className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
             aria-hidden="true"
           >
-            {Array.from({ length: 3 }).map((_, i) => (
+            {Array.from({ length: 9 }).map((_, i) => (
               <div
                 key={i}
                 className="h-32 animate-pulse rounded-xl border border-border bg-muted/40"
