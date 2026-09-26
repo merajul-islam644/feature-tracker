@@ -227,6 +227,48 @@ export interface CloudAnnouncement {
   CreatedBy?: string;
 }
 
+// --- Notification ----------------------------------------------------------
+//
+// One row per (recipient, action) pair. The recipient is `userId`; the
+// sender's hooks write one row per user they target. The inbox reads with
+// `filter: { userId: <me> }` so each user only sees their own rows —
+// same per-user filter pattern as `CloudDirectMessage.recipientId` and
+// `CloudCallSignal.recipientId`. Replaces the previous path through the
+// platform's `GetNotifications` endpoint, which on this tenant returns
+// an empty `notifications` array for app-sent records (see
+// `docs/platform-bug-notifier-enumeration.md`).
+//
+// The denormalized display fields (projectName / featureName / flowName /
+// envSlug / oldName / newName / status / stack) are captured at write
+// time so the inbox renderer can build a sentence without a follow-up
+// read — they may go stale if the underlying resource is renamed later,
+// but the title/body only need to reflect what was true at the moment
+// of the action.
+export interface CloudNotification {
+  ItemId: string;
+  userId: string;
+  context: string;
+  actionName: string;
+  actorId: string;
+  value?: string;
+  actorName?: string;
+  projectId?: string;
+  projectName?: string;
+  featureId?: string;
+  featureName?: string;
+  flowId?: string;
+  flowName?: string;
+  envSlug?: string;
+  oldName?: string;
+  newName?: string;
+  status?: string;
+  stack?: string;
+  readAt?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
 // --- Issue Tracker cloud shapes --------------------------------------------
 //
 // The Issue Tracker feature keeps its per-user data in three separate
@@ -1016,6 +1058,70 @@ export function toAnnouncement(c: CloudAnnouncement): Announcement {
   };
 }
 
+// --- Notification adapter ----------------------------------------------------
+//
+// Cloud row → UI shape used by the inbox hooks in
+// `src/lib/blocks/notifier.ts`. The UI shape is intentionally narrow —
+// every optional field becomes `undefined` (not empty string) so the
+// inbox renderer's `body ?? undefined` checks collapse cleanly.
+//
+// `id` is required: rows missing `ItemId` are skipped by
+// `toInboxItem` upstream, so by the time we reach this adapter the id
+// is always a string.
+export interface Notification {
+  id: string;
+  userId: string;
+  context: string;
+  actionName: string;
+  actorId: string;
+  actorName: string;
+  value?: string;
+  projectId?: string;
+  projectName?: string;
+  featureId?: string;
+  featureName?: string;
+  flowId?: string;
+  flowName?: string;
+  envSlug?: string;
+  oldName?: string;
+  newName?: string;
+  status?: string;
+  stack?: string;
+  /** ISO timestamp once the recipient has read the row; null while unread. */
+  readAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toNotification(c: CloudNotification): Notification {
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    context: c.context ?? "",
+    actionName: c.actionName ?? "",
+    actorId: c.actorId ?? "",
+    actorName: c.actorName ?? "A manager",
+    value: c.value || undefined,
+    projectId: c.projectId || undefined,
+    projectName: c.projectName || undefined,
+    featureId: c.featureId || undefined,
+    featureName: c.featureName || undefined,
+    flowId: c.flowId || undefined,
+    flowName: c.flowName || undefined,
+    envSlug: c.envSlug || undefined,
+    oldName: c.oldName || undefined,
+    newName: c.newName || undefined,
+    status: c.status || undefined,
+    stack: c.stack || undefined,
+    // Empty string on the wire maps to null in the UI — same shape as
+    // `DirectMessage.readAt`. A row with no readAt field also reads as
+    // null so `!!notification.readAt` gates cleanly.
+    readAt: c.readAt ? c.readAt : null,
+    createdAt: c.CreatedDate,
+    updatedAt: c.LastUpdatedDate ?? c.CreatedDate,
+  };
+}
+
 // --- Test cases --------------------------------------------------------------
 //
 // A `TestCase` is a row in the test-case spreadsheet attached to a Feature.
@@ -1369,7 +1475,9 @@ interface PagedCloud<T> {
 // (or `{ data: { insert|update|delete<Schema>: { ... } }` for mutations).
 // Drill through the operation field when present so the rest of the code
 // can treat every response as a flat `{ items, totalCount }`.
-function unwrapPaged<T>(raw: unknown): { items: T[]; totalCount: number } {
+// Exported so non-collection helpers (e.g. `notifier.useNotificationInbox`)
+// can reuse the same envelope-shape shim instead of re-parsing it.
+export function unwrapPaged<T>(raw: unknown): { items: T[]; totalCount: number } {
   const r = raw as
     | { data?: Record<string, PagedCloud<T>> | PagedCloud<T> }
     | PagedCloud<T>
@@ -1462,6 +1570,15 @@ export const callSignalsCollection = blocksClient.data.collection<CloudCallSigna
 // columns; `CreatedBy` rides along for the audit-style "posted by" render.
 export const announcementsCollection = blocksClient.data.collection<CloudAnnouncement>("Announcement", {
   fields: ["authorId", "content", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` MUST be in the selector — the inbox reads with
+// `filter: { userId: <me> }`, and the gateway silently drops unselected
+// filter columns (the same lesson as every other per-user collection).
+// Every other column is selected because `toNotification` reads it; an
+// unselected column would silently arrive as `undefined` and the inbox
+// renderer would lose that field's display value.
+export const notificationsCollection = blocksClient.data.collection<CloudNotification>("Notification", {
+  fields: ["userId", "context", "actionName", "actorId", "value", "actorName", "projectId", "projectName", "featureId", "featureName", "flowId", "flowName", "envSlug", "oldName", "newName", "status", "stack", "readAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be selected: the read path filters on it when looking up the
 // caller's own row for the upload upsert (an unselected filter column is
