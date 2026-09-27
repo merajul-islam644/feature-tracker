@@ -1,13 +1,13 @@
-// Visual primitives shared by the flow row's interactive EnvWorkflow
-// and the feature row's read-only mirror. Lives here (next to
-// EnvWorkflow.tsx) rather than in src/components/ui/ because the
-// yellow theme + state classes are workflow-specific and aren't
-// reused anywhere else in the app.
+// Visual primitives shared by the feature row's interactive
+// `ManagerFeatureEnvWorkflow` and read-only `FeatureEnvWorkflow` chain
+// diagrams. Lives here (next to the flow components) rather than in
+// `src/components/ui/` because the yellow theme + state classes are
+// workflow-specific and aren't reused anywhere else in the app.
 //
-// Each module that renders a chain — EnvWorkflow for flows,
-// FeatureEnvWorkflow for features — owns the spacing wrapper, the
-// source-node positioning, and the per-env iteration. The Node +
-// Arrow here are stateless presentation.
+// Each module that renders a chain — `ManagerFeatureEnvWorkflow` for
+// managers, `FeatureEnvWorkflow` for everyone else — owns the spacing
+// wrapper, the source-node positioning, and the per-env iteration. The
+// Node + Arrow here are stateless presentation.
 
 import type { ReactNode } from "react";
 import { Check } from "lucide-react";
@@ -42,6 +42,19 @@ export const ENV_NODE_STATE_CLASSES: Record<EnvNodeState, string> = {
     "cursor-default border-yellow-400/40 bg-transparent text-yellow-300",
 };
 
+// Disabled-state cursor split. We intentionally do NOT use
+// `cursor-progress` for non-pending disabled pills — the system
+// progress cursor renders as an animated spinning circle/arrow on
+// most browsers, which the user reads as "this pill is loading".
+// Disabled-but-not-pending means the pill is permanently inert
+// (already cloned, or blocked by a precondition); `cursor-not-allowed`
+// communicates "this click won't do anything" without suggesting any
+// in-flight activity. `cursor-progress` is reserved for the actual
+// in-flight click (`pending={true}`), where the system spinner cursor
+// is the correct signal.
+export const ENV_NODE_DISABLED_CURSOR = "cursor-not-allowed opacity-70";
+export const ENV_NODE_PENDING_CURSOR = "cursor-progress opacity-70";
+
 // Interactive-only affordances — hover fill + pointer cursor on the
 // "available" nodes. Only appended when the caller marks the chain
 // as interactive (flow row). Source / cloned stay cursor-default
@@ -56,10 +69,10 @@ export const ENV_NODE_INTERACTIVE_CLASSES: Record<EnvNodeState, string> = {
 // Inline keyframes for the marching-dash arrow. Each module that
 // mounts a chain injects its own `<style>` — the keyframe is local
 // rather than a global stylesheet rule so a page without a workflow
-// doesn't ship unused CSS. Both EnvWorkflow and FeatureEnvWorkflow
-// mount together in the same DOM at the same time, so the keyframe
-// declaration is duplicated intentionally; browsers deduplicate the
-// parsed rule by name.
+// doesn't ship unused CSS. `ManagerFeatureEnvWorkflow` and
+// `FeatureEnvWorkflow` can mount together in the same DOM at the same
+// time, so the keyframe declaration is duplicated intentionally;
+// browsers deduplicate the parsed rule by name.
 export const ENV_WORKFLOW_KEYFRAMES = `
 @keyframes env-wf-arrow-flow {
   0% { stroke-dashoffset: 0; }
@@ -81,6 +94,13 @@ interface NodeProps {
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   pending?: boolean;
+  // Mouse handlers forwarded to the underlying <button>. The
+  // interactive flow-row variant uses these to scope the readiness
+  // visual (Check + animated arrow) to a single hovered pill; the
+  // feature-row read-only mirror omits them so the chain stays
+  // inert.
+  onMouseEnter?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onMouseLeave?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   // When true (default), append the hover + cursor-pointer
   // affordances for the "available" state. The feature-row variant
   // passes `false` so its read-only chain doesn't suggest the envs
@@ -98,6 +118,8 @@ export function EnvNode({
   onClick,
   disabled,
   pending,
+  onMouseEnter,
+  onMouseLeave,
   interactive = true,
 }: NodeProps) {
   return (
@@ -107,13 +129,22 @@ export function EnvNode({
       disabled={disabled}
       title={title}
       aria-label={title}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
       className={cn(
         "relative inline-flex h-5 items-center gap-0.5 rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-tight transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-1",
         ENV_NODE_STATE_CLASSES[state],
         interactive && ENV_NODE_INTERACTIVE_CLASSES[state],
-        // Pending spinner always wins over the interactive cursor so
-        // the user sees "in flight" rather than a clickable pill.
-        disabled && "cursor-progress opacity-70",
+        // Pending vs non-pending disabled get different cursors on
+        // purpose — see the comment on `ENV_NODE_DISABLED_CURSOR` /
+        // `ENV_NODE_PENDING_CURSOR` above. Pending keeps the system
+        // progress cursor (animated spinner) because a click is
+        // genuinely in flight; non-pending disabled uses
+        // `not-allowed` so the pill reads as "this won't do anything"
+        // rather than "this is loading".
+        pending
+          ? ENV_NODE_PENDING_CURSOR
+          : disabled && ENV_NODE_DISABLED_CURSOR,
       )}
     >
       {state === "cloned" && (

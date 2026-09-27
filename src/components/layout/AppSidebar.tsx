@@ -39,7 +39,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { UserAvatar } from "@/components/ui/UserAvatar";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth, useIsRole } from "@/hooks/useAuth";
 import { useLocale, useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 
@@ -56,6 +56,18 @@ import { cn } from "@/lib/utils";
 export function AppSidebar() {
   const t = useT();
   const location = useLocation();
+  // Role gate for the Issue Tracker group. The verification / secret /
+  // panel workflows are driven by the manager + tester roles — the
+  // developer role authors features and flows but doesn't author
+  // verifications, so the sidebar entry is filtered out for them. We
+  // keep the group definition in `navItems` and drop it at render time
+  // (rather than building the array conditionally) so the children
+  // list and i18n keys stay in one place — easier to grep, easier to
+  // re-enable if the role mapping changes. Mirrors the
+  // `useIsRole("manager")` gates on ProjectsPage / FeatureItem /
+  // ProjectDetailPage / FlowDetailsDrawer — same hook, same single-
+  // source-of-truth for role resolution.
+  const isDeveloper = useIsRole("developer");
 
   type NavItem =
     | {
@@ -221,7 +233,54 @@ export function AppSidebar() {
             <NavToggle />
           </SidebarGroupLabel>
           <SidebarMenu>
-            {navItems.map((item) => {
+            {/* Developer role narrows the Issue Tracker group down
+                to just its "Issues" child, rendered as a flat link
+                (not a collapsible parent) so the developer sees one
+                nav row that navigates straight to
+                `/issue-tracker/issues`. The rest of the Issue
+                Tracker surface (verification targets / secrets /
+                scopes / panel / history) is QA- and manager-owned —
+                developers author features and flows but don't drive
+                the verification side, so showing them an empty
+                collapsible parent or the full list would be visual
+                noise. Transform (vs. drop-and-add) keeps the Issues
+                label + route + icon definition in `navItems`
+                alongside its siblings, so i18n keys and ordering
+                stay in one place. The flatMap returns `NavItem[]` in
+                every branch, so the downstream `kind === "link" /
+                "group"` narrowing is unaffected. */}
+            {navItems
+              .flatMap<NavItem>((item) => {
+                if (
+                  isDeveloper &&
+                  item.kind === "group" &&
+                  item.key === "issue-tracker"
+                ) {
+                  const issuesChild = item.children.find(
+                    (c) => c.key === "issues",
+                  );
+                  // Defensive: if the "issues" child is missing or
+                  // has no route for any reason, drop the entire
+                  // group rather than render an unclickable row —
+                  // same UX as before this change.
+                  if (!issuesChild?.to) return [];
+                  return [
+                    {
+                      kind: "link",
+                      to: issuesChild.to,
+                      // Reuse the Issues child's own icon (alert
+                      // circle) rather than the parent group's
+                      // shield icon — the developer entry reads as
+                      // "Issues", not as the broader Issue Tracker
+                      // surface.
+                      icon: AlertCircle,
+                      label: issuesChild.label,
+                    },
+                  ];
+                }
+                return [item];
+              })
+              .map((item) => {
               const Icon = item.icon;
               // Keep the parent route highlighted on detail pages
               // (e.g. /projects/:id should highlight "Project",

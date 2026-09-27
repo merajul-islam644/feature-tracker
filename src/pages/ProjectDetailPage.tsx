@@ -187,12 +187,27 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
   const flowsQuery = useProjectFlows(projectId);
   const t = useT();
   const navigate = useNavigate();
-  // Testers can browse features and flows but cannot author features or
-  // rename envs. The underlying hooks throw the same error if reached
-  // another way — see `useCreateFeature` and `useRenameProjectEnv` in
-  // `hooks.ts`. We only hide the controls a tester would actually click
-  // ("Add Feature" + the rename-env pencil); "Add Flow" stays visible
-  // because the user's spec listed only feature creation as off-limits.
+  // Role gates for the header CTAs:
+  //
+  //   * "Add Feature" (just below) is manager-only — the workspace
+  //     curation surface. `useCreateFeature` throws the same error
+  //     for stale modals / programmatic callers.
+  //
+  //   * "Add Flow" (also below) is TESTER-only. The previous policy
+  //     was "non-manager (developer + tester) inline authoring";
+  //     narrowing it to testers aligns the page-level entry with the
+  //     flow-row kebab Rename/Delete policy in `FeatureItem` (also
+  //     tester-only) — managers curate via chat tools and developers
+  //     author features but not flows. `useCreateFlow` has no role
+  //     guard because the chat tools call it on behalf of any role;
+  //     this is UI enforcement only.
+  //
+  //   * The env-rename pencil stays manager-only — same rationale as
+  //     `useRenameProjectEnv`.
+  //
+  // Mirrors ProjectCard / ProjectsPage / FeatureItem — same
+  // `useIsRole` hooks, same single-source role resolution.
+  const isManager = useIsRole("manager");
   const isTester = useIsRole("tester");
 
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
@@ -287,9 +302,9 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
                   chip without crowding it. Disabled when no env is
                   mounted (the env-less /projects/:id landing) — there
                   is nothing meaningful to rename in that case. Hidden
-                  entirely for testers; `useRenameProjectEnv` throws
-                  the same error if reached another way. */}
-              {!isTester && (
+                  entirely for non-managers; `useRenameProjectEnv`
+                  throws the same error if reached another way. */}
+              {isManager && (
                 <button
                   type="button"
                   onClick={() => setRenameEnvOpen(true)}
@@ -309,27 +324,45 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
               the legacy /projects/:id landing — treat as dev. */}
           {(envSlug === undefined || envSlug === "dev") && (
             <>
-              <Button
-                variant="secondary"
-                onClick={() => setAddFlowOpen(true)}
-                leftIcon={<GitBranch className="h-4 w-4" />}
-                disabled={features.length === 0}
-                title={
-                  features.length === 0
-                    ? t(
-                        "projectDetail.addFeatureFirstTooltip",
-                        "Add at least one feature before creating a flow",
-                      )
-                    : undefined
-                }
-              >
-                {t("projectDetail.addFlow", "Add Flow")}
-              </Button>
-              {/* Hidden for testers — `useCreateFeature` throws the same
-                  error if reached through any other path. "Add Flow"
-                  above stays available because the spec only listed
-                  feature creation as off-limits for testers. */}
-              {!isTester && (
+              {/* Flow authoring is the TESTER-only affordance on this
+                  page (mirroring the inline "+ Add another flow"
+                  button and the empty-state "Add Flow" CTA inside
+                  `FeatureItem`). Managers and developers fall into
+                  the read-only branch: managers curate flows via
+                  chat tools / kebab create actions, developers
+                  author features but not flows. The button stays
+                  disabled when there are no features yet — that's
+                  a structural guard, not a role check, and applies
+                  to testers too (who would otherwise land on the
+                  modal with no parent feature to attach to). */}
+              {isTester && (
+                <Button
+                  variant="secondary"
+                  onClick={() => setAddFlowOpen(true)}
+                  leftIcon={<GitBranch className="h-4 w-4" />}
+                  disabled={features.length === 0}
+                  title={
+                    features.length === 0
+                      ? t(
+                          "projectDetail.addFeatureFirstTooltip",
+                          "Add at least one feature before creating a flow",
+                        )
+                      : undefined
+                  }
+                >
+                  {t("projectDetail.addFlow", "Add Flow")}
+                </Button>
+              )}
+              {/* Hidden for non-managers — `useCreateFeature` throws the
+                  same error if reached through any other path. The
+                  top "Add Flow" button (just above) is hidden for
+                  managers + developers (tester-only) in the inverse
+                  direction: managers author flows via chat tools,
+                  developers don't author flows at all — only
+                  testers get the inline creation entry points
+                  (header button, "+ Add another flow", empty-state
+                  "Add Flow" CTA). */}
+              {isManager && (
                 <Button
                   onClick={() => setAddFeatureOpen(true)}
                   leftIcon={<Plus className="h-4 w-4" />}
@@ -344,11 +377,11 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
 
       {features.length === 0 ? (
         envSlug === undefined || envSlug === "dev" ? (
-          // Don't pass `onAdd` for testers — the empty state should
-          // not surface a CTA they can't act on. `useCreateFeature`
+          // Only pass `onAdd` for managers — the empty state should
+          // not surface a CTA non-managers can't act on. `useCreateFeature`
           // throws if they reach it some other way.
           <FeatureEmptyState
-            {...(!isTester ? { onAdd: () => setAddFeatureOpen(true) } : {})}
+            {...(isManager ? { onAdd: () => setAddFeatureOpen(true) } : {})}
           />
         ) : (
           // Non-dev envs show a read-only empty state when no features

@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/sheet";
 import { useAuth } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
-import { useClonedEnvs } from "@/lib/blocks/hooks";
 import { cn } from "@/lib/utils";
 import type { Flow } from "@/lib/blocks/data";
 import { TestCaseSpreadsheet } from "@/components/test-cases/TestCaseSpreadsheet";
@@ -103,137 +102,6 @@ function UserChip({
   );
 }
 
-// Sibling envs in canonical promote order (stg → prod → uat). Mirrors
-// `SIBLING_ENVS` in EnvWorkflow.tsx — duplicated here rather than
-// exported because the workflow file owns it as a private constant
-// and exposing it just for the drawer's read-only mirror isn't
-// worth a module-level export change.
-const DIAGRAM_SIBLING_ENVS = [
-  { slug: "stg", label: "Stg" },
-  { slug: "prod", label: "Prod" },
-  { slug: "uat", label: "UAT" },
-] as const;
-
-// Read-only mirror of the row's interactive EnvWorkflow. Reuses the
-// same node + arrow visuals (golden source, outline-with-check for
-// cloned, outline for available) but without any click handlers —
-// matches the drawer's "read-only summary" promise and avoids
-// duplicating a click-to-clone mutation that's already one click
-// away on the row. The drawer also skips the marching-dash
-// animation defined inside EnvWorkflow's <style> tag — its keyframes
-// are component-local; re-injecting them in every drawer mount would
-// pile up identical <style> nodes. A static dashed line is still
-// visually distinct as "no clone path yet".
-function EnvWorkflowDiagram({
-  clonedEnvs,
-}: {
-  clonedEnvs: Set<string>;
-}) {
-  return (
-    <div className="mt-3 inline-flex h-6 items-center gap-1 overflow-visible text-yellow-400">
-      <DiagramNode
-        label="Dev"
-        // The drawer shows the workflow only for dev-source flows
-        // (caller-side gate) so the source box is always Dev.
-        state="source"
-      />
-      {DIAGRAM_SIBLING_ENVS.map((env) => {
-        const alreadyCloned = clonedEnvs.has(env.slug);
-        return (
-          <div key={env.slug} className="flex items-center gap-1">
-            <DiagramArrow animated={alreadyCloned} />
-            <DiagramNode
-              label={env.label}
-              state={alreadyCloned ? "cloned" : "available"}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// Reused shape + class set from EnvWorkflow's Node, minus the click
-// affordances. State maps stay identical so the read-only mirror
-// stays visually indistinguishable from the row's interactive
-// version at a glance.
-function DiagramNode({
-  label,
-  state,
-}: {
-  label: string;
-  state: "source" | "cloned" | "available";
-}) {
-  const STATE_CLASSES: Record<typeof state, string> = {
-    source:
-      "border-yellow-400 bg-yellow-400 text-yellow-950",
-    cloned:
-      "border-yellow-400/60 bg-yellow-400/15 text-yellow-200",
-    available:
-      "border-yellow-400/40 bg-transparent text-yellow-300",
-  };
-  return (
-    <span
-      className={cn(
-        "inline-flex h-5 items-center gap-0.5 rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-tight",
-        STATE_CLASSES[state],
-      )}
-      aria-label={label}
-    >
-      {state === "cloned" && (
-        <span aria-hidden="true" className="inline-flex">
-          {/* Checkmark — same lucide-react glyph used in the row's
-              Node, minus the icon component import for this read-
-              only context. */}
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </span>
-      )}
-      <span>{label}</span>
-    </span>
-  );
-}
-
-function DiagramArrow({ animated }: { animated: boolean }) {
-  return (
-    <svg
-      width="14"
-      height="10"
-      viewBox="0 0 14 10"
-      aria-hidden="true"
-      className={cn("shrink-0 text-yellow-400")}
-    >
-      <line
-        x1="0"
-        y1="5"
-        x2="10"
-        y2="5"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeDasharray="3 2"
-        // When the destination env has been cloned, animate the dash
-        // so the user can read which segments are "live". The
-        // keyframe (defined inline-scoped elsewhere) is intentionally
-        // omitted here to keep the drawer stateless — a static dashed
-        // line still reads as a directional chain.
-        className={animated ? "env-wf-arrow-line" : undefined}
-      />
-      <polygon points="10,3 13,5 10,7" fill="currentColor" />
-    </svg>
-  );
-}
-
 export function FlowDetailsDrawer({
   open,
   onClose,
@@ -289,11 +157,10 @@ export function FlowDetailsDrawer({
     }
     setSearchParams(params, { replace: false });
   };
-  // Read cloned-env set so the read-only workflow diagram can show
-  // which sibling envs the source flow has been promoted to. Hook is
-  // unconditional (rules of hooks) — `enabled: false` when flowId is
-  // missing keeps it idle for null-flow renders.
-  const { data: clonedEnvs } = useClonedEnvs(flow?.id);
+  // Read cloned-env set used to gate the read-only diagram's "cloned"
+  // vs "available" pill styling — gone now under the in-place
+  // promote model, so the diagram renders the same ready-state shape
+  // on every dev-source flow. The lookup used to live here; dropped.
 
   return (
     <Sheet open={open} onOpenChange={(next) => {
@@ -473,30 +340,6 @@ export function FlowDetailsDrawer({
                       />
                     </Field>
                   </dl>
-
-                  {/* Read-only workflow diagram — mirrors the row's
-                      interactive EnvWorkflow but without click-to-clone
-                      affordances. Same canonical Dev → Stg → Prod → UAT
-                      chain; cloned sibling envs render with the same
-                      check-filled outline as the row. Gated on dev env
-                      to match EnvWorkflow's "source-only" behavior on the
-                      row — promotion logic is dev-centric, so showing the
-                      diagram for a stg/prod/uat flow wouldn't carry the
-                      same meaning. */}
-                  {flow.envSlug === "dev" && (
-                    <>
-                      <Separator className="my-5" />
-                      <div>
-                        <h4 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                          {t(
-                            "flowItem.details.workflowHeading",
-                            "Environment workflow",
-                          )}
-                        </h4>
-                        <EnvWorkflowDiagram clonedEnvs={clonedEnvs ?? new Set()} />
-                      </div>
-                    </>
-                  )}
 
                   {/* Long-form description + step count get their own block
                       below the id grid — they can be long and would feel

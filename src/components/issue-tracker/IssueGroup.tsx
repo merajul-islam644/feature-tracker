@@ -11,7 +11,7 @@
 //                   with an inline "No issues" muted line and no list.
 
 import { useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Users } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import {
@@ -22,6 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useIsRole } from "@/hooks/useAuth";
 import type { UserOption } from "@/lib/blocks/users";
 
 // A dropdown entry: a developer- OR tester-role user. `role` tags the row
@@ -139,13 +140,33 @@ function MembersDropdown({
   // Reset every time the menu opens. Unticking the tracked member
   // drops the navigation intent entirely.
   const [lastTicked, setLastTicked] = useState<string | null>(null);
+  // Role gate — assignment is a manager / tester action; developers
+  // (feature authors) only consume the issue list, they don't reassign
+  // owners across the application. The picker stays visible to EVERY
+  // role (so a developer can still see who's assigned to a group's
+  // issues), but in `readOnly` mode the rows render as inert labels
+  // (no checkbox, no tick handlers, no navigation on close). This is
+  // a hard gate at the item level: a developer can open the menu and
+  // read the roster, but no Radix checkbox primitive is mounted, so
+  // nothing interactive is in the DOM. The same hard-gate pattern we
+  // use for StackChip / StatusChip — see FlowItem.tsx for the
+  // rationale on Radix `disabled` not being respected.
+  const isDeveloper = useIsRole("developer");
+  const readOnly = isDeveloper;
   if (members.length === 0) return null;
   return (
     <DropdownMenu
       onOpenChange={(open) => {
         if (open) {
           setLastTicked(null);
-        } else if (lastTicked) {
+        } else if (!readOnly && lastTicked) {
+          // Only fire the scoped-view navigation when this menu was
+          // actually interactive — a read-only close from a developer
+          // shouldn't jump them to the scoped view. The `!readOnly`
+          // guard is belt-and-suspenders: in readOnly mode no
+          // `setLastTicked` is ever called, so `lastTicked` stays null
+          // and the inner branch wouldn't fire anyway — but making the
+          // gate explicit reads better than relying on the side-effect.
           const member = members.find((m) => m.id === lastTicked);
           if (member) onNavigate?.(member);
           setLastTicked(null);
@@ -163,40 +184,91 @@ function MembersDropdown({
       <DropdownMenuContent align="end" className="w-80">
         <DropdownMenuLabel>Members · {members.length}</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {members.map((member) => (
-          <DropdownMenuCheckboxItem
-            key={member.id}
-            checked={assignedDeveloperIds?.includes(member.id) ?? false}
-            onCheckedChange={(checked) => {
-              setLastTicked(checked ? member.id : null);
-              onToggle?.(member, checked);
-            }}
-            // Keep the menu open so multiple members can be ticked in
-            // one pass; closing after each pick would be multi-trip.
-            onSelect={(e) => e.preventDefault()}
-            className="flex items-center gap-2.5"
-          >
-            <UserAvatar userId={member.id} name={member.name} size="sm" />
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-sm text-foreground">{member.name}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                {member.email}
-              </span>
-            </span>
-            {/* Role tag — the roster carries same-named members, so the
-                developer/tester distinction can't live in the name alone. */}
-            <span
-              className={cn(
-                "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                member.role === "tester"
-                  ? "bg-sky-500/10 text-sky-600 dark:text-sky-400"
-                  : "bg-violet-500/10 text-violet-600 dark:text-violet-400",
-              )}
+        {members.map((member) => {
+          const isAssigned =
+            assignedDeveloperIds?.includes(member.id) ?? false;
+          if (readOnly) {
+            // Read-only row — a plain `<div>` instead of a Radix
+            // checkbox primitive. No `onClick`, no `onSelect`, no
+            // `disabled` (Radix's item-level disabled is honored, but
+            // a plain div avoids the Radix menu's keyboard
+            // interactions entirely). Visual cue for "assigned" is a
+            // primary-tinted `Check` icon between the identity block
+            // and the role tag — same slot the checkbox indicator
+            // would occupy on an interactive row, so the layout
+            // doesn't shift between roles. Padding (`px-2 py-1.5`)
+            // mirrors the `DropdownMenuCheckboxItem` default so the
+            // rows line up across both render modes.
+            return (
+              <div
+                key={member.id}
+                className="flex items-center gap-2.5 px-2 py-1.5 text-sm"
+              >
+                <UserAvatar userId={member.id} name={member.name} size="sm" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-foreground">{member.name}</span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {member.email}
+                  </span>
+                </span>
+                {isAssigned && (
+                  <Check
+                    aria-hidden="true"
+                    className="h-4 w-4 shrink-0 text-primary"
+                  />
+                )}
+                {/* Role tag — the roster carries same-named members,
+                    so the developer/tester distinction can't live in
+                    the name alone. Same palette as the interactive
+                    row for visual continuity. */}
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                    member.role === "tester"
+                      ? "bg-sky-500/10 text-sky-600 dark:text-sky-400"
+                      : "bg-violet-500/10 text-violet-600 dark:text-violet-400",
+                  )}
+                >
+                  {member.role}
+                </span>
+              </div>
+            );
+          }
+          return (
+            <DropdownMenuCheckboxItem
+              key={member.id}
+              checked={isAssigned}
+              onCheckedChange={(checked) => {
+                setLastTicked(checked ? member.id : null);
+                onToggle?.(member, checked);
+              }}
+              // Keep the menu open so multiple members can be ticked in
+              // one pass; closing after each pick would be multi-trip.
+              onSelect={(e) => e.preventDefault()}
+              className="flex items-center gap-2.5"
             >
-              {member.role}
-            </span>
-          </DropdownMenuCheckboxItem>
-        ))}
+              <UserAvatar userId={member.id} name={member.name} size="sm" />
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-sm text-foreground">{member.name}</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {member.email}
+                </span>
+              </span>
+              {/* Role tag — the roster carries same-named members, so the
+                  developer/tester distinction can't live in the name alone. */}
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                  member.role === "tester"
+                    ? "bg-sky-500/10 text-sky-600 dark:text-sky-400"
+                    : "bg-violet-500/10 text-violet-600 dark:text-violet-400",
+                )}
+              >
+                {member.role}
+              </span>
+            </DropdownMenuCheckboxItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

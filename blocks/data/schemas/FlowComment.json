@@ -1,0 +1,84 @@
+{
+  "collectionName": "blx_FlowComments",
+  "fields": [
+    {
+      "name": "flowId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning flow's ItemId. Required-on-Both because the read path (`useFlowComments`) filters on it (`filter: { flowId: <id> }`) — the gateway silently drops an unselected filter field, so omitting it from a future selector would break the thread read. Matches `DirectMessage.senderId`'s 'explicit column, explicit filter' rationale.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "parentId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning comment id for replies; omitted (or empty string) for top-level comments. Required-on-None because the gateway's strict 'Required' validator rejects empty strings on insert with 'Field \"parentId\" is required for insert' (verified 2026-09-27: `insertFlowComment` returns VALIDATION_ERROR when `parentId: \"\"` is sent), so top-level comments skip the field entirely. Replies carry the parent's cloud ItemId (UUID). Encoded as a primitive string rather than null because Blocks Data fields can't carry null cleanly.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "authorId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM sub of the comment author. Required-on-Both because every PATCH must echo it (mirrors DirectMessage.senderId + Announcement.authorId). The chip / modal render uses `authorName` / `authorAvatar` for display; this column is the stable cross-rename identity.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "authorName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name snapshotted at write time. Denormalised intentionally so historic comments keep the author's name even after a later rename — the alternative (joining to UserProfile on every read) would lose thread history. Optional because a future email-only-author flow could author without a name.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "authorEmail",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Author's email snapshotted at write time. Same denormalisation rationale as `authorName`. Renders in the comment header beside the display name.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "authorAvatar",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Avatar URL snapshotted at write time (provider-signed download URL). Optional so a user without a profile picture posts without one — the avatar fallback in `CommentsModal.Avatar` renders the colored initial in that case.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "content",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Comment body. Required-on-Both so an empty row (header only, no content) cannot be persisted — the modal enforces the same 500-char cap client-side. Stored verbatim; rendering applies no transforms.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "FlowComment",
+  "schemaType": 1
+}

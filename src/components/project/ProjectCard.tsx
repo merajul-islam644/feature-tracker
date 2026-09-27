@@ -48,11 +48,12 @@ export function ProjectCard({
   const { formatRelativeTime } = useLocale();
   const t = useT();
   const navigate = useNavigate();
-  // Testers are read-only on the workspace — they can browse projects and
-  // follow Project Details, but Rename / Delete are hidden. The matching
+  // Project-domain mutations (rename, delete) are manager-only. Developers
+  // and testers can browse projects and follow Project Details, but
+  // Rename / Delete are hidden for every non-manager role. The matching
   // hooks (`useUpdateProject`, `useDeleteProject`) also throw the same
-  // error if reached programmatically.
-  const isTester = useIsRole("tester");
+  // error if reached programmatically — defense-in-depth.
+  const isManager = useIsRole("manager");
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -170,14 +171,14 @@ export function ProjectCard({
               <Info className="h-4 w-4" aria-hidden="true" />
               <span>{t("projectCard.details", "Project Details")}</span>
             </DropdownMenuItem>
-            {!isTester && (
+            {isManager && (
               <DropdownMenuItem onSelect={() => setRenameOpen(true)}>
                 <Pencil className="h-4 w-4" aria-hidden="true" />
                 <span>{t("projectCard.rename", "Rename")}</span>
               </DropdownMenuItem>
             )}
-            {!isTester && <DropdownMenuSeparator />}
-            {!isTester && (
+            {isManager && <DropdownMenuSeparator />}
+            {isManager && (
               <DropdownMenuItem
                 onSelect={() => setDeleteOpen(true)}
                 className="text-red-600 focus:bg-red-50 focus:text-red-700"

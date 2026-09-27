@@ -43,6 +43,14 @@ import { cn } from "@/lib/utils";
 
 export interface FlowCommentReply {
   id: string;
+  /**
+   * IAM sub of the reply's author. Used by the modal to suppress
+   * self-notify surfaces downstream (and to hide the parent's own
+   * reply affordances on its own row when the actor themselves is
+   * viewing it). Optional so legacy local rows that predate the
+   * column stay type-compatible.
+   */
+  authorId?: string;
   authorName: string;
   authorEmail: string;
   authorAvatar?: string;
@@ -52,6 +60,15 @@ export interface FlowCommentReply {
 
 export interface FlowComment {
   id: string;
+  /**
+   * IAM sub of the comment author. Forwarded to the modal so the
+   * Reply button hides on rows authored by the signed-in viewer —
+   * commenting yourself a reply on your own comment is meaningless
+   * (the moderator role in `useAddFlowCommentReply` also self-notify
+   * skips, so the notification wouldn't have fired anyway, but
+   * hiding the affordance is the UX the user asked for).
+   */
+  authorId?: string;
   authorName: string;
   authorEmail: string;
   authorAvatar?: string;
@@ -78,6 +95,15 @@ interface CommentsModalProps {
   currentUserEmail: string;
   /** Optional avatar URL of the current user. */
   currentUserAvatar?: string;
+  /**
+   * IAM sub of the signed-in viewer. Used to hide the Reply button
+   * on rows the viewer authored themselves — matches the
+   * self-notify skip in `useAddFlowCommentReply.onSuccess` so the
+   * affordance and the notification behaviour stay in lockstep.
+   * Optional so callers that don't have a session id (rare) still
+   * type-check; passing undefined disables the hide-on-self logic.
+   */
+  currentUserId?: string;
 }
 
 const MAX_LENGTH = 500;
@@ -92,6 +118,7 @@ export function CommentsModal({
   currentUserName,
   currentUserEmail,
   currentUserAvatar,
+  currentUserId,
 }: CommentsModalProps) {
   const t = useT();
   const { formatRelativeTime } = useLocale();
@@ -234,6 +261,21 @@ export function CommentsModal({
                   replyDraft={replyDraft}
                   replyError={replyError}
                   replyTextareaRef={replyTextareaRef}
+                  // Hide the Reply affordance on the viewer's own
+                  // comments — replying to yourself is a no-op
+                  // (the reply notification already self-notify
+                  // skips in `useAddFlowCommentReply.onSuccess`).
+                  // We compare the row's `authorId` to the signed-in
+                  // viewer's id; undefined on either side falls
+                  // through to the "show button" branch so missing
+                  // legacy data doesn't unintentionally strip the
+                  // button.
+                  isOwnComment={
+                    typeof c.authorId === "string" &&
+                    typeof currentUserId === "string" &&
+                    c.authorId !== "" &&
+                    c.authorId === currentUserId
+                  }
                   onStartReply={() => startReply(c.id)}
                   onCancelReply={cancelReply}
                   onChangeReplyDraft={(v) => {
@@ -321,6 +363,7 @@ function CommentItem({
   replyDraft,
   replyError,
   replyTextareaRef,
+  isOwnComment,
   onStartReply,
   onCancelReply,
   onChangeReplyDraft,
@@ -332,6 +375,11 @@ function CommentItem({
   replyDraft: string;
   replyError: string | null;
   replyTextareaRef: React.RefObject<HTMLTextAreaElement>;
+  /** True when the row was authored by the signed-in viewer — the
+   *  Reply button is hidden in that case (matches the
+   *  self-notify skip in `useAddFlowCommentReply.onSuccess`,
+   *  see memory for the rationale). */
+  isOwnComment: boolean;
   onStartReply: () => void;
   onCancelReply: () => void;
   onChangeReplyDraft: (v: string) => void;
@@ -362,14 +410,23 @@ function CommentItem({
           <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
             {comment.content}
           </p>
-          <button
-            type="button"
-            onClick={onStartReply}
-            className="mt-2 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-cyan-700 transition-colors hover:bg-cyan-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
-          >
-            <Reply className="h-3 w-3" aria-hidden="true" />
-            {t("flowComments.reply", "Reply")}
-          </button>
+          {/* Reply button — hidden on the viewer's own comments per
+              user request 2026-09-28. Self-reply is meaningless
+              (the notification side already self-skips; see
+              `comment-reply-notifications` memory), and the
+              affordance wastes a click. The button row still
+              reserves its margin so non-own rows keep their
+              vertical rhythm unchanged. */}
+          {!isOwnComment && (
+            <button
+              type="button"
+              onClick={onStartReply}
+              className="mt-2 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-cyan-700 transition-colors hover:bg-cyan-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+            >
+              <Reply className="h-3 w-3" aria-hidden="true" />
+              {t("flowComments.reply", "Reply")}
+            </button>
+          )}
         </div>
       </div>
 

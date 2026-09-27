@@ -42,9 +42,9 @@ export interface CloudFeature {
   // features may not have this field set.
   envSlug?: string;
   // ItemId of the dev feature this record was cloned from. Stamped on
-  // insert by useCloneFlow when it auto-creates the destination feature
-  // — the cross-env sync feature (delete + rename on dev) uses this to
-  // find sibling features in other envs. Undefined for source records and
+  // insert by the sibling-create in `useCloneFeature` — the cross-env
+  // sync feature (delete + rename on dev) uses this to find sibling
+  // features in other envs. Undefined for source records and
   // pre-existing clones made before this feature shipped.
   clonedFromFeatureId?: string;
   // OIDC `sub`s of users assigned to develop this feature. Populated
@@ -94,9 +94,10 @@ export interface CloudFlow {
   // so the gateway can filter flows by env without joining tables.
   envSlug?: string;
   // ItemId of the dev flow this record was cloned from. Stamped on insert
-  // by useCloneFlow — the cross-env sync feature (delete + rename on dev)
-  // uses this to find sibling flows in other envs. Undefined for source
-  // records and pre-existing clones made before this feature shipped.
+  // by the flow-cascade in `useCloneFeature` — the cross-env sync feature
+  // (delete + rename on dev) uses this to find sibling flows in other envs.
+  // Undefined for source records and pre-existing clones made before this
+  // feature shipped.
   clonedFromFlowId?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
@@ -225,6 +226,63 @@ export interface CloudAnnouncement {
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
+}
+
+// --- Flow comment ------------------------------------------------------------
+//
+// One row per comment OR reply attached to a flow. The wire shape is flat —
+// a reply is just a row whose `parentId` points at the parent's `ItemId` —
+// because Blocks Data only supports primitive fields (no nested objects /
+// arrays). The CommentsModal re-groups rows by `parentId` to build the
+// nested thread it renders, but every row carries the same six custom
+// fields + the platform-managed audit timestamps.
+//
+// Workspace-readable by every role: a manager, a developer, and a tester all
+// see the same comments on the same flow. There is no per-user filter on
+// the read path — annotations are a cross-role discussion surface, not a
+// private inbox (matches `Announcement` / `Issue` / `TestCase`, all of which
+// are workspace-wide reads without a `createdByFilter`).
+//
+// `parentId` is the parent's `ItemId` for replies, and is OMITTED (or
+// carried as "") for top-level comments. Empty string is allowed on the
+// wire (legacy rows use it); new top-level writes skip the field
+// entirely because the gateway's strict Required validator rejects
+// empty strings on insert ("Field 'parentId' is required for insert",
+// verified 2026-09-27). The schema field is `requiredOn: "None"`.
+export interface CloudFlowComment {
+  ItemId: string;
+  flowId: string;
+  parentId?: string;
+  authorId: string;
+  authorName: string;
+  authorEmail?: string;
+  authorAvatar?: string;
+  content: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+}
+
+// Flat row shape — every comment AND every reply is one of these. The
+// `parentId` field is what groups rows into threads; consumers either use
+// it directly (the row-grouping logic in `FlowItem`) or drop it
+// (the threaded view in `CommentsModal`).
+//
+// `authorId` is the IAM sub of the commenter; surfaced on the row so the
+// reply-side notification fan-out can look up the parent comment's author
+// (the user who owns the conversation being replied to) without a
+// follow-up read. Without it the notifier would have to treat every
+// reply as "reply to nothing" and skip the notification entirely.
+export interface FlowCommentRow {
+  id: string;
+  /** Empty string for top-level rows; the parent's row id for replies. */
+  parentId: string;
+  authorId: string;
+  authorName: string;
+  authorEmail: string;
+  authorAvatar?: string;
+  content: string;
+  createdAt: string;
 }
 
 // --- Notification ----------------------------------------------------------
@@ -380,10 +438,11 @@ export interface Feature {
   // Owning env slug. Optional so legacy records (created before env-scoped
   // features) still type-check; only the env-less project page surfaces them.
   envSlug?: string;
-  // ItemId of the dev feature this was cloned from. Set by useCloneFlow on
-  // auto-create; the cross-env sync feature uses it to find sibling features
-  // when the dev feature is renamed or deleted. Optional — undefined for
-  // source records and pre-existing clones.
+  // ItemId of the dev feature this was cloned from. Set by the
+  // sibling-create in `useCloneFeature`; the cross-env sync feature uses
+  // it to find sibling features when the dev feature is renamed or
+  // deleted. Optional — undefined for source records and pre-existing
+  // clones.
   clonedFromFeatureId?: string;
   // OIDC `sub`s of the assigned developers. See CloudFeature.developerIds
   // for the per-env semantics and how empty / other-user arrays render in
@@ -472,9 +531,10 @@ export interface Flow {
    *  the source content over. */
   steps?: string[];
   /** ItemId of the dev flow this was cloned from. Stamped on insert by
-   *  useCloneFlow; the cross-env sync feature uses it to find sibling flows
-   *  when the dev flow is renamed or deleted. Optional — undefined for
-   *  source records and pre-existing clones. */
+   *  the flow-cascade in `useCloneFeature`; the cross-env sync feature
+   *  uses it to find sibling flows when the dev flow is renamed or
+   *  deleted. Optional — undefined for source records and pre-existing
+   *  clones. */
   clonedFromFlowId?: string;
   /** IAM subject id of the user who created / last updated this flow.
    *  Same shape + fallback rules as `Feature.createdBy`. */
@@ -1058,6 +1118,41 @@ export function toAnnouncement(c: CloudAnnouncement): Announcement {
   };
 }
 
+// --- Flow comment adapter ----------------------------------------------------
+//
+// Cloud row → flat row shape used by `useFlowComments`. Threads are
+// reconstructed in `FlowItem` by grouping rows by `parentId`. The adapter
+// intentionally drops nothing — every cloud field maps to a UI field —
+// because the threaded view builder in `FlowItem` re-reads `parentId`
+// later, and silently degrading it to undefined (the same way other
+// optional-string fields degrade) would lose the threading link.
+export function toFlowCommentRow(c: CloudFlowComment): FlowCommentRow {
+  return {
+    id: c.ItemId,
+    // Defensive default to "" — top-level comments either omit the field
+    // (new writes, since `parentId.requiredOn: "None"`) or carry "" on the
+    // wire (legacy rows). Either way the grouping logic in `FlowItem`
+    // treats `parentId === ""` as "no parent" and renders the row as a
+    // top-level comment, so normalising both shapes to "" keeps the
+    // thread builder symmetric.
+    parentId: c.parentId ?? "",
+    // `authorId` drives the reply-side notification fan-out (see
+    // `useAddFlowCommentReply.onSuccess`); legacy rows written before
+    // the column was required may carry no value, so degrade to "" and
+    // let the notifier skip self-notify prompts when the identity is
+    // unknown (matches the same defensive default `parentId` uses).
+    authorId: c.authorId ?? "",
+    authorName: c.authorName ?? "",
+    authorEmail: c.authorEmail ?? "",
+    // `authorAvatar` is optional on the wire (a user without a profile
+    // picture posts without one). Degrade to undefined so the avatar
+    // fallback in `CommentsModal.Avatar` renders the colored initial.
+    authorAvatar: c.authorAvatar || undefined,
+    content: c.content ?? "",
+    createdAt: c.CreatedDate,
+  };
+}
+
 // --- Notification adapter ----------------------------------------------------
 //
 // Cloud row → UI shape used by the inbox hooks in
@@ -1579,6 +1674,18 @@ export const announcementsCollection = blocksClient.data.collection<CloudAnnounc
 // renderer would lose that field's display value.
 export const notificationsCollection = blocksClient.data.collection<CloudNotification>("Notification", {
   fields: ["userId", "context", "actionName", "actorId", "value", "actorName", "projectId", "projectName", "featureId", "featureName", "flowId", "flowName", "envSlug", "oldName", "newName", "status", "stack", "readAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `flowId` MUST be selected: the read path (`useFlowComments`) filters
+// on it (`filter: { flowId: <id> }`), and the gateway silently drops
+// unselected filter columns — the same lesson as every other
+// per-resource collection above. `parentId` is selected so the
+// thread-grouping logic in `FlowItem` can pair replies to their
+// parent. Every other column is selected because `toFlowCommentRow`
+// reads it; an unselected column would silently arrive as `undefined`
+// and the comment header would lose that field's display value
+// (matching the same pattern as `notificationsCollection` above).
+export const flowCommentsCollection = blocksClient.data.collection<CloudFlowComment>("FlowComment", {
+  fields: ["flowId", "parentId", "authorId", "authorName", "authorEmail", "authorAvatar", "content", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be selected: the read path filters on it when looking up the
 // caller's own row for the upload upsert (an unselected filter column is

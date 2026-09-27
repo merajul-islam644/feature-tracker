@@ -14,6 +14,7 @@ import {
   formatExact,
   formatRelative,
   actionVisual,
+  getResourceHref,
 } from "@/lib/blocks/notifier";
 
 /**
@@ -153,7 +154,9 @@ export function NotificationDetailPage() {
       {resourceHref ? (
         <div className="flex justify-end">
           <Button asChild>
-            <Link to={resourceHref}>Open {item.context} →</Link>
+            <Link to={resourceHref}>
+              {item.context === "comment" ? "Open flow" : `Open ${item.context}`} →
+            </Link>
           </Button>
         </div>
       ) : null}
@@ -209,27 +212,4 @@ function NotFoundView({ onBack }: { onBack: () => void }) {
       </Card>
     </div>
   );
-}
-
-/**
- * Where the "Open <context>" link on the details page should land.
- * Returns null when no useful href can be built (missing projectId or
- * a context the app doesn't currently render at a dedicated route).
- */
-function getResourceHref(item: InboxItem): string | null {
-  if (!item.projectId) return null;
-  const base = `/projects/${item.projectId}`;
-  if (item.context === "project") {
-    return item.envSlug ? `${base}/${item.envSlug}` : base;
-  }
-  if (item.context === "feature" || item.context === "flow") {
-    return item.envSlug ? `${base}/${item.envSlug}` : base;
-  }
-  if (item.context === "environment") {
-    // Environment notifications only carry a slug — pick a sensible
-    // default env if none is attached so the link still lands on a
-    // valid page.
-    return `${base}/${item.envSlug ?? "dev"}`;
-  }
-  return null;
 }

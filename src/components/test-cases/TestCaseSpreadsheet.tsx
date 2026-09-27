@@ -88,6 +88,28 @@ interface TestCaseSpreadsheetProps {
   expanded?: boolean;
   /** Toggle the drawer between its default test-tab width and full viewport width. */
   onToggleExpanded?: () => void;
+  /**
+   * When true, the spreadsheet renders as an inspection-only surface:
+   * every editing affordance (inline cells, status / priority pickers,
+   * row / cell kebabs) becomes read-only or hidden, and the auto-seed
+   * effect that creates 10 placeholder rows on first open is skipped.
+   * The `useAddTestCase` / `useUpdateTestCase` / `useDeleteTestCase`
+   * hooks stay mounted (their `isPending` flags are no longer read in
+   * this mode) so a future flip back to editable would resume from the
+   * current cache without a re-fetch. The toolbar's case count +
+   * expand/collapse toggle still render — they're informational, not
+   * mutating.
+   *
+   * Wired to `!isTester` by `FlowDetailsDrawer`: only the QA
+   * (tester) role authors test cases inline; managers (curators)
+   * and developers (feature authors) inspect the sheet for context
+   * but don't fill it in. Aligns with the other flow-domain
+   * surfaces — "+ Add another flow", empty-state "Add Flow" CTA,
+   * project-header "Add Flow" — which all gate on `isTester` rather
+   * than `!isManager`, so the spreadsheet's authorship rule matches
+   * the rest of the flow row.
+   */
+  readOnly?: boolean;
 }
 
 export function TestCaseSpreadsheet({
@@ -95,6 +117,7 @@ export function TestCaseSpreadsheet({
   featureId: featureIdProp,
   expanded = false,
   onToggleExpanded,
+  readOnly = false,
 }: TestCaseSpreadsheetProps) {
   // Normalize `featureId` once at the top so every mutation payload
   // below can stamp it without remembering that the prop is optional.
@@ -173,6 +196,16 @@ export function TestCaseSpreadsheet({
   // trims it.
   const autoCreateRef = useRef<string | null>(null);
   useEffect(() => {
+    // Skip the placeholder seed when the spreadsheet is in read-only
+    // mode — managers + developers inspect existing rows but don't
+    // author them, so a sheet that "looks empty" until a tester fills
+    // it in is exactly right. Without this gate, opening the drawer
+    // as a non-tester on a flow with no test cases would silently
+    // create 10 placeholder rows on their behalf. The `useAddTestCase`
+    // hook still runs (we keep it mounted so a future toggle to
+    // editable resumes from the current cache); we just refuse to fire
+    // the seed.
+    if (readOnly) return;
     if (casesQuery.isLoading || casesQuery.isError) return;
     if (autoCreateRef.current === flowId) return;
     if (sortedRows.length !== 0) {
@@ -569,7 +602,14 @@ export function TestCaseSpreadsheet({
                         placeholder rows so the skeleton stays
                         visible-but-undeletable; Rename and the
                         insert actions still work so the row remains
-                        inspectable. */}
+                        inspectable. Read-only viewers (managers +
+                        developers) skip the kebab entirely — there's
+                        nothing they can do at row scope that the
+                        inline inspection surfaces don't already
+                        cover, and rendering a kebab with all entries
+                        greyed out would just
+                        add noise. */}
+                    {readOnly ? null : (
                     <RowKebabMenu
                       ariaLabel="Row actions"
                       renameLabel="Rename"
@@ -606,6 +646,7 @@ export function TestCaseSpreadsheet({
                         </>
                       }
                     />
+                    )}
                   </td>
                   <EditableCell
                     row={row}
@@ -621,6 +662,7 @@ export function TestCaseSpreadsheet({
                     deleteDisabled={!row.isDeletable}
                     onInsertAbove={() => handleInsertAbove(row)}
                     onInsertBelow={() => handleInsertBelow(row)}
+                    readOnly={readOnly}
                     className="font-medium"
                   />
                   <td className="border-b border-border px-3 py-2 align-top">
@@ -629,6 +671,7 @@ export function TestCaseSpreadsheet({
                       featureId={featureId}
                       flowId={flowId}
                       onSaved={() => setSavedAt(Date.now())}
+                      readOnly={readOnly}
                     />
                   </td>
                   <td className="border-b border-border px-3 py-2 align-top">
@@ -637,6 +680,7 @@ export function TestCaseSpreadsheet({
                       featureId={featureId}
                       flowId={flowId}
                       onSaved={() => setSavedAt(Date.now())}
+                      readOnly={readOnly}
                     />
                   </td>
                   <EditableCell
@@ -654,6 +698,7 @@ export function TestCaseSpreadsheet({
                     deleteDisabled={!row.isDeletable}
                     onInsertAbove={() => handleInsertAbove(row)}
                     onInsertBelow={() => handleInsertBelow(row)}
+                    readOnly={readOnly}
                   />
                   <EditableCell
                     row={row}
@@ -674,6 +719,7 @@ export function TestCaseSpreadsheet({
                     deleteDisabled={!row.isDeletable}
                     onInsertAbove={() => handleInsertAbove(row)}
                     onInsertBelow={() => handleInsertBelow(row)}
+                    readOnly={readOnly}
                   />
                   <EditableCell
                     row={row}
@@ -692,6 +738,7 @@ export function TestCaseSpreadsheet({
                     deleteDisabled={!row.isDeletable}
                     onInsertAbove={() => handleInsertAbove(row)}
                     onInsertBelow={() => handleInsertBelow(row)}
+                    readOnly={readOnly}
                   />
                 </tr>
               ))
@@ -733,6 +780,16 @@ interface EditableCellProps {
   deleteDisabled?: boolean;
   onInsertAbove?: () => void;
   onInsertBelow?: () => void;
+  /**
+   * When true, the cell renders as inspection-only: no click / keyboard
+   * handlers (so clicking the cell doesn't open an input), no cursor-text
+   * affordance, and the hover kebab is hidden. The cell keeps the same
+   * visual treatment — borders, hover bg, value rendering — so the
+   * spreadsheet layout doesn't shift between read-only and editable modes.
+   * Wired to `!isTester` by the parent TestCaseSpreadsheet — only the
+   * QA role authors test cases inline; managers + developers inspect.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -762,6 +819,7 @@ function EditableCell({
   deleteDisabled = false,
   onInsertAbove,
   onInsertBelow,
+  readOnly = false,
 }: EditableCellProps): ReactNode {
   const value =
     columnId === "title"
@@ -859,27 +917,48 @@ function EditableCell({
   return (
     <td
       className={cn(
-        "group/cell cursor-text border-b border-border px-3 py-2 align-top text-sm text-foreground",
+        // In read-only mode, drop `cursor-text` so the cell reads as
+        // inspection-only (no implicit "click me to edit" affordance).
+        // `group/cell` still applies because the empty-cell italic
+        // placeholder copy is part of the same identifier; the kebab
+        // block below won't render in read-only mode anyway.
+        "group/cell border-b border-border px-3 py-2 align-top text-sm text-foreground",
+        !readOnly && "cursor-text",
         !value && "text-muted-foreground italic",
         className,
       )}
-      onClick={onBegin}
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onBegin();
-        }
-      }}
+      // Read-only viewers can't open an inline editor from this cell —
+        // `onBegin` would do nothing useful and `tabIndex={0}` would
+        // announce a focusable target to keyboard users with nothing
+        // for them to do on activation. Keep the cell as a plain
+        // inspection surface instead.
+      onClick={readOnly ? undefined : onBegin}
+      tabIndex={readOnly ? undefined : 0}
+      onKeyDown={
+        readOnly
+          ? undefined
+          : (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onBegin();
+              }
+            }
+      }
     >
       <div className="flex items-start gap-2">
         <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
           {value ? value : placeholder}
         </span>
-        {(onRename ||
-          onDelete ||
-          onInsertAbove ||
-          onInsertBelow) && (
+        {/* Cell-level kebab is hidden in read-only mode — Insert
+            Above / Insert Below / Rename / Delete are all mutating
+            actions, and the parent row-level kebab is already gated
+            on `readOnly` upstream. Rendering an all-greyed-out kebab
+            here would just add visual noise. */}
+        {!readOnly &&
+          (onRename ||
+            onDelete ||
+            onInsertAbove ||
+            onInsertBelow) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -956,6 +1035,14 @@ interface StatusPickerProps {
    * lives in one place.
    */
   onSaved?: () => void;
+  /**
+   * When true, the underlying `<select>` is rendered with `disabled`
+   * and `cursor-default` so the pill stays as a colour-coded
+   * inspection badge instead of opening a dropdown. The native select
+   * stays mounted (and reads its current `value`) so a future flip
+   * back to editable resumes from the same status without a reload.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -972,10 +1059,15 @@ interface StatusPickerProps {
  * text colour instead of the pill's. A standalone `<svg>` child
  * simply inherits `color` from the pill like normal text.
  */
-function StatusPicker({ row, featureId, flowId, onSaved }: StatusPickerProps) {
+function StatusPicker({ row, featureId, flowId, onSaved, readOnly = false }: StatusPickerProps) {
   const updateCase = useUpdateTestCase();
   const toast = useToast();
   const handleChange = (next: string) => {
+    // Defense-in-depth: the `<select disabled>` already blocks UI
+    // interaction in read-only mode, but a stray onChange (e.g. fired
+    // by a programmatic value change in tests) must not fire a PATCH
+    // that the user can't make in the UI.
+    if (readOnly) return;
     if (next === row.status) return;
     updateCase.mutate(
       {
@@ -1007,14 +1099,19 @@ function StatusPicker({ row, featureId, flowId, onSaved }: StatusPickerProps) {
       <select
         aria-label="Test status"
         value={row.status}
+        disabled={readOnly}
         onChange={(e) => handleChange(e.target.value)}
         // `pr-7` leaves room for the chevron, `appearance-none` strips
         // the browser's native arrow so our overlay is the only one
         // visible. The `bg-...` utilities drive the pill colour; the
         // chevron's `color` is inherited from `text-` utilities on
         // the same element so light + dark mode both keep contrast.
+        // In read-only mode, swap `cursor-pointer` for `cursor-default`
+        // so the affordance reads as "this is a status indicator, not
+        // an editable field."
         className={cn(
-          "h-7 w-full cursor-pointer appearance-none rounded-md border-0 bg-[length:10px_10px] bg-no-repeat px-2 pr-7 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-ring",
+          "h-7 w-full appearance-none rounded-md border-0 bg-[length:10px_10px] bg-no-repeat px-2 pr-7 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-default disabled:opacity-90",
+          readOnly ? "cursor-default" : "cursor-pointer",
           STATUS_COLOR[row.status],
         )}
       >
@@ -1024,6 +1121,10 @@ function StatusPicker({ row, featureId, flowId, onSaved }: StatusPickerProps) {
           </option>
         ))}
       </select>
+      {/* Chevron stays mounted in read-only mode for layout stability
+          — the pill keeps the same width whether the dropdown is
+          interactive or not, so the surrounding row geometry doesn't
+          shift when the role changes. */}
       <ChevronIcon className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-current opacity-80" />
     </div>
   );
@@ -1039,6 +1140,12 @@ interface PriorityPickerProps {
    * centralised in the parent.
    */
   onSaved?: () => void;
+  /**
+   * When true, the underlying `<select>` is rendered with `disabled`
+   * so the pill stays as a colour-coded inspection badge instead of
+   * opening a dropdown. Mirrors `StatusPicker.readOnly`.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -1050,10 +1157,14 @@ interface PriorityPickerProps {
  * because all four are `requiredOn: "Both"` and a PATCH that omits
  * any of them 400s.
  */
-function PriorityPicker({ row, featureId, flowId, onSaved }: PriorityPickerProps) {
+function PriorityPicker({ row, featureId, flowId, onSaved, readOnly = false }: PriorityPickerProps) {
   const updateCase = useUpdateTestCase();
   const toast = useToast();
   const handleChange = (next: string) => {
+    // Defense-in-depth: see StatusPicker — the `<select disabled>` is
+    // the user-facing gate, but a programmatic onChange must still
+    // not fire a PATCH that the UI can't make.
+    if (readOnly) return;
     if (next === row.priority) return;
     updateCase.mutate(
       {
@@ -1082,6 +1193,7 @@ function PriorityPicker({ row, featureId, flowId, onSaved }: PriorityPickerProps
       <select
         aria-label="Priority"
         value={row.priority}
+        disabled={readOnly}
         onChange={(e) => handleChange(e.target.value)}
         // `pr-7` leaves room for the chevron, `appearance-none` strips
         // the browser's native arrow so our overlay is the only one
@@ -1090,7 +1202,8 @@ function PriorityPicker({ row, featureId, flowId, onSaved }: PriorityPickerProps
         // inherited from `text-current` on the same element so light +
         // dark mode both keep contrast.
         className={cn(
-          "h-7 w-full cursor-pointer appearance-none rounded-md border-0 bg-[length:10px_10px] bg-no-repeat px-2 pr-7 text-xs font-medium capitalize focus:outline-none focus:ring-1 focus:ring-ring",
+          "h-7 w-full appearance-none rounded-md border-0 bg-[length:10px_10px] bg-no-repeat px-2 pr-7 text-xs font-medium capitalize focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-default disabled:opacity-90",
+          readOnly ? "cursor-default" : "cursor-pointer",
           PRIORITY_COLOR[row.priority],
         )}
       >
