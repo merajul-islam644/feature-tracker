@@ -23,12 +23,10 @@ import { StatCard } from "@/components/ui/stat-card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Separator } from "@/components/ui/separator";
 import { AnnouncementsDialog } from "@/components/layout/AnnouncementsDialog";
-import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
 import {
   useProjects,
   useRecentFeatures,
   useWorkspaceTotals,
-  useAnnouncementsAutoOpen,
 } from "@/lib/blocks/hooks";
 import { useAllJoinedUsers } from "@/lib/blocks/users";
 import { useLocale, useT } from "@/lib/blocks/i18n";
@@ -48,6 +46,15 @@ import { cn } from "@/lib/utils";
  * The dashboard stays a calm read-only summary; the icon trigger is
  * the dedicated surface for broadcast content.
  *
+ * The TestConfirmationDialog + `useAnnouncementsAutoOpen` were
+ * previously mounted here so the smoke-test modal popped when a fresh
+ * announcement arrived — but that meant the modal only fired while the
+ * user was on /dashboard. The hook and dialog have moved up to
+ * AppLayout (next to IncomingCallDialog) so a fresh delivery lands
+ * on whichever page the user happens to be on, not only after they
+ * navigate back to /dashboard. This page is left to host only the
+ * manual archive deep-dive (the AnnouncementsDialog pill below).
+ *
  * The Verification activity card was removed — it was a placeholder
  * showing "No verification runs yet" + an Idle chip + a duplicate
  * "Open Issue Tracker" link. The Issues page is the canonical place
@@ -62,26 +69,6 @@ export function DashboardPage() {
   const recentFeaturesQuery = useRecentFeatures(5);
   const t = useT();
   const { formatRelativeTime } = useLocale();
-
-  // Auto-open the announcements modal on a new broadcast. Lives here
-  // (and not in the Topbar, which used to own it) because the
-  // pill button on this page is now the canonical entry point for
-  // the broadcast channel. Sharing the hook keeps the "fresh arrival
-  // pops the dialog" behaviour intact without forcing the user to
-  // hunt for the trigger somewhere else on the dashboard.
-  //
-  // Behaviour update: the auto-open target used to be the
-  // `AnnouncementsDialog` drawer, but per the latest product call
-  // the TestConfirmationDialog is now the primary "fresh delivery"
-  // surface — every non-poster member sees the smoke-test modal pop
-  // as soon as a manager posts or reposts an announcement. The
-  // drawer stays on the dashboard as a manual deep-dive into the
-  // archive (still resolves the latest row the same way it always
-  // did), so the broadcast history is still one click away. We
-  // share the same hook state across both surfaces — the modal
-  // opens on a fresh delivery, the drawer follows if and when the
-  // member chooses to open it.
-  const [testModalOpen, setTestModalOpen] = useAnnouncementsAutoOpen();
 
   const projects = projectsQuery.data ?? [];
   const members = useAllJoinedUsers().data ?? [];
@@ -149,23 +136,10 @@ export function DashboardPage() {
             </h1>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {/* TestConfirmationDialog — mounted without children so it
-                runs in fully-controlled mode. The auto-open hook
-                (`useAnnouncementsAutoOpen`) drives `open` /
-                `onOpenChange`; the dashboard Test button that used
-                to live here is gone now that the modal pops on its
-                own for every other-role member whenever a manager
-                posts or reposts. No trigger element means no
-                user-initiated manual open path — that's intentional;
-                the modal's contract is "fresh delivery notice" not
-                "manual entry point". The companion drawer
-                (`AnnouncementsDialog` below) is the manual deep-dive
-                into the broadcast history. */}
-            <TestConfirmationDialog
-              open={testModalOpen}
-              onOpenChange={setTestModalOpen}
-            />
-
+            {/* Auto-open modal + hook moved up to AppLayout so a fresh
+                delivery lands on whichever page the user is on. Only
+                the manual archive deep-dive (`AnnouncementsDialog`)
+                stays on the dashboard. */}
             <AnnouncementsDialog>
               <button
                 type="button"

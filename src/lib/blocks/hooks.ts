@@ -327,6 +327,9 @@ export const queryKeys = {
   callSignals: (userId: string) => ["call-signals", userId] as const,
   // Manager announcements — workspace-wide, so no user scoping in the key.
   announcements: ["announcements"] as const,
+  // Inbox rows for the bell + detail page. One row per recipient, so
+  // the key is per-user; same shape as `directMessages` / `callSignals`.
+  notifications: (userId: string) => ["notifications", userId] as const,
   // Per-member project assignments — workspace-wide read; one row per user.
   memberProjects: ["member-projects"] as const,
   // Profile pictures — the userId → fileId map is workspace-wide (every
@@ -2721,6 +2724,12 @@ export function useCreateProject(): UseMutationResult<
       }).catch(() => {
         /* notifier failures are non-fatal — see hook doc */
       });
+      // Refresh the actor's own inbox too — a manager who also holds a
+      // recipient role (tester/developer) should see the row land without
+      // waiting for the 5s poll.
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
     mutationFn: async (input) => {
       // Defense-in-depth: even though the UI hides the Create Project
@@ -2914,6 +2923,13 @@ export function useCreateFeature(): UseMutationResult<
       }).catch(() => {
         /* notifier failures are non-fatal */
       });
+      // Refresh the actor's own inbox too — same rationale as
+      // `useCreateProject`: a manager who is also a recipient (e.g.
+      // holds a developer role) should see the row land in their bell
+      // without waiting for the next 5s poll.
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -2997,6 +3013,9 @@ export function useCreateFlow(): UseMutationResult<
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -3039,6 +3058,9 @@ export function useDeleteProject(): UseMutationResult<void, Error, string> {
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -3143,6 +3165,9 @@ export function useUpdateFeature(): UseMutationResult<
           actorName: currentUser?.name ?? "A manager",
           actorId: userId,
         }).catch(() => {});
+        void qc.invalidateQueries({
+          queryKey: queryKeys.notifications(userId),
+        });
       }
     },
   });
@@ -3219,6 +3244,9 @@ export function useDeleteFeature(): UseMutationResult<
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -3350,6 +3378,9 @@ export function useUpdateFlow(): UseMutationResult<
           actorName: currentUser?.name ?? "A manager",
           actorId: userId,
         }).catch(() => {});
+        void qc.invalidateQueries({
+          queryKey: queryKeys.notifications(userId),
+        });
       }
     },
   });
@@ -3428,6 +3459,9 @@ export function useDeleteFlow(): UseMutationResult<
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -3503,6 +3537,9 @@ export function useUpdateFlowStatus(): UseMutationResult<
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -3570,6 +3607,9 @@ export function useUpdateFlowStack(): UseMutationResult<
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }
@@ -3665,6 +3705,9 @@ export function useUpdateProject(): UseMutationResult<
           actorName,
           actorId: userId,
         }).catch(() => {});
+        void qc.invalidateQueries({
+          queryKey: queryKeys.notifications(userId),
+        });
       }
       if (vars.patch.envLabelOverrides !== undefined) {
         // Env rename — `envLabelOverrides` is `{ [slug]: label }`. We
@@ -3683,6 +3726,9 @@ export function useUpdateProject(): UseMutationResult<
             actorName,
             actorId: userId,
           }).catch(() => {});
+          void qc.invalidateQueries({
+            queryKey: queryKeys.notifications(userId),
+          });
         }
       }
       if (vars.patch.customEnvs !== undefined) {
@@ -3703,6 +3749,9 @@ export function useUpdateProject(): UseMutationResult<
             actorName,
             actorId: userId,
           }).catch(() => {});
+          void qc.invalidateQueries({
+            queryKey: queryKeys.notifications(userId),
+          });
         }
       }
     },
@@ -3900,6 +3949,9 @@ export function useCloneFlow(): UseMutationResult<
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
       }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
   });
 }

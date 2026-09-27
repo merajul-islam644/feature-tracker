@@ -1,0 +1,205 @@
+{
+  "collectionName": "blx_Notifications",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Recipient (filter target). The userId the row was addressed to — the inbox reads with `filter: { userId: <me> }` so each user only sees their own rows.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "context",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Classification of what the row is about — `project` | `feature` | `flow` | `environment`. Drives the inbox title/body templates.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "actionName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "What happened — `created` | `renamed` | `deleted` | `assigned` | `status_changed` | `stack_changed` | `cloned`.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "actorId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM sub of the user who triggered the action. Duplicates CreatedBy for explicit filter/audit (same precedent as Announcement.authorId).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "value",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Resource id (or `${projectId}:${slug}` for env-scoped items). Drives the inbox's resource link.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "actorName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name of the actor — what the body renders in place of the IAM sub.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Project ItemId, used to navigate the row to the right project page.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name of the project at the time the row was written.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "featureId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Feature ItemId (when the action was on a feature).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "featureName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name of the feature at the time the row was written.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "flowId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Flow ItemId (when the action was on a flow).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "flowName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name of the flow at the time the row was written.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "envSlug",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Env slug — canonical (dev/stg/prod/uat) or per-project custom. Renders in env-scoped actions and on flow clones (destination env).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "oldName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Rename source — the project/feature/flow name before the rename. Used by `deriveBody` for env rename sentences.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "newName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Rename target — the project/feature/flow name after the rename.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Flow status update payload (e.g. `passed`, `failed`, `investigating`).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "stack",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Flow stack update payload (e.g. `frontend`, `backend`).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "readAt",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ISO timestamp stamped by mark-as-read. Empty string while unread; non-empty marks the row read.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "Notification",
+  "schemaType": 1
+}
