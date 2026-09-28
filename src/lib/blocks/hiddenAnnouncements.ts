@@ -6,34 +6,36 @@
 // server and other members (including managers who posted it) keep
 // seeing it.
 //
-// Storage choice (v1): `localStorage` keyed by IAM user id. The hidden
-// set therefore persists across reloads and tabs but not across
-// browsers — "from his account" semantics within a single device. If
-// a later release wants device-independent hide state, the right move
-// is a per-user Blocks collection (same pattern as DirectMessage's
-// `readAt` — see blocks/data/schemas/DirectMessage.json), with a
-// `userId === me` filter and the schema deployed via
-// `blocks data sync`. The `useHiddenAnnouncementIds` signature
-// stays the same in that migration — only the read/write helpers
-// change underneath.
+// Storage choice (v2): a per-user Blocks Data row in `HiddenAnnouncement`
+// (one row per `(userId, announcementId)`). The set is read+written via
+// `useHiddenAnnouncements` / `useHideAnnouncement` / `useUnhideAnnouncement`
+// — the same names as the v1 localStorage hooks so call sites
+// (`AnnouncementsPanel`, notifier auto-open) don't change. The custom
+// `storage` event plumbing is gone — TanStack Query invalidation handles
+// cross-component refresh.
+//
+// A `lattice.mirror.hiddenAnnouncements.v1` mirror is read synchronously
+// on first paint so the panel renders before the cloud round-trip
+// resolves.
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
+import {
+  useHiddenAnnouncements as useHiddenAnnouncementSet,
+  useHideAnnouncementMutation,
+  useUnhideAnnouncementMutation,
+} from "./hooks";
 
-const STORAGE_KEY_PREFIX = "hiddenAnnouncements:v1:";
-// Same-tab subscribers don't see the browser's `storage` event (it
-// only fires for OTHER tabs), so we self-dispatch on the same window
-// when our own helper writes.
-const STORAGE_EVENT = "hiddenAnnouncements:changed";
+const MIRROR_KEY_PREFIX = "lattice.mirror.hiddenAnnouncements.v1:";
 
-function storageKey(userId: string): string {
-  return `${STORAGE_KEY_PREFIX}${userId}`;
+function mirrorKey(userId: string): string {
+  return `${MIRROR_KEY_PREFIX}${userId}`;
 }
 
-function read(userId: string): Set<string> {
+function readMirror(userId: string): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(storageKey(userId));
+    const raw = window.localStorage.getItem(mirrorKey(userId));
     if (!raw) return new Set();
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -41,120 +43,91 @@ function read(userId: string): Set<string> {
       parsed.filter((v): v is string => typeof v === "string"),
     );
   } catch {
-    // Corrupt JSON / quota / private-browsing quota — fail closed:
-    // don't surface a partial set, just treat as empty.
     return new Set();
   }
 }
 
-function write(userId: string, ids: Set<string>): void {
+function writeMirror(userId: string, ids: Set<string>): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(
-      storageKey(userId),
+      mirrorKey(userId),
       JSON.stringify(Array.from(ids)),
     );
   } catch {
-    // Quota / unavailable storage — best-effort, fail open.
+    // best-effort
   }
 }
 
 /**
  * The current user's set of announcement ids they've hidden from
- * their dashboard. Stable across re-renders until the underlying
- * localStorage changes (either same-tab via the helper, or another
- * tab via the browser's `storage` event).
+ * their dashboard. Synchronously seeded from the localStorage mirror
+ * so first paint matches the last-known state, then hydrated from
+ * `useHiddenAnnouncements` (the cloud read) once that resolves.
  */
 export function useHiddenAnnouncementIds(): Set<string> {
   const { currentUser } = useAuth();
-  const userId = currentUser?.id;
-  const [ids, setIds] = useState<Set<string>>(() =>
-    userId ? read(userId) : new Set(),
+  const userId = currentUser?.id ?? "";
+  const cloud = useHiddenAnnouncementSet();
+  const [mirror, setMirror] = useState<Set<string>>(
+    () => (userId ? readMirror(userId) : new Set()),
   );
 
-  // (Re-)read from localStorage whenever the signed-in user changes —
-  // different identity, different hide-set. Without this, a sign-out
-  // followed by a sign-in as a different user would briefly show the
-  // previous user's hidden state until the next write.
+  // Reset mirror on user change so sign-out / sign-in as a different
+  // user doesn't briefly show the previous user's state.
   useEffect(() => {
-    setIds(userId ? read(userId) : new Set());
+    setMirror(userId ? readMirror(userId) : new Set());
   }, [userId]);
 
-  // Cross-component / cross-tab sync. Same-tab writes go through the
-  // helper, which dispatches our custom event. Cross-tab writes go
-  // through the browser's `storage` event.
+  // Mirror every cloud update so the next reload reads the right
+  // value before the cloud query resolves.
   useEffect(() => {
-    // Bound to a non-nullable local so the closures below stay
-    // inside the narrowed branch — `function` declarations are
-    // hoisted and would otherwise see `userId: string | undefined`.
-    if (!userId) return;
-    const uid = userId;
-    const refresh = () => {
-      setIds(read(uid));
-    };
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === storageKey(uid)) refresh();
-    };
-    window.addEventListener("storage", handleStorage);
-    window.addEventListener(STORAGE_EVENT, refresh);
-    return () => {
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener(STORAGE_EVENT, refresh);
-    };
-  }, [userId]);
+    if (userId && cloud.data) writeMirror(userId, cloud.data);
+  }, [userId, cloud.data]);
 
-  return ids;
+  // Prefer cloud when loaded; fall back to mirror during the gap.
+  if (cloud.data) return cloud.data;
+  return mirror;
 }
 
 /**
- * Mark an announcement as hidden for the current user. Idempotent —
- * re-hiding an already-hidden id is a no-op. Notifies same-tab
- * subscribers via the custom event so any other
- * `useHiddenAnnouncementIds` consumer re-renders immediately.
+ * Mark an announcement as hidden for the current user. Fire-and-forget
+ * mutation; the mirror updates on the next render via TanStack Query
+ * invalidation. Notifies same-tab subscribers through the cache refresh.
  */
 export function useHideAnnouncement(): (
   announcementId: string,
 ) => void {
   const { currentUser } = useAuth();
-  const userId = currentUser?.id;
+  const userId = currentUser?.id ?? "";
+  const hide = useHideAnnouncementMutation();
   return useCallback(
     (announcementId: string) => {
       if (!userId) return;
-      const next = new Set(read(userId));
-      next.add(announcementId);
-      write(userId, next);
-      window.dispatchEvent(new Event(STORAGE_EVENT));
+      hide.mutate({ announcementId });
     },
-    [userId],
+    [userId, hide],
   );
 }
 
 /**
  * Reverse a hide — make a previously-hidden announcement visible
- * again on the current user's dashboard. Idempotent (un-hiding a
- * non-hidden id is a no-op).
- *
- * The auto-open flow uses this to surface a Repost even when the user
- * had previously hidden that announcement: a Repost is a fresh
- * delivery, and the user's old "I'm done with this" intent shouldn't
- * silence the new arrival. Without this, a user who hid an
- * announcement never sees its bumps — the dialog pops but the
- * panel's `!hiddenIds.has(...)` filter excludes the row and the
- * member sees no content inside.
+ * again on the current user's dashboard. The auto-open flow uses this
+ * to surface a Repost even when the user had previously hidden that
+ * announcement: a Repost is a fresh delivery, and the user's old "I'm
+ * done with this" intent shouldn't silence the new arrival.
  */
 export function useUnhideAnnouncement(): (
   announcementId: string,
 ) => void {
   const { currentUser } = useAuth();
-  const userId = currentUser?.id;
+  const userId = currentUser?.id ?? "";
+  const unhide = useUnhideAnnouncementMutation();
   return useCallback(
     (announcementId: string) => {
       if (!userId) return;
-      const next = new Set(read(userId));
-      next.delete(announcementId);
-      write(userId, next);
-      window.dispatchEvent(new Event(STORAGE_EVENT));
+      unhide.mutate({ announcementId });
     },
-    [userId],
+    [userId, unhide],
   );
 }

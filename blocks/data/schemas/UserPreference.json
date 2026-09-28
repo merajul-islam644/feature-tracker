@@ -1,0 +1,84 @@
+{
+  "collectionName": "blx_UserPreferences",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id (OIDC sub) this preference row belongs to. One row per user; the read+write hooks filter by currentUser.id so only the owner reads/writes. Same per-user upsert pattern as UserAiConfig / UserAvatarConfig / MemberProject.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "scope",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Issue Tracker scope filter: 'all' | 'mine' | 'assigned'. Replaces localStorage key 'issue-tracker:scope'. Empty string when not set; the UI defaults to 'mine'.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "device",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Issue Tracker device filter: 'web' | 'ios' | 'android'. Replaces localStorage key 'issue-tracker:device'. Empty string when not set.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "activeSession",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Last-active chat session id. Replaces localStorage key 'issue-tracker:active-session:<userId>'. Empty string when no chat session has been opened.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "customChecksJson",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "JSON-encoded Array<CustomCheck> for user-defined verification scopes. Replaces localStorage key 'lattice.verification-checks.v1'. Each check has an id slug-prefixed 'custom_'. '[]' when none defined.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "repoBrowserPath",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "GitHub repo-browser current path (owner/repo/branch). Replaces localStorage key 'blocks-app:repo-browser'. Empty string when no path selected.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "githubCredentialId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "MCP /api/secrets id for the user's GitHub PAT (the plaintext lives only on the MCP server). The PAT replaces localStorage key 'blocks-app:github-token'. Empty string when no PAT saved. Mirrors the Secret.passwordMasked → /api/secrets round-trip pattern from useIssueTracker.addSecret.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "UserPreference",
+  "schemaType": 1
+}

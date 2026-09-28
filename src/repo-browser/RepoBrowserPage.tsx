@@ -50,6 +50,11 @@ import {
   type RunnerLog,
   type RunnerLogKind,
 } from "../playwright/playwrightRunner";
+import {
+  useUserPreference,
+  useSaveUserPreference,
+  useUserGitHubCredential,
+} from "../lib/blocks/hooks";
 
 const DEFAULT_OWNER = "merajul-islam644";
 const DEFAULT_REPO = "Login-with-BLOCKS";
@@ -63,29 +68,36 @@ const RAW_BASE = "https://raw.githubusercontent.com";
  * tree or any selected file -- so a refresh restores the same view
  * without re-downloading gigabytes of cached state.
  *
- * Why localStorage and not sessionStorage: the user expects the
- * repo they cloned to survive both a refresh and a re-open of the
- * tab. sessionStorage would drop the moment they closed the tab.
+ * Storage choice (v2): the canonical store is `UserPreference.repoBrowserPath`
+ * in Blocks Data (one row per user). The localStorage mirror under
+ * `lattice.mirror.repo-browser.v1` is the synchronous first-paint fallback.
+ * Cross-device sync rides on the cloud write; the local mirror keeps
+ * cold-boot snappy.
  */
-const REPO_BROWSER_STORAGE_KEY = "blocks-app:repo-browser";
+const REPO_BROWSER_MIRROR_KEY = "lattice.mirror.repo-browser.v1";
 /**
- * localStorage key for the user's GitHub Personal Access Token. Authenticated
- * requests get 5000 req/hr instead of the unauthenticated 60 req/hr, which
- * is enough to remove the "rate limit hit" error during normal browsing.
+ * GitHub Personal Access Token — authenticated requests get 5000 req/hr
+ * instead of the unauthenticated 60 req/hr, which is enough to remove
+ * the "rate limit hit" error during normal browsing.
  *
- * The token never leaves the browser -- it's only attached to outbound
- * requests to api.github.com. Stored verbatim (no trimming, no
- * normalization) so a user can paste a token with embedded spaces and
- * have it work as-is. We don't validate the shape; a malformed token
- * will simply produce a 401 from GitHub that surfaces as the same
- * error card as a missing one.
+ * Storage choice (v2): the plaintext PAT lives only on the MCP server
+ * (`/api/secrets` route, AES-256-GCM-at-rest — same path `addSecret`
+ * uses for Secret passwords). The Blocks Data row carries only the MCP
+ * id under `UserPreference.githubCredentialId`. The MCP echo doesn't
+ * include the plaintext — the page surfaces a masked "saved" indicator
+ * and the MCP server handles the outbound GitHub calls with the
+ * real token.
+ *
+ * The localStorage mirror under `lattice.mirror.github-token.v1` is a
+ * best-effort fallback for when the MCP server is down — it lets the
+ * next refresh retry the sync with the same token.
  */
-const GITHUB_TOKEN_STORAGE_KEY = "blocks-app:github-token";
+const GITHUB_TOKEN_MIRROR_KEY = "lattice.mirror.github-token.v1";
 
 function loadStoredGitHubToken(): string {
   if (typeof window === "undefined") return "";
   try {
-    const raw = window.localStorage.getItem(GITHUB_TOKEN_STORAGE_KEY);
+    const raw = window.localStorage.getItem(GITHUB_TOKEN_MIRROR_KEY);
     return typeof raw === "string" ? raw : "";
   } catch {
     return "";
@@ -96,12 +108,12 @@ function saveStoredGitHubToken(token: string): void {
   if (typeof window === "undefined") return;
   try {
     if (token) {
-      window.localStorage.setItem(GITHUB_TOKEN_STORAGE_KEY, token);
+      window.localStorage.setItem(GITHUB_TOKEN_MIRROR_KEY, token);
     } else {
       // Empty token = remove the entry so the next visit doesn't see a
       // stale blank row in the UI. We never persist an empty string
       // (a missing entry and an empty entry are equivalent).
-      window.localStorage.removeItem(GITHUB_TOKEN_STORAGE_KEY);
+      window.localStorage.removeItem(GITHUB_TOKEN_MIRROR_KEY);
     }
   } catch {
     // Quota / private-mode failure -- ignore, the user can re-enter.
@@ -140,7 +152,7 @@ type StoredRepoRef = {
 function loadStoredRepoRef(): StoredRepoRef | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(REPO_BROWSER_STORAGE_KEY);
+    const raw = window.localStorage.getItem(REPO_BROWSER_MIRROR_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredRepoRef>;
     if (
@@ -170,7 +182,7 @@ function loadStoredRepoRef(): StoredRepoRef | null {
 function saveStoredRepoRef(ref: StoredRepoRef): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(REPO_BROWSER_STORAGE_KEY, JSON.stringify(ref));
+    window.localStorage.setItem(REPO_BROWSER_MIRROR_KEY, JSON.stringify(ref));
   } catch {
     // Same reasoning -- silently ignore so the page keeps working
     // even if storage is unavailable.
@@ -646,6 +658,12 @@ function describeResponse(response: Response): Promise<string> {
 
 export function RepoBrowserPage() {
   const navigate = useNavigate();
+  // Cloud hooks: the canonical store is `UserPreference` (repo browser
+  // path) + MCP `/api/secrets` (GitHub PAT). The localStorage mirrors
+  // below stay as the synchronous first-paint fallback.
+  const prefQuery = useUserPreference();
+  const savePref = useSaveUserPreference();
+  const githubCred = useUserGitHubCredential();
   // Hydrate from localStorage on first mount so a refresh (or tab
   // reopen) lands the user back on whatever they were last browsing.
   // loadStoredRepoRef is wrapped in try/catch internally, so a bad
@@ -657,6 +675,40 @@ export function RepoBrowserPage() {
     () => initialRef?.branch ?? DEFAULT_BRANCH,
   );
   const [path, setPath] = useState(() => initialRef?.path ?? "");
+  // Once the cloud repo-browser path resolves, replace local state +
+  // mirror. The page re-mounts on userId change and the cloud read
+  // wins; otherwise the localStorage mirror stays.
+  useEffect(() => {
+    if (!prefQuery.data?.repoBrowserPath) return;
+    try {
+      const parsed = JSON.parse(prefQuery.data.repoBrowserPath) as
+        | Partial<StoredRepoRef>
+        | undefined;
+      if (
+        parsed &&
+        typeof parsed.owner === "string" &&
+        typeof parsed.repo === "string" &&
+        typeof parsed.branch === "string" &&
+        typeof parsed.path === "string" &&
+        parsed.owner.length > 0 &&
+        parsed.repo.length > 0 &&
+        parsed.branch.length > 0
+      ) {
+        setOwner(parsed.owner);
+        setRepo(parsed.repo);
+        setBranch(parsed.branch);
+        setPath(parsed.path);
+        saveStoredRepoRef({
+          owner: parsed.owner,
+          repo: parsed.repo,
+          branch: parsed.branch,
+          path: parsed.path,
+        });
+      }
+    } catch {
+      // Corrupt JSON in the cloud row — keep the local mirror's value.
+    }
+  }, [prefQuery.data?.repoBrowserPath]);
   const [tree, setTree] = useState<Entry[]>([]);
   const [treeTruncated, setTreeTruncated] = useState(false);
   const [selected, setSelected] = useState<SelectedFile | null>(null);
@@ -785,7 +837,12 @@ export function RepoBrowserPage() {
   useEffect(() => {
     if (!owner || !repo || !branch) return;
     saveStoredRepoRef({ owner, repo, branch, path });
-  }, [owner, repo, branch, path]);
+    // Fire-and-forget cloud sync. Failure doesn't block the local
+    // mirror from being the source of truth.
+    void savePref.mutateAsync({
+      repoBrowserPath: JSON.stringify({ owner, repo, branch, path }),
+    });
+  }, [owner, repo, branch, path, savePref]);
 
   /**
    * Mirror the .env textarea into localStorage on every keystroke.
@@ -804,7 +861,16 @@ export function RepoBrowserPage() {
    */
   useEffect(() => {
     saveStoredGitHubToken(githubToken);
-  }, [githubToken]);
+    // Fire-and-forget cloud sync. The MCP server holds the plaintext;
+    // Blocks Data only stores the MCP id. If the MCP server is down the
+    // localStorage mirror keeps the token until the next refresh, when
+    // `useUserGitHubCredential.setToken` will retry.
+    if (githubToken) {
+      void githubCred.setToken(githubToken).catch(() => undefined);
+    } else if (githubCred.credentialId) {
+      void githubCred.clear().catch(() => undefined);
+    }
+  }, [githubToken, githubCred]);
 
   /**
    * Esc closes the Secrets drawer while it's open. The listener is

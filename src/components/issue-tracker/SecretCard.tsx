@@ -24,6 +24,14 @@ import type { Secret, VerificationTarget } from "@/types/issue-tracker";
 interface Props {
   secret: Secret;
   targets: VerificationTarget[];
+  // Pre-resolved binding: the ids of every target this secret is bound
+  // to. Sourced from a localStorage mirror on the parent (see
+  // `lib/issueTrackerBindings.ts`) because the Blocks Data gateway's
+  // ruleGroup strips `credentialId` on env-scoped VerificationTarget
+  // rows, so a `targets.filter(t => t.credentialId === secret.id)`
+  // scan would return an empty array even after a successful binding
+  // mutation.
+  boundTargetIds: string[];
   // targetId → name of the secret currently bound to that target.
   // Computed once at the panel level (SecretsPanel) so the dropdown
   // can show "Bound to X" badges on items whose binding is held by a
@@ -40,6 +48,7 @@ interface Props {
 export function SecretCard({
   secret,
   targets,
+  boundTargetIds,
   boundSecretByTargetId,
   onEdit,
   onDelete,
@@ -52,18 +61,14 @@ export function SecretCard({
   const [draftName, setDraftName] = useState(secret.name);
   const [draftEmail, setDraftEmail] = useState(secret.email);
 
-  // Resolve which targets currently hold this credential. The
-  // relationship is stored on the target side (target.credentialId) —
-  // we scan the targets list to find every match. One secret can be
-  // bound to N targets simultaneously; the trigger summary and the
-  // multi-select dropdown both consume this same projection.
+  // Resolve the full target rows for the bound ids — the chip summary
+  // and the multi-select dropdown both consume this projection.
   const boundTargets = useMemo(
-    () => targets.filter((t) => t.credentialId === secret.id),
-    [targets, secret.id],
-  );
-  const boundTargetIds = useMemo(
-    () => boundTargets.map((t) => t.id),
-    [boundTargets],
+    () =>
+      boundTargetIds
+        .map((id) => targets.find((t) => t.id === id))
+        .filter((t): t is VerificationTarget => Boolean(t)),
+    [boundTargetIds, targets],
   );
 
   // Reset the local form whenever the row leaves edit mode, or when the

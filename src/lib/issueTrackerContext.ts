@@ -137,6 +137,12 @@ export function buildIssueTrackerContext(input: {
   // snapshot reports it so the assistant can speak about the user's
   // current scope without asking. Null = outside a project env.
   activeEnv?: { projectId: string; envSlug: string } | null;
+  // Per-secret binding lookup (secretId → targetId[]). Sourced from
+  // the localStorage mirror (lib/issueTrackerBindings.ts) because the
+  // gateway's ruleGroup strips `credentialId` on env-scoped
+  // VerificationTarget rows. Required for `hasCredential` /
+  // `boundToTargetNames` to match what the UI renders.
+  boundTargetsBySecretId?: Record<string, string[]>;
 }): IssueTrackerContextSnapshot {
   const {
     targets,
@@ -148,6 +154,7 @@ export function buildIssueTrackerContext(input: {
     projects,
     activeEnv = null,
     customChecks = [],
+    boundTargetsBySecretId = {},
   } = input;
   // Merge built-in + custom labels so the AI can answer "what does
   // this scope do?" for any id the user has enabled, including
@@ -184,27 +191,42 @@ export function buildIssueTrackerContext(input: {
       status: p.status ?? "active",
       description: p.description?.slice(0, 80),
     })),
-    targets: targets.map((t) => ({
-      id: t.id,
-      applicationName: t.applicationName,
-      url: t.url,
-      enabled: t.enabled,
-      lastStatus: t.lastStatus,
-      hasCredential: !!t.credentialId,
-      boundSecretName: t.credentialId
-        ? secrets.find((s) => s.id === t.credentialId)?.name ?? null
-        : null,
-    })),
-    secrets: secrets.map((s) => ({
-      id: s.id,
-      name: s.name,
-      email: s.email,
-      // Filter-then-map once — N targets can share the same
-      // credentialId when multi-binding is in use.
-      boundToTargetNames: targets
-        .filter((t) => t.credentialId === s.id)
-        .map((t) => t.applicationName),
-    })),
+    targets: targets.map((t) => {
+      // Derive the bound secret id from the localStorage mirror instead
+      // of `t.credentialId` — see input doc.
+      let boundSecretId: string | null = null;
+      for (const [secretId, ids] of Object.entries(boundTargetsBySecretId)) {
+        if (ids.includes(t.id)) {
+          boundSecretId = secretId;
+          break;
+        }
+      }
+      return {
+        id: t.id,
+        applicationName: t.applicationName,
+        url: t.url,
+        enabled: t.enabled,
+        lastStatus: t.lastStatus,
+        hasCredential: !!boundSecretId,
+        boundSecretName: boundSecretId
+          ? secrets.find((s) => s.id === boundSecretId)?.name ?? null
+          : null,
+      };
+    }),
+    secrets: secrets.map((s) => {
+      // Same — read from the mirror, not `targets.credentialId`.
+      const boundIds = boundTargetsBySecretId[s.id] ?? [];
+      return {
+        id: s.id,
+        name: s.name,
+        email: s.email,
+        // Filter-then-map once — N targets can share the same secret id
+        // when multi-binding is in use.
+        boundToTargetNames: boundIds
+          .map((id) => targets.find((t) => t.id === id)?.applicationName)
+          .filter((n): n is string => Boolean(n)),
+      };
+    }),
     issues: compactIssues,
     scope: {
       enabled: scope,

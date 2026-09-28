@@ -59,8 +59,18 @@ import {
   useUpdateProject,
   useUpdateSecret,
   useUpdateVerificationTarget,
+  useSecretBindings,
+  useSaveSecretBindings,
+  useUserPreference,
+  useSaveUserPreference,
 } from "@/lib/blocks/hooks";
 import { buildIssueTrackerContext } from "@/lib/issueTrackerContext";
+import {
+  readBindings,
+  setBinding,
+  writeMirrorBindings,
+  removeBinding,
+} from "@/lib/issueTrackerBindings";
 import { chatTools, browserToolSummary } from "@/lib/chatTools";
 import type {
   AnthropicTool,
@@ -273,41 +283,75 @@ const CLOSED_ISSUE_STATUSES: readonly IssueStatus[] = [
 // can't grow unbounded in the primitive-only Blocks schema.
 const MAX_TRACKED_RUN_IDS = 20;
 
-// Scope + device survive reloads via localStorage. These are per-browser
-// UI prefs (not shared state) — same bucket as a remembered filter.
-const SCOPE_STORAGE_KEY = "issue-tracker:scope";
-const DEVICE_STORAGE_KEY = "issue-tracker:device";
+// Scope + device + activeSession survive reloads via the cloud's
+// `UserPreference` row (one per user). localStorage under
+// `lattice.mirror.userPreference.v1` is the synchronous read fallback so
+// the page boots before the cloud query resolves.
+const USER_PREFERENCE_MIRROR_KEY = "lattice.mirror.userPreference.v1";
 const DEVICE_VALUES: ReadonlySet<string> = new Set(["desktop", "mobile", "tablet"]);
 
-function readStoredScope(fallback: VerificationCheckId[]): string[] {
-  try {
-    const raw = localStorage.getItem(SCOPE_STORAGE_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.length > 0 &&
-      parsed.every((x) => typeof x === "string")
-    ) {
-      // Widened to `string[]` to allow custom scopes (see
-      // `useCustomVerificationChecks`). Built-in IDs still match the
-      // `VerificationCheckId` union; custom ones are arbitrary strings.
-      return parsed as string[];
-    }
-  } catch {
-    // Corrupt / private mode — fall through to defaults.
-  }
-  return fallback;
+interface MirroredUserPreference {
+  scope?: string[];
+  device?: string;
+  activeSession?: string;
 }
 
-function readStoredDevice(): "desktop" | "mobile" | "tablet" {
+function readPrefMirror(userId: string): MirroredUserPreference {
+  if (typeof window === "undefined") return {};
   try {
-    const raw = localStorage.getItem(DEVICE_STORAGE_KEY);
-    if (raw && DEVICE_VALUES.has(raw)) return raw as "desktop" | "mobile" | "tablet";
+    const raw = window.localStorage.getItem(USER_PREFERENCE_MIRROR_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as MirroredUserPreference;
   } catch {
-    // Same best-effort rationale as readStoredScope.
+    return {};
+  }
+}
+
+function writePrefMirror(userId: string, value: MirroredUserPreference): void {
+  if (typeof window === "undefined") return;
+  try {
+    const all: Record<string, MirroredUserPreference> = {};
+    const raw = window.localStorage.getItem(USER_PREFERENCE_MIRROR_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") {
+        Object.assign(all, parsed as Record<string, MirroredUserPreference>);
+      }
+    }
+    all[userId] = value;
+    window.localStorage.setItem(USER_PREFERENCE_MIRROR_KEY, JSON.stringify(all));
+  } catch {
+    // best-effort
+  }
+}
+
+function readStoredScope(fallback: VerificationCheckId[], userId: string): string[] {
+  if (!userId) return fallback;
+  const mirror = readPrefMirror(userId).scope;
+  if (!Array.isArray(mirror)) return fallback;
+  const valid = mirror.filter((x): x is string => typeof x === "string");
+  if (valid.length === 0) return fallback;
+  // Widened to `string[]` to allow custom scopes (see
+  // `useCustomVerificationChecks`). Built-in IDs still match the
+  // `VerificationCheckId` union; custom ones are arbitrary strings.
+  return valid;
+}
+
+function readStoredDevice(userId: string): "desktop" | "mobile" | "tablet" {
+  if (!userId) return "desktop";
+  const mirror = readPrefMirror(userId).device;
+  if (mirror && DEVICE_VALUES.has(mirror)) {
+    return mirror as "desktop" | "mobile" | "tablet";
   }
   return "desktop";
+}
+
+function readStoredActiveSession(userId: string, fallback: string): string {
+  if (!userId) return fallback;
+  const mirror = readPrefMirror(userId).activeSession;
+  return mirror && mirror.length > 0 ? mirror : fallback;
 }
 
 export function useIssueTracker() {
@@ -321,41 +365,54 @@ export function useIssueTracker() {
   // mis-file the row.
   const activeEnv = useActiveEnv();
 
-  // Per-user session storage key. Survives refreshes so the user lands back
-  // in the conversation they were in. Keyed by user id so a sign-out /
-  // sign-in cycle doesn't bleed one user's session into another's.
-  const sessionStorageKey = currentUser
-    ? `issue-tracker:active-session:${currentUser.id}`
-    : null;
+  // User preference row — the canonical store for scope, device,
+  // activeSession. Read+write through `useUserPreference` /
+  // `useSaveUserPreference`. The localStorage mirror under
+  // `lattice.mirror.userPreference.v1` is the synchronous first-paint
+  // fallback. We populate the mirror from the cloud value once it
+  // resolves so cold-boot reads from a synced state.
+  const prefQuery = useUserPreference();
+  const savePref = useSaveUserPreference();
+  const userId = currentUser?.id ?? "";
+  useEffect(() => {
+    if (prefQuery.data && userId) {
+      writePrefMirror(userId, {
+        scope: prefQuery.data.customChecks as string[] | undefined,
+        device: prefQuery.data.device,
+        activeSession: prefQuery.data.activeSession,
+      });
+    }
+  }, [prefQuery.data, userId]);
 
   // Default session id: a stable per-user string for first-time visitors.
   // Matches the previous behaviour exactly so anyone upgrading doesn't lose
   // their existing chat. New sessions spin off a UUID from this prefix.
-  const defaultSessionId = currentUser
-    ? `issue-tracker:${currentUser.id}`
+  const defaultSessionId = userId
+    ? `issue-tracker:${userId}`
     : "issue-tracker:anon";
 
-  const [sessionId, setSessionId] = useState<string>(() => {
-    if (!sessionStorageKey) return defaultSessionId;
-    try {
-      const stored = window.localStorage.getItem(sessionStorageKey);
-      return stored && stored.length > 0 ? stored : defaultSessionId;
-    } catch {
-      // Private mode / disabled storage — fall back silently.
-      return defaultSessionId;
-    }
-  });
+  const [sessionId, setSessionId] = useState<string>(() =>
+    readStoredActiveSession(userId, defaultSessionId),
+  );
 
   // Persist on every change. Effects run after render, so the UI sees the
-  // new id first; the next tick the localStorage copy catches up.
+  // new id first; the next tick the localStorage mirror + cloud copy
+  // catch up. The cloud write is fire-and-forget — failure doesn't
+  // block the local mirror from being the source of truth.
   useEffect(() => {
-    if (!sessionStorageKey) return;
-    try {
-      window.localStorage.setItem(sessionStorageKey, sessionId);
-    } catch {
-      /* ignore — best-effort */
+    if (!userId) return;
+    writePrefMirror(userId, {
+      ...readPrefMirror(userId),
+      activeSession: sessionId,
+    });
+    if (prefQuery.data) {
+      void savePref.mutateAsync({ activeSession: sessionId });
     }
-  }, [sessionId, sessionStorageKey]);
+    // We deliberately skip `prefQuery.data` and `savePref` in the deps —
+    // sessionId is the only meaningful input. Listing them would cause
+    // an extra mutation on every prefQuery refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, userId]);
 
   // ──────────────────────────────────────────────────────────────────────────
   //  Core data — sourced from TanStack Query so refreshes pull fresh rows,
@@ -379,6 +436,69 @@ export function useIssueTracker() {
   const secrets = secretsQuery.data ?? [];
   const issues = issuesQuery.data ?? [];
   const projects = projectsQuery.data ?? [];
+
+  // Per-secret binding lookup (secretId → targetId[]). The cloud's
+  // VerificationTarget ruleGroup strips `credentialId` on env-scoped
+  // rows, so the canonical `target.credentialId` scan returns the wrong
+  // answer for our env-scoped secrets. Derive from the localStorage
+  // mirror instead — see `lib/issueTrackerBindings.ts`.
+  //
+  // `bindingVersion` bumps whenever a mutation writes to localStorage,
+  // forcing the memo below to re-read storage. Without the version the
+  // memo would hold a stale snapshot (useMemo only recomputes on dep
+  // change — and `targets` / `activeEnv` don't change on write).
+  const [bindingVersion, setBindingVersion] = useState(0);
+  const bumpBindingVersion = useCallback(() => {
+    setBindingVersion((v) => v + 1);
+  }, []);
+
+  // Cloud-side binding row — `SecretBinding` collection, env-scoped. The
+  // hook is the canonical store; the localStorage mirror above is the
+  // synchronous read fallback. When the cloud row loads we replace the
+  // mirror so cold-boot state syncs from another device.
+  const cloudBindings = useSecretBindings(activeEnv);
+  const saveCloudBindings = useSaveSecretBindings();
+  useEffect(() => {
+    if (cloudBindings.data && activeEnv) {
+      writeMirrorBindings(activeEnv, cloudBindings.data.bindings);
+      setBindingVersion((v) => v + 1);
+    }
+    // We deliberately ignore bindingVersion in the deps — only the
+    // cloud value should trigger the sync, not the local writes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloudBindings.data, activeEnv?.projectId, activeEnv?.envSlug]);
+
+  const boundTargetsBySecretId = useMemo(() => {
+    const mirror = readBindings(activeEnv);
+    // Cross-reference with the live targets list so a stale localStorage
+    // entry pointing at a deleted target doesn't leak through.
+    const targetIds = new Set(targets.map((t) => t.id));
+    const result: Record<string, string[]> = {};
+    for (const [secretId, ids] of Object.entries(mirror)) {
+      const live = ids.filter((id) => targetIds.has(id));
+      if (live.length > 0) result[secretId] = live;
+    }
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- readBindings
+    // is a fresh read on each invocation; `bindingVersion` is the
+    // explicit signal that storage changed.
+  }, [activeEnv, targets, bindingVersion]);
+
+  // Push the mirror to the cloud whenever a local write happens (so other
+  // devices pick up the binding). Fire-and-forget; failures don't block
+  // the local mirror from being the source of truth.
+  useEffect(() => {
+    if (!activeEnv || !currentUser) return;
+    if (bindingVersion === 0) return;
+    const snapshot = readBindings(activeEnv);
+    void saveCloudBindings.mutateAsync({
+      scope: activeEnv,
+      bindings: snapshot,
+    });
+    // We deliberately only re-run when bindingVersion or the scope
+    // changes — not on every cloud mutation reference update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bindingVersion, activeEnv?.projectId, activeEnv?.envSlug, currentUser?.id]);
 
   // Mutations — wrapped in stable callbacks further down. Holding them as
   // refs at the top avoids re-creating the `addTarget` etc. closures on
@@ -465,31 +585,42 @@ export function useIssueTracker() {
   // completedTargetsRef at the start of every run.
   const seenFingerprintsRef = useRef<Set<string>>(new Set());
   const [scope, setScope] = useState<string[]>(() =>
-    readStoredScope(idleRun.scope),
+    readStoredScope(idleRun.scope, userId),
   );
   // Device emulation for the next run — forwarded through the api layer so
   // the backend sizes the browser context (viewport + touch).
   const [device, setDevice] = useState<"desktop" | "mobile" | "tablet">(
-    readStoredDevice,
+    () => readStoredDevice(userId),
   );
 
-  // Scope + device survive page reloads (localStorage) — the user's check
-  // matrix is a deliberate setup, and losing it to every HMR refresh or
-  // navigation silently shrank full runs to the 8-check default twice.
+  // Scope + device survive page reloads (cloud's `UserPreference` row +
+  // localStorage mirror under `lattice.mirror.userPreference.v1`). The
+  // user's check matrix is a deliberate setup, and losing it to every
+  // HMR refresh or navigation silently shrank full runs to the 8-check
+  // default twice. The cloud write is fire-and-forget — failure doesn't
+  // block the local mirror from being the source of truth.
   useEffect(() => {
-    try {
-      localStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify(scope));
-    } catch {
-      // Private mode / storage disabled — persistence is best-effort.
+    if (!userId) return;
+    writePrefMirror(userId, {
+      ...readPrefMirror(userId),
+      scope,
+    });
+    if (prefQuery.data) {
+      void savePref.mutateAsync({ customChecks: scope as unknown[] });
     }
-  }, [scope]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, userId]);
   useEffect(() => {
-    try {
-      localStorage.setItem(DEVICE_STORAGE_KEY, device);
-    } catch {
-      // Same best-effort rationale as scope.
+    if (!userId) return;
+    writePrefMirror(userId, {
+      ...readPrefMirror(userId),
+      device,
+    });
+    if (prefQuery.data) {
+      void savePref.mutateAsync({ device });
     }
-  }, [device]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device, userId]);
   // Live-preview overlay removed: the Playwright agent runs in headed
   // mode, so the actual browser window is the preview. No in-app state
   // mirror needed — the MCP server still emits `live_preview` / `target_
@@ -826,21 +957,67 @@ export function useIssueTracker() {
         // row. Each target's existing credentialId (if any) will be
         // overwritten — that's the documented contract; the form
         // surfaces a warning before submit.
+        //
+        // We write to TWO stores:
+        //   1. The cloud via `updateTarget.credentialId` — kept in the
+        //      loop so when the gateway's ruleGroup is relaxed the
+        //      canonical store catches up automatically.
+        //   2. localStorage via `writeBinding` — currently the source
+        //      of truth for the UI because the gateway's ruleGroup on
+        //      env-scoped VerificationTarget rows strips `credentialId`
+        //      from update mutations (see lib/issueTrackerBindings.ts).
         const requestedIds = payload.targetIds ?? [];
+
+        // Validation: a target can be bound to AT MOST ONE secret.
+        // If the user picks a target that's currently bound to another
+        // credential, refuse the whole submission — silently stealing
+        // someone else's binding would leave a dangling pointer in
+        // their localStorage mirror. The form already pre-warns via
+        // `displacedSecrets`; this is the hard enforcement.
+        const mirror = readBindings(activeEnv);
+        const conflicts: string[] = [];
+        for (const id of requestedIds) {
+          for (const [otherSecretId, otherIds] of Object.entries(mirror)) {
+            if (otherSecretId !== created.id && otherIds.includes(id)) {
+              conflicts.push(id);
+              break;
+            }
+          }
+        }
+        if (conflicts.length > 0) {
+          const names = conflicts
+            .map((id) => targets.find((t) => t.id === id)?.applicationName ?? id)
+            .join(", ");
+          toast.error(
+            `Cannot bind — ${names} ${conflicts.length === 1 ? "is" : "are"} already bound to another credential. Unbind it first.`,
+          );
+          throw new Error("add_failed_binding_conflict");
+        }
+
         let boundCount = 0;
         for (const id of requestedIds) {
           const target = targets.find((t) => t.id === id);
           if (!target) continue;
-          await updateTarget.mutateAsync({
-            id: target.id,
-            patch: { credentialId: created.id },
-          });
-          boundCount += 1;
+          try {
+            await updateTarget.mutateAsync({
+              id: target.id,
+              patch: { credentialId: created.id },
+            });
+            boundCount += 1;
+          } catch {
+            // Cloud write failed — the localStorage mirror below still
+            // records the binding so the UI stays consistent.
+          }
         }
+        // Mirror the binding in localStorage so the UI reflects the
+        // user's intent even when the cloud write was silently dropped
+        // by the gateway's ruleGroup.
+        setBinding(activeEnv, created.id, requestedIds);
+        bumpBindingVersion();
         toast.success(
           boundCount > 0
             ? `Credential added successfully and bound to ${boundCount} target${boundCount > 1 ? "s" : ""}.`
-            : "Credential added successfully.",
+            : `Credential added successfully${requestedIds.length > 0 ? ` and bound to ${requestedIds.length} target${requestedIds.length > 1 ? "s" : ""}.` : "."}`,
         );
         return created;
       } catch (err) {
@@ -853,7 +1030,7 @@ export function useIssueTracker() {
         throw new Error("add_failed");
       }
     },
-    [createSecret, toast, targets, updateTarget, activeEnv],
+    [createSecret, toast, targets, updateTarget, activeEnv, bumpBindingVersion],
   );
 
   const deleteSecretFn = useCallback(
@@ -897,13 +1074,25 @@ export function useIssueTracker() {
   // same secret. To avoid data loss we run a diff: only the targets
   // that joined the set get PATCHed in, and only the targets that left
   // the set get PATCHed back to null.
+  //
+  // localStorage mirror: same story as `addSecret` — the gateway's
+  // ruleGroup strips `credentialId` on env-scoped rows, so the UI
+  // derives from the mirror instead of `target.credentialId`.
+  //
+  // Invariant: a target can be bound to at most one secret at any time.
+  // When `newTargetIds` includes a target currently bound to a
+  // DIFFERENT secret, refuse the change — the user must unbind the
+  // other secret first. This prevents two secrets from sharing a URL,
+  // which would leave the AI unsure which credentials to use at
+  // verify-time.
   const bindSecret = useCallback(
     async (secretId: string, newTargetIds: string[]) => {
       const secret = secrets.find((s) => s.id === secretId);
       try {
-        const previousIds = targets
-          .filter((t) => t.credentialId === secretId)
-          .map((t) => t.id);
+        // Derive the previous set from the localStorage mirror (same
+        // reason as `boundTargetsBySecretId` — `target.credentialId`
+        // is stripped on env-scoped rows).
+        const previousIds = boundTargetsBySecretId[secretId] ?? [];
         const previousSet = new Set(previousIds);
         const nextSet = new Set(newTargetIds);
         const toAdd = newTargetIds.filter((id) => !previousSet.has(id));
@@ -912,26 +1101,57 @@ export function useIssueTracker() {
         // No-op when the set hasn't changed — avoid empty toasts.
         if (toAdd.length === 0 && toRemove.length === 0) return;
 
+        // Conflict check: every `toAdd` id must NOT already be bound to
+        // a different secret in the localStorage mirror. Otherwise the
+        // re-bind would silently steal another secret's binding.
+        const mirror = readBindings(activeEnv);
+        const conflicts: string[] = [];
+        for (const id of toAdd) {
+          for (const [otherSecretId, otherIds] of Object.entries(mirror)) {
+            if (otherSecretId !== secretId && otherIds.includes(id)) {
+              conflicts.push(id);
+              break;
+            }
+          }
+        }
+        if (conflicts.length > 0) {
+          const names = conflicts
+            .map((id) => targets.find((t) => t.id === id)?.applicationName ?? id)
+            .join(", ");
+          toast.error(
+            `Cannot bind — ${names} ${conflicts.length === 1 ? "is" : "are"} already bound to another credential. Unbind it first.`,
+          );
+          return;
+        }
+
         // Run removals FIRST so we never leave a target pointing at a
         // credential that's been removed. Removing then re-adding is
         // also safe (the writes are independent), but reversing the
         // order would briefly claim a target with two concurrent
         // credentialId values, which can confuse the AI snapshot.
         for (const id of toRemove) {
-          await updateTarget.mutateAsync({
-            id,
-            patch: { credentialId: null },
-          });
+          try {
+            await updateTarget.mutateAsync({
+              id,
+              patch: { credentialId: null },
+            });
+          } catch {
+            // localStorage mirror below still records the new state.
+          }
         }
         for (const id of toAdd) {
-          // If the new target was bound to a different secret, that
-          // binding is replaced — same contract as on creation. Blocks
-          // holds the latest value.
-          await updateTarget.mutateAsync({
-            id,
-            patch: { credentialId: secretId },
-          });
+          try {
+            await updateTarget.mutateAsync({
+              id,
+              patch: { credentialId: secretId },
+            });
+          } catch {
+            // localStorage mirror below still records the new state.
+          }
         }
+        // Mirror the binding in localStorage — see comment in addSecret.
+        setBinding(activeEnv, secretId, newTargetIds);
+        bumpBindingVersion();
         const name = secret?.name ?? "Credential";
         if (nextSet.size === 0) {
           const k = toRemove.length;
@@ -951,11 +1171,10 @@ export function useIssueTracker() {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error("useIssueTracker.bindSecret failed:", err);
         toast.error(`Unable to re-bind credential: ${message}`);
       }
     },
-    [secrets, targets, updateTarget, toast],
+    [secrets, targets, updateTarget, toast, activeEnv, boundTargetsBySecretId, bumpBindingVersion],
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -1727,6 +1946,11 @@ export function useIssueTracker() {
         filters,
         projects,
         activeEnv,
+        // Pass the localStorage mirror so the AI snapshot's
+        // `hasCredential` / `boundToTargetNames` projections match the
+        // UI — see issueTrackerBindings.ts for why we don't read
+        // `target.credentialId`.
+        boundTargetsBySecretId,
       });
       // Give the model the last browser tool results — the AI call is
       // stateless per message, so this memory is the only way it can
@@ -2162,15 +2386,25 @@ export function useIssueTracker() {
           const secretId = tool.input.secretId as string | undefined;
           const s = secretId ? secrets.find((x) => x.id === secretId) : undefined;
           if (!s) return `Skipped — credential ${secretId ?? "(none)"} not found.`;
-          // The binding lives on the target side (target.credentialId).
-          // Clear it on every target pointing at this secret first, so the
-          // delete never leaves a dangling pointer in Blocks Data.
-          const bound = targets.filter((t) => t.credentialId === secretId);
-          for (const t of bound) {
-            await updateTarget.mutateAsync({ id: t.id, patch: { credentialId: null } });
+          // Look up the binding from the localStorage mirror (NOT
+          // target.credentialId — see issueTrackerBindings.ts). Clear
+          // every bound target first so the delete never leaves a
+          // dangling pointer in Blocks Data, then drop the local mirror
+          // entry so a future re-add of the same name doesn't inherit it.
+          const boundIds = secretId
+            ? boundTargetsBySecretId[secretId] ?? []
+            : [];
+          for (const id of boundIds) {
+            try {
+              await updateTarget.mutateAsync({ id, patch: { credentialId: null } });
+            } catch {
+              // localStorage mirror cleared below — keep going.
+            }
           }
+          if (secretId) removeBinding(activeEnv, secretId);
+          bumpBindingVersion();
           await deleteSecretFn(secretId!);
-          return `"${s.name}" removed${bound.length ? ` (unbound from ${bound.length} target${bound.length > 1 ? "s" : ""})` : ""}.`;
+          return `"${s.name}" removed${boundIds.length ? ` (unbound from ${boundIds.length} target${boundIds.length > 1 ? "s" : ""})` : ""}.`;
         }
         case "bind_secret": {
           const secretId = tool.input.secretId as string | undefined;
@@ -2580,19 +2814,28 @@ export function useIssueTracker() {
               return false;
             }
           });
+          // Resolve the bound secret id from the localStorage mirror —
+          // same reason as everywhere else, see issueTrackerBindings.ts.
+          const resolveBinding = (t: VerificationTarget): string | null => {
+            for (const [secretId, ids] of Object.entries(boundTargetsBySecretId)) {
+              if (ids.includes(t.id)) return secretId;
+            }
+            return null;
+          };
           const distinctCreds = new Set(
             originTwins
-              .map((t) => t.credentialId)
+              .map(resolveBinding)
               .filter((c): c is string => !!c),
           );
-          if (!exactTwin?.credentialId && distinctCreds.size > 1) {
+          const exactTwinBinding = exactTwin ? resolveBinding(exactTwin) : null;
+          if (!exactTwinBinding && distinctCreds.size > 1) {
             return (
               "Several different credentials are bound to targets on this origin — " +
               "tell me which one to use (by name), or verify the saved target directly."
             );
           }
           const credentialId =
-            exactTwin?.credentialId ??
+            exactTwinBinding ??
             (distinctCreds.size === 1 ? [...distinctCreds][0] : null);
           // Synthetic in-memory target for a one-off live verify — never
           // persisted to Blocks, but VerificationTarget.projectId /
@@ -3078,6 +3321,11 @@ Continue.`;
     chat,
     filters,
     selectedIssueId,
+    // Per-secret binding lookup — see `boundTargetsBySecretId` memo above.
+    // The cloud's VerificationTarget ruleGroup strips credentialId on
+    // env-scoped rows, so consumers must use this map (NOT
+    // `target.credentialId`) when projecting which targets a secret binds.
+    boundTargetsBySecretId,
 
     // counts / summaries
     issueCounts,

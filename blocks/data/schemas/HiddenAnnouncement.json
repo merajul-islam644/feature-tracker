@@ -1,0 +1,40 @@
+{
+  "collectionName": "blx_HiddenAnnouncements",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Recipient (filter target). The userId that hid the announcement — the read path filters by `filter: { userId: <me> }` so each user only sees their own hide rows. Same pattern as Notification / MemberProject.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "announcementId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ItemId of the Announcement the user dismissed. Replaces localStorage key 'hiddenAnnouncements:v1:<userId>'. Echoed on every PATCH (requiredOn: 'Both').",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "hiddenAt",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ISO timestamp stamped when the user hid the announcement. Audit only; not surfaced in the UI.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "HiddenAnnouncement",
+  "schemaType": 1
+}

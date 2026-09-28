@@ -1,14 +1,25 @@
-// Shared storage layer for the two notepad tools. Each tool keeps a
-// separate `localStorage` key so opening Plain Text never disturbs
-// Excel and vice-versa. The on-disk shape for both tools is an array
-// of pads — one entry per user-created pad — keyed by `id`. Earlier
-// versions of these pages used a single-object shape; the loaders
-// here migrate those legacy payloads forward transparently so users
-// who created a pad before the list view landed don't lose their
-// work.
+// Shared storage layer for the two notepad tools.
+//
+// Storage choice (v2): the canonical store is the `UserNote` row in
+// Blocks Data — one row per `(userId, padType)` where `padType` is
+// `"text" | "excel"`. The full pad array rides as a JSON-encoded blob
+// in `rowsJson` (same `*Json` primitive-string convention as
+// `MemberProject.projectIdsJson`). The pages still call
+// `loadTextPads` / `saveTextPads` / `loadExcelPads` / `saveExcelPads`
+// synchronously — those now read+write a localStorage mirror under
+// `lattice.mirror.notepad.{text,excel}.v1` so first paint matches the
+// last-known state. The pages also call `useNotepadSync(padType)` once
+// on mount to seed the cloud row into the mirror (read) and to push
+// subsequent writes (write).
+//
+// The on-disk shape for both tools is an array of pads — one entry
+// per user-created pad — keyed by `id`. Earlier versions of these
+// pages used a single-object shape; the loaders here migrate those
+// legacy payloads forward transparently so users who created a pad
+// before the list view landed don't lose their work.
 
-const TEXT_KEY = "lattice.notepad.text.v1";
-const EXCEL_KEY = "lattice.notepad.excel.v1";
+const TEXT_KEY = "lattice.mirror.notepad.text.v1";
+const EXCEL_KEY = "lattice.mirror.notepad.excel.v1";
 
 export interface TextPad {
   id: string;

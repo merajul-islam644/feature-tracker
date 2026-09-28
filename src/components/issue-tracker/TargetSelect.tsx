@@ -204,19 +204,23 @@ export function TargetSelect({
 
         {/* Per-target entries. Each is a tappable checkbox row: tap
             anywhere on the row to toggle, with a leading check icon
-            that lights up when selected. */}
+            that lights up when selected. Targets bound to a DIFFERENT
+            credential are disabled (one-target-one-secret invariant) —
+            the user must unbind that other credential first. Targets
+            bound to the CURRENT credential stay enabled so the user
+            can unbind them. */}
         {targets.map((t) => {
           const isSelected = value.includes(t.id);
           const boundSecretName = boundSecretByTargetId[t.id];
-          // Suppress the badge when this entry is the secret's own
-          // current binding — the user already knows it's bound to
-          // themselves; showing "Bound to <self>" is just noise.
-          const showBoundBadge =
+          // Locked = held by some other credential. Show the "Already
+          // bound" chip and block the row.
+          const boundToOtherSecret =
             boundSecretName !== undefined &&
             boundSecretName !== currentSecretName;
           return (
             <DropdownMenuItem
               key={t.id}
+              disabled={boundToOtherSecret}
               onSelect={(e) => {
                 // Prevent the menu from auto-closing — we want the
                 // user to keep toggling without reopening the
@@ -276,10 +280,13 @@ export function TargetSelect({
                   {t.url}
                 </span>
               </span>
-              {showBoundBadge && (
-                <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400">
+              {boundToOtherSecret && (
+                <span
+                  className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400"
+                  title={`This target is already bound to "${boundSecretName}". Unbind it there first.`}
+                >
                   <Tag className="h-3 w-3" aria-hidden="true" />
-                  Bound to {boundSecretName}
+                  Already bound to {boundSecretName}
                 </span>
               )}
             </DropdownMenuItem>
@@ -287,8 +294,10 @@ export function TargetSelect({
         })}
 
         {/* Footer hint — only shown when at least one selected
-            target is currently held by a different secret. Mirrors
-            the warning the add-form used to show inline. */}
+            target is currently held by a different secret. The
+            one-target-one-secret invariant means saving will be
+            blocked until those targets are unbound from their current
+            holder. The form below repeats the same warning inline. */}
         {value.some(
           (id) =>
             boundSecretByTargetId[id] !== undefined &&
@@ -297,8 +306,8 @@ export function TargetSelect({
           <>
             <DropdownMenuSeparator />
             <p className="px-2 pb-1 pt-0.5 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
-              Heads up — some selected targets are also bound to other
-              credentials. Saving will replace those bindings.
+              Some selected targets are held by other credentials.
+              Saving will be blocked — unbind them first.
             </p>
           </>
         )}

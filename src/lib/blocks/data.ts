@@ -1585,6 +1585,223 @@ export function toMemberProjectAssignment(
   };
 }
 
+// --- Secret ↔ VerificationTarget binding ------------------------------------
+//
+// One row per (projectId, envSlug). Stores the binding relationship the
+// VerificationTarget ruleGroup currently strips from cloud PATCHes — see
+// memory `verification-target-credentialid-rulegroup-strip`. The UI
+// (SecretCard chip, TargetSelect dropdown, runModelTurn credential
+// resolution) reads through here, never off the row's stripped
+// `credentialId` column. Same env-scoping shape as Secret /
+// VerificationTarget.
+//
+// Active-env selection is also routed through this collection with the
+// sentinel `projectId === "__active__" && envSlug === "__active__"` so we
+// avoid a fifth schema. The `_active_` choice is in the row's
+// `bindingsJson` as `JSON.stringify({ projectId, envSlug })`.
+export interface CloudSecretBinding {
+  ItemId: string;
+  projectId: string;
+  envSlug: string;
+  /** JSON-encoded Record<secretId, targetId[]>. */
+  bindingsJson?: string;
+  updatedBy?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+  LastUpdatedBy?: string;
+}
+
+export interface SecretBindings {
+  /** Row id — needed for the update leg of the upsert. */
+  id: string;
+  projectId: string;
+  envSlug: string;
+  /** Parsed map; empty object when none. */
+  bindings: Record<string, string[]>;
+  updatedBy: string | null;
+}
+
+export function toSecretBinding(c: CloudSecretBinding): SecretBindings {
+  let bindings: Record<string, string[]> = {};
+  const raw = c.bindingsJson;
+  if (raw && raw.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const out: Record<string, string[]> = {};
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          if (Array.isArray(v)) {
+            out[k] = v.filter((x): x is string => typeof x === "string");
+          }
+        }
+        bindings = out;
+      }
+    } catch {
+      // Corrupt JSON — empty map. Will be overwritten on next save; the
+      // page renders "no bindings" instead of crashing.
+    }
+  }
+  return {
+    id: c.ItemId,
+    projectId: c.projectId ?? "",
+    envSlug: c.envSlug ?? "",
+    bindings,
+    updatedBy: c.updatedBy || null,
+  };
+}
+
+// --- UserPreference ----------------------------------------------------------
+//
+// One row per user, multi-purpose. Holds the per-user Issue Tracker
+// preferences (scope / device), the last-active chat session id, custom
+// verification scopes, the GitHub repo-browser current path, and the
+// MCP /api/secrets id for the GitHub PAT. Sibling of UserAiConfig —
+// separate collection + cache key so a chat proxy change can never flush
+// preferences and vice versa.
+export interface CloudUserPreference {
+  ItemId: string;
+  userId: string;
+  /** `'all' | 'mine' | 'assigned'`. Empty string when unset. */
+  scope?: string;
+  /** `'web' | 'ios' | 'android'`. Empty string when unset. */
+  device?: string;
+  /** Last-active chat session id. Empty string when none. */
+  activeSession?: string;
+  /** JSON-encoded Array<CustomVerificationCheck>. */
+  customChecksJson?: string;
+  /** GitHub repo-browser current path. Empty string when none. */
+  repoBrowserPath?: string;
+  /** MCP /api/secrets id for the GitHub PAT. Empty string when none. */
+  githubCredentialId?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+  LastUpdatedBy?: string;
+}
+
+export interface UserPreference {
+  id: string;
+  userId: string;
+  scope: string;
+  device: string;
+  activeSession: string;
+  /** Parsed array of user-defined verification checks; `[]` when none. */
+  customChecks: unknown[];
+  repoBrowserPath: string;
+  githubCredentialId: string;
+}
+
+export function toUserPreference(c: CloudUserPreference): UserPreference {
+  let customChecks: unknown[] = [];
+  const raw = c.customChecksJson;
+  if (raw && raw.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) customChecks = parsed;
+    } catch {
+      // Corrupt JSON — empty list. Will be overwritten on next save.
+    }
+  }
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    scope: c.scope ?? "",
+    device: c.device ?? "",
+    activeSession: c.activeSession ?? "",
+    customChecks,
+    repoBrowserPath: c.repoBrowserPath ?? "",
+    githubCredentialId: c.githubCredentialId ?? "",
+  };
+}
+
+// --- HiddenAnnouncement ------------------------------------------------------
+//
+// One row per (userId, announcementId). The read path filters by
+// `userId` so each user only sees their own hide rows. Same per-user
+// inbox-style pattern as Notification. Replaces the
+// `hiddenAnnouncements:v1:<userId>` localStorage key — the userId suffix
+// on the old key becomes a `userId` column on the row.
+export interface CloudHiddenAnnouncement {
+  ItemId: string;
+  userId: string;
+  announcementId: string;
+  /** ISO timestamp stamped when the user hid it. Audit only. */
+  hiddenAt?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+  LastUpdatedBy?: string;
+}
+
+export interface HiddenAnnouncementEntry {
+  id: string;
+  userId: string;
+  announcementId: string;
+  hiddenAt: string;
+}
+
+export function toHiddenAnnouncement(
+  c: CloudHiddenAnnouncement,
+): HiddenAnnouncementEntry {
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    announcementId: c.announcementId ?? "",
+    hiddenAt: c.hiddenAt ?? "",
+  };
+}
+
+// --- UserNote (per-user notepad) --------------------------------------------
+//
+// One row per (userId, padType). `padType` is `"text" | "excel"`. The
+// full pad array rides as a JSON-encoded blob in `rowsJson` — same
+// `*Json` primitive-string convention as MemberProject.projectIdsJson.
+// Replaces both `lattice.notepad.text.v1` and `lattice.notepad.excel.v1`.
+export interface CloudUserNote {
+  ItemId: string;
+  userId: string;
+  padType: string;
+  /** JSON-encoded Array<NotepadRow>. */
+  rowsJson?: string;
+  /** ISO timestamp of last write. Audit only. */
+  updatedAt?: string;
+  CreatedDate: string;
+  LastUpdatedDate: string;
+  CreatedBy?: string;
+  LastUpdatedBy?: string;
+}
+
+export interface UserNoteRow {
+  id: string;
+  userId: string;
+  /** `'text' | 'excel'`. The hook narrows further via description. */
+  padType: string;
+  /** Parsed rows; empty array when pad is empty. */
+  rows: unknown[];
+  updatedAt: string;
+}
+
+export function toUserNote(c: CloudUserNote): UserNoteRow {
+  let rows: unknown[] = [];
+  const raw = c.rowsJson;
+  if (raw && raw.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) rows = parsed;
+    } catch {
+      // Corrupt JSON — empty array. Will be overwritten on next save.
+    }
+  }
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    padType: c.padType ?? "",
+    rows,
+    updatedAt: c.updatedAt ?? "",
+  };
+}
+
 // --- Pagination envelope ----------------------------------------------------
 
 interface PagedCloud<T> {
@@ -1757,6 +1974,36 @@ export const userAvatarConfigsCollection = blocksClient.data.collection<CloudUse
 // selection on the next render).
 export const memberProjectsCollection = blocksClient.data.collection<CloudMemberProject>("MemberProject", {
   fields: ["userId", "projectIdsJson", "updatedBy", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+
+// `projectId` + `envSlug` MUST be in the selector: the read leg of the upsert
+// (`useSecretBindings`) filters on them, and the gateway silently drops
+// unselected filter columns — same lesson as every other env-scoped
+// collection. `bindingsJson` rides along because `toSecretBinding` parses
+// it; `updatedBy` is selected so the audit column round-trips.
+export const secretBindingsCollection = blocksClient.data.collection<CloudSecretBinding>("SecretBinding", {
+  fields: ["projectId", "envSlug", "bindingsJson", "updatedBy", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` MUST be selected — `useUserPreference` reads + upserts by
+// `filter: { userId }`, and an unselected filter column is silently
+// dropped. Every other column is selected because `toUserPreference`
+// reads it; an unselected column would silently arrive as `undefined` and
+// the consumer would lose that preference's saved value.
+export const userPreferencesCollection = blocksClient.data.collection<CloudUserPreference>("UserPreference", {
+  fields: ["userId", "scope", "device", "activeSession", "customChecksJson", "repoBrowserPath", "githubCredentialId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` MUST be selected — the inbox read filters on
+// `filter: { userId: <me> }`, same as Notification. `announcementId`
+// rides along because the un/hide write hooks also filter on it.
+export const hiddenAnnouncementsCollection = blocksClient.data.collection<CloudHiddenAnnouncement>("HiddenAnnouncement", {
+  fields: ["userId", "announcementId", "hiddenAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+// `userId` + `padType` MUST be selected: the read leg (`useUserNote`)
+// filters on both, and the upsert in `useSaveUserNote` echoes both on
+// PATCH (both are `requiredOn: "Both"`). An unselected filter column is
+// silently dropped — same lesson as every other env-scoped collection.
+export const userNotesCollection = blocksClient.data.collection<CloudUserNote>("UserNote", {
+  fields: ["userId", "padType", "rowsJson", "updatedAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 
 // --- Issue Tracker collection accessors -------------------------------------

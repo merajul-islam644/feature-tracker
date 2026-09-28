@@ -36,7 +36,7 @@ export function PanelPage() {
           reads as belonging to this page (not as a stuck-on toolbar). */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl font-semibold text-foreground">
-          {t("issueTracker.panel.title", "Verification Panel")}
+          {t("issueTracker.panel.title", "Panel")}
         </h1>
         <RunVerificationActions
           runStatus={run.status}

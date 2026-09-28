@@ -1,0 +1,51 @@
+{
+  "collectionName": "blx_UserNotes",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id (OIDC sub) this note belongs to. Part of the composite primary key (userId + padType) — one row per (user, padType) pair. The read+write hooks filter by both to scope the row.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "padType",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Which notepad slot: 'text' | 'excel'. Replaces localStorage keys 'lattice.notepad.text.v1' and 'lattice.notepad.excel.v1'. Both requiredOn: 'Both' so it rides on every PATCH.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "rowsJson",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "JSON-encoded Array<NotepadRow>. For 'text' mode this is typically a single row with the paragraph text; for 'excel' mode it's the cell grid. '[]' when the pad is empty.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "updatedAt",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ISO timestamp of the last write. Audit only; not surfaced in the UI today.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "UserNote",
+  "schemaType": 1
+}
