@@ -21,6 +21,11 @@ import type { Secret, VerificationTarget } from "@/types/issue-tracker";
 interface Props {
   secrets: Secret[];
   targets: VerificationTarget[];
+  // Per-secret binding lookup: secretId → targetId[]. Comes from the
+  // localStorage mirror (see lib/issueTrackerBindings.ts) because the
+  // gateway's ruleGroup strips `credentialId` from VerificationTarget
+  // updates on env-scoped rows.
+  boundTargetsBySecretId: Record<string, string[]>;
   onAdd: (payload: {
     name: string;
     email: string;
@@ -43,6 +48,7 @@ interface Props {
 export function SecretsPanel({
   secrets,
   targets,
+  boundTargetsBySecretId,
   onAdd,
   onEdit,
   onDelete,
@@ -52,17 +58,19 @@ export function SecretsPanel({
 
   // Build a quick lookup of targetId → name of the secret currently bound
   // to it. The form uses this to warn the user before they overwrite an
-  // existing binding.
+  // existing binding. Derived from the localStorage mirror — see the
+  // SecretsPanel prop comment for why we don't read `target.credentialId`.
   const boundSecretByTargetId = useMemo(() => {
     const map: Record<string, string> = {};
-    for (const t of targets) {
-      if (t.credentialId) {
-        const s = secrets.find((x) => x.id === t.credentialId);
-        if (s) map[t.id] = s.name;
+    for (const [secretId, targetIds] of Object.entries(boundTargetsBySecretId)) {
+      const s = secrets.find((x) => x.id === secretId);
+      if (!s) continue;
+      for (const targetId of targetIds) {
+        map[targetId] = s.name;
       }
     }
     return map;
-  }, [targets, secrets]);
+  }, [boundTargetsBySecretId, secrets]);
 
   return (
     <Card>
@@ -97,6 +105,11 @@ export function SecretsPanel({
                 <SecretCard
                   secret={s}
                   targets={targets}
+                  // Pre-resolved bound-target ids from the localStorage
+                  // mirror — the card renders the binding chip from this
+                  // list instead of scanning `targets.credentialId` (which
+                  // the gateway silently drops on env-scoped rows).
+                  boundTargetIds={boundTargetsBySecretId[s.id] ?? []}
                   // Same map the add-form passes to its dropdown —
                   // built once at the panel level and reused so the
                   // badge never drifts between the two surfaces.

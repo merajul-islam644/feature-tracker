@@ -15,6 +15,7 @@ export function SecretsPage() {
   const {
     secrets,
     targets,
+    boundTargetsBySecretId,
     addSecret,
     editSecret,
     deleteSecret,
@@ -38,6 +39,7 @@ export function SecretsPage() {
       <SecretsPanel
         secrets={secrets}
         targets={targets}
+        boundTargetsBySecretId={boundTargetsBySecretId}
         onAdd={async (payload) => {
           await addSecret(payload);
         }}

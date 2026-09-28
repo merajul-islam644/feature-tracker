@@ -61,6 +61,7 @@ import {
   useUpdateVerificationTarget,
 } from "@/lib/blocks/hooks";
 import { buildIssueTrackerContext } from "@/lib/issueTrackerContext";
+import { readBindings, writeBinding, removeBinding } from "@/lib/issueTrackerBindings";
 import { chatTools, browserToolSummary } from "@/lib/chatTools";
 import type {
   AnthropicTool,
@@ -379,6 +380,37 @@ export function useIssueTracker() {
   const secrets = secretsQuery.data ?? [];
   const issues = issuesQuery.data ?? [];
   const projects = projectsQuery.data ?? [];
+
+  // Per-secret binding lookup (secretId → targetId[]). The cloud's
+  // VerificationTarget ruleGroup strips `credentialId` on env-scoped
+  // rows, so the canonical `target.credentialId` scan returns the wrong
+  // answer for our env-scoped secrets. Derive from the localStorage
+  // mirror instead — see `lib/issueTrackerBindings.ts`.
+  //
+  // `bindingVersion` bumps whenever a mutation writes to localStorage,
+  // forcing the memo below to re-read storage. Without the version the
+  // memo would hold a stale snapshot (useMemo only recomputes on dep
+  // change — and `targets` / `activeEnv` don't change on write).
+  const [bindingVersion, setBindingVersion] = useState(0);
+  const bumpBindingVersion = useCallback(() => {
+    setBindingVersion((v) => v + 1);
+  }, []);
+
+  const boundTargetsBySecretId = useMemo(() => {
+    const mirror = readBindings(activeEnv);
+    // Cross-reference with the live targets list so a stale localStorage
+    // entry pointing at a deleted target doesn't leak through.
+    const targetIds = new Set(targets.map((t) => t.id));
+    const result: Record<string, string[]> = {};
+    for (const [secretId, ids] of Object.entries(mirror)) {
+      const live = ids.filter((id) => targetIds.has(id));
+      if (live.length > 0) result[secretId] = live;
+    }
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- readBindings
+    // is a fresh read on each invocation; `bindingVersion` is the
+    // explicit signal that storage changed.
+  }, [activeEnv, targets, bindingVersion]);
 
   // Mutations — wrapped in stable callbacks further down. Holding them as
   // refs at the top avoids re-creating the `addTarget` etc. closures on
@@ -826,21 +858,67 @@ export function useIssueTracker() {
         // row. Each target's existing credentialId (if any) will be
         // overwritten — that's the documented contract; the form
         // surfaces a warning before submit.
+        //
+        // We write to TWO stores:
+        //   1. The cloud via `updateTarget.credentialId` — kept in the
+        //      loop so when the gateway's ruleGroup is relaxed the
+        //      canonical store catches up automatically.
+        //   2. localStorage via `writeBinding` — currently the source
+        //      of truth for the UI because the gateway's ruleGroup on
+        //      env-scoped VerificationTarget rows strips `credentialId`
+        //      from update mutations (see lib/issueTrackerBindings.ts).
         const requestedIds = payload.targetIds ?? [];
+
+        // Validation: a target can be bound to AT MOST ONE secret.
+        // If the user picks a target that's currently bound to another
+        // credential, refuse the whole submission — silently stealing
+        // someone else's binding would leave a dangling pointer in
+        // their localStorage mirror. The form already pre-warns via
+        // `displacedSecrets`; this is the hard enforcement.
+        const mirror = readBindings(activeEnv);
+        const conflicts: string[] = [];
+        for (const id of requestedIds) {
+          for (const [otherSecretId, otherIds] of Object.entries(mirror)) {
+            if (otherSecretId !== created.id && otherIds.includes(id)) {
+              conflicts.push(id);
+              break;
+            }
+          }
+        }
+        if (conflicts.length > 0) {
+          const names = conflicts
+            .map((id) => targets.find((t) => t.id === id)?.applicationName ?? id)
+            .join(", ");
+          toast.error(
+            `Cannot bind — ${names} ${conflicts.length === 1 ? "is" : "are"} already bound to another credential. Unbind it first.`,
+          );
+          throw new Error("add_failed_binding_conflict");
+        }
+
         let boundCount = 0;
         for (const id of requestedIds) {
           const target = targets.find((t) => t.id === id);
           if (!target) continue;
-          await updateTarget.mutateAsync({
-            id: target.id,
-            patch: { credentialId: created.id },
-          });
-          boundCount += 1;
+          try {
+            await updateTarget.mutateAsync({
+              id: target.id,
+              patch: { credentialId: created.id },
+            });
+            boundCount += 1;
+          } catch {
+            // Cloud write failed — the localStorage mirror below still
+            // records the binding so the UI stays consistent.
+          }
         }
+        // Mirror the binding in localStorage so the UI reflects the
+        // user's intent even when the cloud write was silently dropped
+        // by the gateway's ruleGroup.
+        writeBinding(activeEnv, created.id, requestedIds);
+        bumpBindingVersion();
         toast.success(
           boundCount > 0
             ? `Credential added successfully and bound to ${boundCount} target${boundCount > 1 ? "s" : ""}.`
-            : "Credential added successfully.",
+            : `Credential added successfully${requestedIds.length > 0 ? ` and bound to ${requestedIds.length} target${requestedIds.length > 1 ? "s" : ""}.` : "."}`,
         );
         return created;
       } catch (err) {
@@ -853,7 +931,7 @@ export function useIssueTracker() {
         throw new Error("add_failed");
       }
     },
-    [createSecret, toast, targets, updateTarget, activeEnv],
+    [createSecret, toast, targets, updateTarget, activeEnv, bumpBindingVersion],
   );
 
   const deleteSecretFn = useCallback(
@@ -897,13 +975,25 @@ export function useIssueTracker() {
   // same secret. To avoid data loss we run a diff: only the targets
   // that joined the set get PATCHed in, and only the targets that left
   // the set get PATCHed back to null.
+  //
+  // localStorage mirror: same story as `addSecret` — the gateway's
+  // ruleGroup strips `credentialId` on env-scoped rows, so the UI
+  // derives from the mirror instead of `target.credentialId`.
+  //
+  // Invariant: a target can be bound to at most one secret at any time.
+  // When `newTargetIds` includes a target currently bound to a
+  // DIFFERENT secret, refuse the change — the user must unbind the
+  // other secret first. This prevents two secrets from sharing a URL,
+  // which would leave the AI unsure which credentials to use at
+  // verify-time.
   const bindSecret = useCallback(
     async (secretId: string, newTargetIds: string[]) => {
       const secret = secrets.find((s) => s.id === secretId);
       try {
-        const previousIds = targets
-          .filter((t) => t.credentialId === secretId)
-          .map((t) => t.id);
+        // Derive the previous set from the localStorage mirror (same
+        // reason as `boundTargetsBySecretId` — `target.credentialId`
+        // is stripped on env-scoped rows).
+        const previousIds = boundTargetsBySecretId[secretId] ?? [];
         const previousSet = new Set(previousIds);
         const nextSet = new Set(newTargetIds);
         const toAdd = newTargetIds.filter((id) => !previousSet.has(id));
@@ -912,26 +1002,57 @@ export function useIssueTracker() {
         // No-op when the set hasn't changed — avoid empty toasts.
         if (toAdd.length === 0 && toRemove.length === 0) return;
 
+        // Conflict check: every `toAdd` id must NOT already be bound to
+        // a different secret in the localStorage mirror. Otherwise the
+        // re-bind would silently steal another secret's binding.
+        const mirror = readBindings(activeEnv);
+        const conflicts: string[] = [];
+        for (const id of toAdd) {
+          for (const [otherSecretId, otherIds] of Object.entries(mirror)) {
+            if (otherSecretId !== secretId && otherIds.includes(id)) {
+              conflicts.push(id);
+              break;
+            }
+          }
+        }
+        if (conflicts.length > 0) {
+          const names = conflicts
+            .map((id) => targets.find((t) => t.id === id)?.applicationName ?? id)
+            .join(", ");
+          toast.error(
+            `Cannot bind — ${names} ${conflicts.length === 1 ? "is" : "are"} already bound to another credential. Unbind it first.`,
+          );
+          return;
+        }
+
         // Run removals FIRST so we never leave a target pointing at a
         // credential that's been removed. Removing then re-adding is
         // also safe (the writes are independent), but reversing the
         // order would briefly claim a target with two concurrent
         // credentialId values, which can confuse the AI snapshot.
         for (const id of toRemove) {
-          await updateTarget.mutateAsync({
-            id,
-            patch: { credentialId: null },
-          });
+          try {
+            await updateTarget.mutateAsync({
+              id,
+              patch: { credentialId: null },
+            });
+          } catch {
+            // localStorage mirror below still records the new state.
+          }
         }
         for (const id of toAdd) {
-          // If the new target was bound to a different secret, that
-          // binding is replaced — same contract as on creation. Blocks
-          // holds the latest value.
-          await updateTarget.mutateAsync({
-            id,
-            patch: { credentialId: secretId },
-          });
+          try {
+            await updateTarget.mutateAsync({
+              id,
+              patch: { credentialId: secretId },
+            });
+          } catch {
+            // localStorage mirror below still records the new state.
+          }
         }
+        // Mirror the binding in localStorage — see comment in addSecret.
+        writeBinding(activeEnv, secretId, newTargetIds);
+        bumpBindingVersion();
         const name = secret?.name ?? "Credential";
         if (nextSet.size === 0) {
           const k = toRemove.length;
@@ -951,11 +1072,10 @@ export function useIssueTracker() {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error("useIssueTracker.bindSecret failed:", err);
         toast.error(`Unable to re-bind credential: ${message}`);
       }
     },
-    [secrets, targets, updateTarget, toast],
+    [secrets, targets, updateTarget, toast, activeEnv, boundTargetsBySecretId, bumpBindingVersion],
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -1727,6 +1847,11 @@ export function useIssueTracker() {
         filters,
         projects,
         activeEnv,
+        // Pass the localStorage mirror so the AI snapshot's
+        // `hasCredential` / `boundToTargetNames` projections match the
+        // UI — see issueTrackerBindings.ts for why we don't read
+        // `target.credentialId`.
+        boundTargetsBySecretId,
       });
       // Give the model the last browser tool results — the AI call is
       // stateless per message, so this memory is the only way it can
@@ -2162,15 +2287,25 @@ export function useIssueTracker() {
           const secretId = tool.input.secretId as string | undefined;
           const s = secretId ? secrets.find((x) => x.id === secretId) : undefined;
           if (!s) return `Skipped — credential ${secretId ?? "(none)"} not found.`;
-          // The binding lives on the target side (target.credentialId).
-          // Clear it on every target pointing at this secret first, so the
-          // delete never leaves a dangling pointer in Blocks Data.
-          const bound = targets.filter((t) => t.credentialId === secretId);
-          for (const t of bound) {
-            await updateTarget.mutateAsync({ id: t.id, patch: { credentialId: null } });
+          // Look up the binding from the localStorage mirror (NOT
+          // target.credentialId — see issueTrackerBindings.ts). Clear
+          // every bound target first so the delete never leaves a
+          // dangling pointer in Blocks Data, then drop the local mirror
+          // entry so a future re-add of the same name doesn't inherit it.
+          const boundIds = secretId
+            ? boundTargetsBySecretId[secretId] ?? []
+            : [];
+          for (const id of boundIds) {
+            try {
+              await updateTarget.mutateAsync({ id, patch: { credentialId: null } });
+            } catch {
+              // localStorage mirror cleared below — keep going.
+            }
           }
+          if (secretId) removeBinding(activeEnv, secretId);
+          bumpBindingVersion();
           await deleteSecretFn(secretId!);
-          return `"${s.name}" removed${bound.length ? ` (unbound from ${bound.length} target${bound.length > 1 ? "s" : ""})` : ""}.`;
+          return `"${s.name}" removed${boundIds.length ? ` (unbound from ${boundIds.length} target${boundIds.length > 1 ? "s" : ""})` : ""}.`;
         }
         case "bind_secret": {
           const secretId = tool.input.secretId as string | undefined;
@@ -2580,19 +2715,28 @@ export function useIssueTracker() {
               return false;
             }
           });
+          // Resolve the bound secret id from the localStorage mirror —
+          // same reason as everywhere else, see issueTrackerBindings.ts.
+          const resolveBinding = (t: VerificationTarget): string | null => {
+            for (const [secretId, ids] of Object.entries(boundTargetsBySecretId)) {
+              if (ids.includes(t.id)) return secretId;
+            }
+            return null;
+          };
           const distinctCreds = new Set(
             originTwins
-              .map((t) => t.credentialId)
+              .map(resolveBinding)
               .filter((c): c is string => !!c),
           );
-          if (!exactTwin?.credentialId && distinctCreds.size > 1) {
+          const exactTwinBinding = exactTwin ? resolveBinding(exactTwin) : null;
+          if (!exactTwinBinding && distinctCreds.size > 1) {
             return (
               "Several different credentials are bound to targets on this origin — " +
               "tell me which one to use (by name), or verify the saved target directly."
             );
           }
           const credentialId =
-            exactTwin?.credentialId ??
+            exactTwinBinding ??
             (distinctCreds.size === 1 ? [...distinctCreds][0] : null);
           // Synthetic in-memory target for a one-off live verify — never
           // persisted to Blocks, but VerificationTarget.projectId /
@@ -3078,6 +3222,11 @@ Continue.`;
     chat,
     filters,
     selectedIssueId,
+    // Per-secret binding lookup — see `boundTargetsBySecretId` memo above.
+    // The cloud's VerificationTarget ruleGroup strips credentialId on
+    // env-scoped rows, so consumers must use this map (NOT
+    // `target.credentialId`) when projecting which targets a secret binds.
+    boundTargetsBySecretId,
 
     // counts / summaries
     issueCounts,

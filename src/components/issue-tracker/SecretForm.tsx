@@ -74,10 +74,11 @@ export function SecretForm({
     setErrors({});
   };
 
-  // Surface the existing bindings (if any) the user is about to
-  // replace. With multi-binding we list every other-secret-held
-  // target the user has checked, joined by commas. Helps the user
-  // see who they'll be displacing before they hit Save.
+  // Surface existing bindings the user is trying to take. The
+  // invariant is one-target-one-secret, so any target already bound to
+  // another credential BLOCKS the save — the user must unbind first
+  // (from that other secret's row). List every other-secret-held
+  // target the user has checked, joined by commas.
   const displacedSecrets = Array.from(
     new Set(
       targetIds
@@ -87,7 +88,7 @@ export function SecretForm({
   );
   const targetWarning =
     displacedSecrets.length > 0
-      ? `Heads up — these targets are currently bound to "${displacedSecrets.join('", "')}". Saving will replace those bindings.`
+      ? `Cannot bind — these targets are already held by "${displacedSecrets.join('", "')}". Unbind them from that credential first.`
       : null;
 
   const onSubmitForm = async (e: FormEvent) => {
