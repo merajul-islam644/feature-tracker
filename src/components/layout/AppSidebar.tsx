@@ -207,6 +207,35 @@ export function AppSidebar() {
   // shows the children the user came looking for. Re-runs on each
   // pathname change to keep deep links in a consistent state.
   const isOnIssueTracker = location.pathname.startsWith("/issue-tracker");
+
+  // Issue Tracker only exists inside a project environment — clicking
+  // an env chip on a project card lands on `/projects/:id/:envSlug`,
+  // and that's the only context where its data (targets / secrets /
+  // scope / panel / history / issues) is scoped. Without an env slug
+  // the Issue Tracker menu hides entirely; the user lands back here
+  // by clicking any env chip again.
+  //
+  // We treat TWO url shapes as "env context active":
+  //   1. `/projects/:id/:envSlug` — the user is currently on a
+  //      project env detail page. The env slug is the path segment
+  //      count >= 3 (split("/").filter(Boolean) drops the leading
+  //      slash).
+  //   2. `/issue-tracker/*` — the user is inside the Issue Tracker
+  //      surface, which is only reachable from an env context. We
+  //      keep the menu visible here so navigating to a submenu
+  //      (e.g. /issue-tracker/targets) doesn't drop the parent group
+  //      out from under the active submenu item. Phase 2 will plumb
+  //      the (projectId, envSlug) pair through a context provider so
+  //      the Issue Tracker data hooks know which env to filter by.
+  //
+  // Reading straight from the URL avoids a new context provider for
+  // this visibility-only signal; the env slug remains the single
+  // source of truth.
+  const envContextActive =
+    (location.pathname.startsWith("/projects/") &&
+      location.pathname.split("/").filter(Boolean).length >= 3) ||
+    location.pathname.startsWith("/issue-tracker");
+
   useEffect(() => {
     if (isOnIssueTracker) setIssueTrackerOpen(true);
   }, [isOnIssueTracker]);
@@ -251,6 +280,21 @@ export function AppSidebar() {
                 "group"` narrowing is unaffected. */}
             {navItems
               .flatMap<NavItem>((item) => {
+                // Hide the Issue Tracker surface (full group OR the
+                // developer's flat Issues link) when no env context is
+                // active. The flatMap gives us a single render pipe for
+                // both shapes: the group is dropped before the developer
+                // branch sees it, so the developer role narrows down to
+                // nothing — same end result as collapsing the parent.
+                // Composes with the role gate below: when an env IS
+                // active, the developer still sees just the Issues link.
+                if (
+                  item.kind === "group" &&
+                  item.key === "issue-tracker" &&
+                  !envContextActive
+                ) {
+                  return [];
+                }
                 if (
                   isDeveloper &&
                   item.kind === "group" &&
