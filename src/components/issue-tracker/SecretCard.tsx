@@ -18,22 +18,29 @@ import { Check, KeyRound, Link2, Link2Off, Pencil, Trash2, X } from "lucide-reac
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { TargetSelect } from "./TargetSelect";
 import type { Secret, VerificationTarget } from "@/types/issue-tracker";
 
 interface Props {
   secret: Secret;
   targets: VerificationTarget[];
+  // targetId → name of the secret currently bound to that target.
+  // Computed once at the panel level (SecretsPanel) so the dropdown
+  // can show "Bound to X" badges on items whose binding is held by a
+  // different secret.
+  boundSecretByTargetId: Record<string, string>;
   onEdit: (id: string, patch: { name: string; email: string }) => void;
   onDelete: (id: string) => void;
-  // Re-bind a saved secret to a different target (or clear the binding by
-  // passing null / empty string).
-  onBind: (secretId: string, targetId: string | null) => void;
+  // Re-bind a saved secret to a (possibly different) set of targets.
+  // Empty array means "unbind from everything". The parent dispatches
+  // only the changed targets.
+  onBind: (secretId: string, targetIds: string[]) => void;
 }
 
 export function SecretCard({
   secret,
   targets,
+  boundSecretByTargetId,
   onEdit,
   onDelete,
   onBind,
@@ -45,12 +52,18 @@ export function SecretCard({
   const [draftName, setDraftName] = useState(secret.name);
   const [draftEmail, setDraftEmail] = useState(secret.email);
 
-  // Resolve which target currently holds this credential. The relationship
-  // is stored on the target side (target.credentialId) — we scan the
-  // targets list to find it. Memoised so we don't iterate on every render.
-  const boundTarget = useMemo(
-    () => targets.find((t) => t.credentialId === secret.id) ?? null,
+  // Resolve which targets currently hold this credential. The
+  // relationship is stored on the target side (target.credentialId) —
+  // we scan the targets list to find every match. One secret can be
+  // bound to N targets simultaneously; the trigger summary and the
+  // multi-select dropdown both consume this same projection.
+  const boundTargets = useMemo(
+    () => targets.filter((t) => t.credentialId === secret.id),
     [targets, secret.id],
+  );
+  const boundTargetIds = useMemo(
+    () => boundTargets.map((t) => t.id),
+    [boundTargets],
   );
 
   // Reset the local form whenever the row leaves edit mode, or when the
@@ -87,26 +100,12 @@ export function SecretCard({
     setEditing(false);
   };
 
-  const handleBindChange = (newTargetId: string) => {
-    // Empty value = unbind. Pass null so the hook can clear the field.
-    onBind(secret.id, newTargetId || null);
+  const handleBindChange = (nextTargetIds: string[]) => {
+    // TargetSelect now passes the full next set on every toggle.
+    // The parent's `bindSecret` computes the diff and dispatches
+    // only the changed targets, so we forward verbatim.
+    onBind(secret.id, nextTargetIds);
   };
-
-  // Build the dropdown options. We include the "No target" sentinel so the
-  // user can explicitly clear the binding from here.
-  //
-  // We deliberately don't filter out targets bound to a different
-  // credential: the user needs a way to fix stale bindings (where a
-  // target's `credentialId` points to a secret that's since been
-  // deleted). Picking a new option here overwrites the binding; the other
-  // secret's card flips back to "Not bound" on the next render.
-  const bindOptions = [
-    { value: "", label: "— Not bound to any target —" },
-    ...targets.map((t) => ({
-      value: t.id,
-      label: `${t.applicationName} — ${t.url}`,
-    })),
-  ];
 
   return (
     <div className="rounded-md border border-border bg-card p-4">
@@ -129,20 +128,12 @@ export function SecretCard({
               {secret.passwordMasked}
             </p>
             {/* Binding status pill — visible at-a-glance so the user
-                remembers which target this credential is scoped to. */}
+                remembers which target(s) this credential is scoped to.
+                One secret can bind to several targets; we render a
+                compact count + name preview so the row stays one line
+                even with multiple bindings. */}
             <div className="mt-2 flex items-center gap-1.5 text-xs">
-              {boundTarget ? (
-                <>
-                  <Link2
-                    className="h-3.5 w-3.5 text-primary"
-                    aria-hidden="true"
-                  />
-                  <span className="text-muted-foreground">Bound to</span>
-                  <span className="font-mono text-foreground">
-                    {boundTarget.applicationName} ({boundTarget.url})
-                  </span>
-                </>
-              ) : (
+              {boundTargets.length === 0 ? (
                 <>
                   <Link2Off
                     className="h-3.5 w-3.5 text-muted-foreground"
@@ -150,6 +141,31 @@ export function SecretCard({
                   />
                   <span className="text-muted-foreground">
                     Not bound to any target
+                  </span>
+                </>
+              ) : boundTargets.length === 1 ? (
+                <>
+                  <Link2
+                    className="h-3.5 w-3.5 text-primary"
+                    aria-hidden="true"
+                  />
+                  <span className="text-muted-foreground">Bound to</span>
+                  <span className="font-mono text-foreground">
+                    {boundTargets[0]!.applicationName} ({boundTargets[0]!.url})
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Link2
+                    className="h-3.5 w-3.5 text-primary"
+                    aria-hidden="true"
+                  />
+                  <span className="text-muted-foreground">Bound to</span>
+                  <span className="font-medium text-foreground">
+                    {boundTargets.length} targets
+                  </span>
+                  <span className="truncate text-muted-foreground">
+                    · {previewBoundNames(boundTargets)}
                   </span>
                 </>
               )}
@@ -199,11 +215,16 @@ export function SecretCard({
               No verification targets yet. Add one to enable binding.
             </p>
           ) : (
-            <Select
+            <TargetSelect
               id={`secret-bind-${secret.id}`}
-              value={boundTarget?.id ?? ""}
-              onChange={(e) => handleBindChange(e.target.value)}
-              options={bindOptions}
+              value={boundTargetIds}
+              onChange={handleBindChange}
+              targets={targets}
+              boundSecretByTargetId={boundSecretByTargetId}
+              // Skip the "Bound to <self>" badge on the entries this
+              // secret is currently bound to — the user knows, and
+              // showing it adds noise.
+              currentSecretName={secret.name}
             />
           )}
           <p className="text-xs text-muted-foreground">
@@ -296,4 +317,15 @@ export function SecretCard({
       )}
     </div>
   );
+}
+
+// "GitHub, Stripe and 1 more" — first two names + count for everything
+// past that. Used in the card's binding summary when more than one
+// target is bound, so the row stays one line.
+function previewBoundNames(targets: VerificationTarget[]): string {
+  if (targets.length === 0) return "";
+  if (targets.length === 1) return targets[0]!.applicationName;
+  if (targets.length === 2)
+    return `${targets[0]!.applicationName}, ${targets[1]!.applicationName}`;
+  return `${targets[0]!.applicationName}, ${targets[1]!.applicationName} and ${targets.length - 2} more`;
 }

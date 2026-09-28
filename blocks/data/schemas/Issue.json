@@ -209,6 +209,28 @@
       "requiredOn": "None",
       "fields": [],
       "validationRule": null
+    },
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Per-environment scoping key (project id). Stamped by the verification agent at detection time; legacy rows missing this are filtered out of the scoped Issue Tracker view.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "envSlug",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Per-environment scoping key (canonical or custom env slug: dev/stg/prod/uat/<custom>). Stamped by the verification agent at detection time.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
     }
   ],
   "schemaName": "Issue",

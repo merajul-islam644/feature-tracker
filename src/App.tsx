@@ -6,6 +6,7 @@ import { CallbackPageGuard } from "@/pages/CallbackPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectDetailPage } from "@/pages/ProjectDetailPage";
+import { FeaturesPage } from "@/pages/FeaturesPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { MembersPage } from "@/pages/MembersPage";
@@ -63,6 +64,16 @@ export default function App() {
             <Route
               path="/projects/:projectId/:envSlug"
               element={<ProjectDetailPage />}
+            />
+            {/* Dedicated features view for the active env — every
+                feature authored under this env on a single page. The
+                sidebar's Features entry points here. React Router
+                matches longest-path-first, so this 4-segment route
+                doesn't get absorbed by the 3-segment catch-all
+                above. */}
+            <Route
+              path="/projects/:projectId/:envSlug/features"
+              element={<FeaturesPage />}
             />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/settings" element={<SettingsPage />} />

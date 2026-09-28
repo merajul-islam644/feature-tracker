@@ -39,7 +39,10 @@ export function AnnouncementsSection() {
             id="announcements-heading"
             className="flex items-center gap-2 text-base font-semibold"
           >
-            <Megaphone className="h-4 w-4 text-primary" aria-hidden="true" />
+            <Megaphone
+              className="h-4 w-4 text-primary"
+              aria-hidden="true"
+            />
             {t("announcements.title", "Announcements")}
           </CardTitle>
           {/* Total-count badge is a manager-only affordance — members

@@ -1,4 +1,4 @@
-import { Bell } from "lucide-react";
+import { Bell, ChevronRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,7 @@ import {
   formatRelative,
   formatExact,
   actionVisual,
+  getResourceHref,
 } from "@/lib/blocks/notifier";
 
 export function NotificationBell() {
@@ -77,6 +78,12 @@ export function NotificationBell() {
           <div className="max-h-80 overflow-y-auto py-1">
             {items.map((n) => {
               const { Icon, tone, ring } = actionVisual(n.context, n.action);
+              // `getResourceHref` is the same URL derivation the
+              // detail page uses; some notifications (e.g. cross-tenant
+              // or rows missing `projectId`) return null, in which case
+              // the chevron button is hidden so the row stays a
+              // single-action menu item that opens the details page.
+              const resourceHref = getResourceHref(n);
               return (
                 <DropdownMenuItem
                   key={n.id}
@@ -139,6 +146,56 @@ export function NotificationBell() {
                       {n.body}
                     </span>
                   </span>
+
+                  {/* Deep-link chevron — sits at the bottom-right of
+                      the row (visually the same column as the title's
+                      right edge). Click navigates to the resource the
+                      notification refers to (the project, flow, or
+                      comment's owning flow). Distinct from the row
+                      click which opens the details page; the chevron
+                      short-circuits to the resource for power users.
+                      `e.stopPropagation()` keeps the row's
+                      `DropdownMenuItem.onSelect` from also firing.
+                      Hidden when `getResourceHref` can't build a URL
+                      (e.g. orphaned notifications without `projectId`). */}
+                  {resourceHref ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={`Open ${
+                            n.context === "comment" ? "flow" : n.context
+                          }`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            markRead(n.id);
+                            navigate(resourceHref);
+                          }}
+                          onKeyDown={(e) => {
+                            // Don't intercept Enter — the Row's
+                            // DropdownMenu handler already binds to
+                            // keyboard activation; let it run.
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.stopPropagation();
+                              markRead(n.id);
+                              navigate(resourceHref);
+                            }
+                          }}
+                          className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <ChevronRight
+                            className="h-4 w-4"
+                            aria-hidden="true"
+                          />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="left">
+                        {n.context === "comment"
+                          ? "Open flow"
+                          : `Open ${n.context}`}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
                 </DropdownMenuItem>
               );
             })}

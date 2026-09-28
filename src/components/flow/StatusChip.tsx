@@ -98,20 +98,49 @@ export function StatusChip({ flow, readOnly = false }: StatusChipProps) {
     });
   };
 
+  // Read-only path: render the chip as a plain static <span> — no
+  // DropdownMenu wrapper, no trigger, no content. This is a HARD
+  // gate: nothing can open a dropdown because no dropdown exists in
+  // the DOM. Earlier versions put `disabled` on the trigger button,
+  // but Radix's `DropdownMenuTrigger` ignores `disabled` on the
+  // asChild'd button — clicking the (visually muted) chip still
+  // opened the menu. Wrapping the chip in a plain span (instead of a
+  // button) also keeps it out of the keyboard tab order and out of
+  // the focus ring, which matches the "non-interactive label" UX.
+  if (readOnly) {
+    return (
+      <span
+        aria-label={t("flowStatus.chipLabel", "Flow status")}
+        className={cn(
+          "inline-flex h-5 shrink-0 items-center rounded-full border px-2 text-[10px] font-medium",
+          visual
+            ? visual.className
+            : "border-border bg-muted text-muted-foreground",
+          // `cursor-default` matches the inert feel of the prior
+          // disabled-button styling, and the slight opacity drop
+          // signals "this is a view, not a control".
+          "cursor-default opacity-60",
+        )}
+      >
+        {visual
+          ? t(`flowStatus.${visual.i18nKey}`, capitalize(visual.i18nKey))
+          : t("flowStatus.label", "Status")}
+      </span>
+    );
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
           aria-label={t("flowStatus.chipLabel", "Flow status")}
-          disabled={readOnly}
           className={cn(
             "inline-flex h-5 shrink-0 items-center rounded-full border px-2 text-[10px] font-medium transition-colors",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
             visual
               ? visual.className
               : "border-border bg-muted text-muted-foreground hover:bg-accent",
-            readOnly && "cursor-default opacity-60",
           )}
         >
           {visual

@@ -21,6 +21,7 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
 import { blocksClient } from "./client";
 import {
   createdByFilter,
@@ -33,6 +34,8 @@ import {
   announcementsCollection,
   issuesCollection,
   secretsCollection,
+  flowCommentsCollection,
+  notificationsCollection,
   testCasesCollection,
   userProfilesCollection,
   memberProjectsCollection,
@@ -45,6 +48,7 @@ import {
   toDirectMessage,
   toFeature,
   toFlow,
+  toFlowCommentRow,
   toIssue,
   toMemberProjectAssignment,
   toProject,
@@ -63,6 +67,7 @@ import {
   type CloudDirectMessage,
   type CloudFeature,
   type CloudFlow,
+  type CloudFlowComment,
   type CloudMemberProject,
   type CloudProject,
   type CloudTestCase,
@@ -72,6 +77,7 @@ import {
   type DirectMessage,
   type Feature,
   type Flow,
+  type FlowCommentRow,
   type FlowStack,
   type FlowStatus,
   type FlowTestStatus,
@@ -109,8 +115,8 @@ import type {
 // (Lowercase `itemId` nested under `insert<Schema>` — distinct from the read-shape
 // `ItemId` at the top of `get<Plural>` responses.) Returns `null` if the cloud
 // didn't acknowledge the create; callers should treat that as a hard failure
-// because subsequent calls (e.g. the flow insert in `useCloneFlow`) depend on
-// having a real feature id to attach to.
+// because subsequent calls (e.g. the flow cascade in `useCloneFeature`) depend
+// on having a real feature id to attach the sibling flows to.
 function extractInsertedItemId(
   response: unknown,
   operationName: string,
@@ -158,10 +164,10 @@ function unwrapPaged<T>(raw: unknown): { items: T[]; totalCount: number } {
 // --- Cross-env sync helpers ------------------------------------------------
 //
 // `clonedFromFlowId` and `clonedFromFeatureId` are the stable cross-env
-// links set by `useCloneFlow` when it stamps a clone. The cascade hooks
-// (`useUpdateFlow`, `useDeleteFlow`, `useUpdateFeature`, `useDeleteFeature`)
-// look up siblings by these fields so deletes/renames in dev fan out to
-// every env where the same flow/feature was cloned.
+// links stamped by the sibling create in `useCloneFeature`'s cascade.
+// The cascade hooks (`useUpdateFlow`, `useDeleteFlow`, `useUpdateFeature`,
+// `useDeleteFeature`) look up siblings by these fields so deletes/renames
+// in dev fan out to every env where the same flow/feature was cloned.
 //
 // Records with no `clonedFromXxxId` set are pre-existing clones from
 // before this feature shipped — they're invisible to the filter and stay
@@ -201,39 +207,11 @@ async function findSiblingFlows(
   }));
 }
 
-// Returns the set of `envSlug` values where this flow already has a
-// sibling clone (records with `clonedFromFlowId === flowId`). Used by
-// the EnvironmentChip to disable env options that would otherwise create
-// a duplicate clone — the user can still pick a currently-uncloned env.
-// TanStack Query keeps the result keyed per source flow + user, so
-// toggling chips across rows doesn't refetch the same data repeatedly.
-export function useClonedEnvs(flowId: string | undefined): UseQueryResult<Set<string>> {
-  const { currentUser } = useAuth();
-  const userId = currentUser?.id ?? "";
-  return useQuery({
-    queryKey: [...queryKeys.flows(userId, flowId ?? "_none"), "clonedEnvs"] as const,
-    enabled: Boolean(userId && flowId),
-    queryFn: async () => {
-      if (!flowId) return new Set<string>();
-      const raw = await flowsCollection.list({
-        filter: { clonedFromFlowId: flowId },
-        pageNo: 1,
-        pageSize: 50,
-      });
-      const slugs = unwrapPaged<{ envSlug?: string }>(raw).items
-        .map((f) => f.envSlug)
-        .filter((s): s is string => typeof s === "string" && s.length > 0);
-      return new Set(slugs);
-    },
-  });
-}
-
-// Sibling of `useClonedEnvs` for the feature level — returns the set
-// of `envSlug` values where this feature already has a sibling feature
+// Sibling of the (removed) flow-level lookup — returns the set of
+// `envSlug` values where this feature already has a sibling feature
 // (records with `clonedFromFeatureId === featureId`). Used by the
 // feature row's read-only environment workflow diagram to mark each
-// sibling env as "cloned" vs "available". Same shape + cache model as
-// `useClonedEnvs` so consumers don't have to special-case the row.
+// sibling env as "cloned" vs "available".
 //
 // We deliberately do NOT apply `createdByFilter(userId)` — a sibling
 // feature can legitimately be created by another team member (e.g. a
@@ -276,13 +254,28 @@ export function useClonedFeatureEnvs(
 
 async function findSiblingFeatures(
   sourceFeatureId: string,
-  projectId: string,
-  userId: string,
+  _projectId: string,
+  _userId: string,
 ): Promise<{ id: string; envSlug?: string }[]> {
+  // Filter on `clonedFromFeatureId` only — the source `ItemId` is a
+  // unique GUID, so it's a sufficient key by itself. Earlier versions
+  // also passed `createdByFilter(userId)` and `projectId`, but the
+  // gateway silently drops unknown / owner-scoping fields from the
+  // filter. More importantly: with dev environments created before the
+  // user-bound tenant model, some siblings carry `CreatedBy: null` and
+  // were being filtered out — so a delete / rename on the dev source
+  // missed those siblings, leaving orphan rows in stg / prod / uat.
+  // This was the cross-env delete bug: deleting a dev-source feature
+  // removed only the siblings the current user had cloned themselves,
+  // not the ones a colleague had cloned in a previous session. Filter
+  // on the unique link and trust it — the same fix `findSiblingFlows`
+  // applies on the flow side.
+  //
+  // Caller still passes `projectId` and `userId` (kept in the
+  // signature for minimal blast radius against the rename + delete
+  // cascades); they're unused here, hence the underscore prefix.
   const raw = await featuresCollection.list({
     filter: {
-      ...createdByFilter(userId),
-      projectId,
       clonedFromFeatureId: sourceFeatureId,
     },
     pageNo: 1,
@@ -363,6 +356,14 @@ export const queryKeys = {
   // because every QA needs to see the case list for features they're
   // not the author of.
   testCases: (flowId: string) => ["test-cases", flowId] as const,
+  // Flow comments — one thread per flow. Keyed per-flow so opening a
+  // different flow doesn't share a stale array. Workspace-wide read
+  // (`filter: { flowId: <id> }` scopes the thread) — comments are team-
+  // wide discussion, so every role on every env reads the same set of
+  // rows (no `createdByFilter`). The flat-row reader in `useFlowComments`
+  // is the canonical reader; `useAddFlowComment` and
+  // `useAddFlowCommentReply` invalidate this key in their `onSuccess`.
+  flowComments: (flowId: string) => ["flow-comments", flowId] as const,
 };
 
 // --- Reads ------------------------------------------------------------------
@@ -474,7 +475,7 @@ export function useFeatureFlows(
         // Workspace-wide read: dropped `createdByFilter(userId)` so a
         // tester can browse flows they didn't author. Mutations stay
         // blocked by the `isTester` guard in `useUpdateFlow` /
-        // `useDeleteFlow` / `useCloneFlow`.
+        // `useDeleteFlow`.
         filter: { featureId },
         pageNo: 1,
         pageSize: 200,
@@ -484,9 +485,8 @@ export function useFeatureFlows(
       // the UI `Flow.projectId`. The cloud Flow schema doesn't carry
       // `projectId` (it's a joinable via featureId), so the UI value was
       // "" before — which is fine for chips that only mutate by ItemId,
-      // but breaks any cloud call that filters on projectId (notably
-      // `useCloneFlow`'s destination-feature lookup and auto-create).
-      // Pass `projectId` from the caller (FeatureItem has the feature
+      // but breaks any cloud call that filters on projectId. Pass
+      // `projectId` from the caller (FeatureItem has the feature
       // right there with `projectId` populated by `useProjectFeatures`).
       return unwrapPaged<unknown>(raw).items.map((f) =>
         toFlow(f as Parameters<typeof toFlow>[0], projectId ?? ""),
@@ -2186,6 +2186,368 @@ export function useTestCases(flowId: string): UseQueryResult<TestCase[]> {
   });
 }
 
+// --- Flow comments ----------------------------------------------------------
+//
+// Per-flow thread of comments + replies, persisted to the Blocks Data
+// gateway via the `FlowComment` schema. Comments are team-wide discussion
+// (open to every role on every env — see `CommentsChip.tsx` and the
+// `chipReadOnly` rationale in `FlowItem`), so the read is workspace-wide
+// with `filter: { flowId }` doing the per-thread scoping. The wire shape
+// is one flat row per comment or reply (`parentId` groups replies under
+// their top-level); the threaded view in `CommentsModal` is reconstructed
+// by the consumer (`FlowItem.groupNested`).
+
+/**
+ * Read all comments + replies for a single flow. Returns the flat
+ * `FlowCommentRow[]` shape (one row per comment or reply, joined by
+ * `parentId`) — the consumer groups rows into the nested
+ * `comments[] + replies[]` shape that `CommentsModal` takes.
+ *
+ * Workspace-wide read; no `createdBy` filter so every team member sees
+ * the same thread regardless of author. Sorted by `createdAt` ascending
+ * so the threaded view renders the thread in oldest-first order.
+ */
+export function useFlowComments(
+  flowId: string,
+): UseQueryResult<FlowCommentRow[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery<FlowCommentRow[]>({
+    queryKey: queryKeys.flowComments(flowId),
+    // Disable until we actually have a flow id — otherwise an
+    // empty-string key fires a no-op request that 400s. Same gating as
+    // `useTestCases` (line 2150) so the two flow-scoped readers stay
+    // symmetric.
+    enabled: Boolean(userId && flowId),
+    queryFn: async () => {
+      const raw = await flowCommentsCollection.list({
+        pageNo: 1,
+        pageSize: 500,
+        filter: { flowId },
+      });
+      const rows = unwrapPaged<CloudFlowComment>(raw).items;
+      return rows
+        .map((r) => toFlowCommentRow(r))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    },
+  });
+}
+
+export interface AddFlowCommentInput {
+  flowId: string;
+  content: string;
+}
+
+/**
+ * Add a top-level comment to a flow. No role gate — comments are open to
+ * every role on every env (see `comments-chip-always-open` memory); only
+ * UI affordances (chip / modal) change per role, not the underlying
+ * mutation surface.
+ *
+ * Returns the constructed `FlowCommentRow` (synthesised from the input
+ * because the Blocks SDK's insert response only echoes
+ * `{ acknowledged, itemId, message, totalImpactedData }` — same pattern
+ * as `useAddTestCase` at line 2204). On success both invalidates AND
+ * refetches the flow's comments query — the explicit refetch is the
+ * belt-and-braces that removes the "I clicked but nothing happened"
+ * foot-gun if the query is currently disabled or has a stale cache.
+ */
+export function useAddFlowComment(): UseMutationResult<
+  FlowCommentRow,
+  Error,
+  AddFlowCommentInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      const nowIso = new Date().toISOString();
+      await flowCommentsCollection.create({
+        flowId: input.flowId,
+        // Top-level comments intentionally OMIT `parentId` rather than
+        // sending "" — the gateway's strict 'Required' validator rejects
+        // empty strings on insert with
+        // "Field 'parentId' is required for insert"
+        // (verified 2026-09-27). The schema field is `requiredOn: "None"`
+        // so omitting it is the model; the read path (`toFlowCommentRow`)
+        // defaults missing `parentId` to "" and `FlowItem.groupNested`
+        // treats `parentId === ""` as a top-level row.
+        authorId: userId,
+        authorName: currentUser?.name ?? "",
+        authorEmail: currentUser?.email ?? "",
+        authorAvatar: currentUser?.avatarUrl ?? "",
+        content: input.content,
+      });
+      // Reconstruct the row from what we know — same "SDK insert only
+      // echoes `{itemId, ...}`" pattern as `useAddTestCase` (line 2235).
+      // `id` stays empty because the cloud's UUID isn't echoed in the
+      // insert response; the explicit `refetchQueries` below repopulates
+      // the real id on the next read pass.
+      return {
+        id: "",
+        parentId: "",
+        authorId: userId,
+        authorName: currentUser?.name ?? "",
+        authorEmail: currentUser?.email ?? "",
+        authorAvatar: currentUser?.avatarUrl,
+        content: input.content,
+        createdAt: nowIso,
+      };
+    },
+    onSuccess: (_row, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.flowComments(input.flowId),
+      });
+      // Belt-and-braces — see `useAddTestCase`'s matching comment at
+      // line 2262. Removes the class of "I clicked Add comment and the
+      // thread didn't refresh" foot-guns.
+      qc.refetchQueries({
+        queryKey: queryKeys.flowComments(input.flowId),
+      });
+    },
+  });
+}
+
+export interface AddFlowCommentReplyInput {
+  flowId: string;
+  /** Parent comment's cloud ItemId (the UUID returned on read). */
+  parentId: string;
+  content: string;
+}
+
+/**
+ * Add a reply under an existing top-level comment. Same shape and
+ * invalidation as `useAddFlowComment` — only difference is the
+ * `parentId` field on the cloud row (the parent's UUID, never empty).
+ *
+ * `parentId` here is the parent's *cloud* ItemId, NOT a stable logical
+ * id — that's the only identifier the gateway carries between reads
+ * (which is also why the parent's local-only `id` from a partial cache
+ * must never be used as the link; the modal renders the cloud ids
+ * surfaced by `groupNested`).
+ *
+ * Reply-side notification fan-out: on success we look up the parent
+ * row in the React Query cache and write one `Notification` row to the
+ * parent's `authorId` (the user who wrote the comment being replied
+ * to). Reasons this lives here, not in `FlowItem` or a modal-callback:
+ *
+ *   * The mutation hook is the single place every reply is created
+ *     regardless of caller — wiring notify from the modal would risk
+ *     a future entry point (e.g. an inline reply from the inbox)
+ *     forgetting the fan-out.
+ *   * The mutation sees the *input* `parentId` directly, so it never
+ *     has to dedupe against stale cache rows or race with the
+ *     `invalidateQueries` refetch.
+ *   * Failures are swallowed (best-effort `Promise.allSettled`) — the
+ *     reply write itself is independent of the notification write, so
+ *     a cloud outage on notifications doesn't drop the comment.
+ *
+ * Skip rules (all early-return; they never throw):
+ *   * No signed-in actor: no one to attribute the notification to.
+ *   * Parent row not found in cache / has empty `authorId`: legacy row
+ *     predating the column, or the thread was just opened and the
+ *     read hasn't landed yet — notification metadata would be wrong.
+ *   * `parent.authorId === actor.id`: the replier IS the parent author
+ *     (e.g. a comment author replying to themselves); skip the
+ *     self-notification (same rationale as `RECIPIENTS_BY_ROLE`'s
+ *     actor-exclusion filter).
+ */
+export function useAddFlowCommentReply(): UseMutationResult<
+  FlowCommentRow,
+  Error,
+  AddFlowCommentReplyInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      const nowIso = new Date().toISOString();
+      await flowCommentsCollection.create({
+        flowId: input.flowId,
+        parentId: input.parentId,
+        authorId: userId,
+        authorName: currentUser?.name ?? "",
+        authorEmail: currentUser?.email ?? "",
+        authorAvatar: currentUser?.avatarUrl ?? "",
+        content: input.content,
+      });
+      return {
+        id: "",
+        parentId: input.parentId,
+        authorId: userId,
+        authorName: currentUser?.name ?? "",
+        authorEmail: currentUser?.email ?? "",
+        authorAvatar: currentUser?.avatarUrl,
+        content: input.content,
+        createdAt: nowIso,
+      };
+    },
+    onSuccess: (_row, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.flowComments(input.flowId),
+      });
+      qc.refetchQueries({
+        queryKey: queryKeys.flowComments(input.flowId),
+      });
+      // Fire-and-forget reply notification. Wrapped in `void` so the
+      // mutation's `onSuccess` returns immediately — the reply write
+      // itself must never block on the notification backend. Errors
+      // are soft-logged (a notification outage must never block the
+      // underlying mutation — see `notifier-recipients-by-role`
+      // memory).
+      void notifyCommentReply({
+        input,
+        actorId: userId,
+        actorName: currentUser?.name ?? "A teammate",
+        qc,
+      }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[useAddFlowCommentReply] reply notification failed",
+          err,
+        );
+      });
+    },
+  });
+}
+
+/**
+ * Write one `Notification` row to the parent comment's author when
+ * someone replies to their comment. Internal helper used by
+ * `useAddFlowCommentReply.onSuccess` — kept local to this file so the
+ * reply-only fan-out logic stays beside the mutation that owns it.
+ *
+ * Returns `void`; all paths are no-ops on the unhappy ones (matching
+ * the skip-rule comment on `useAddFlowCommentReply` above):
+ *   * No signed-in actor → bail.
+ *   * Parent row missing or has empty `authorId` → bail (legacy row or
+ *     cache-not-yet-landed; we'd rather drop the notification than
+ *     send a wrong-target one).
+ *   * `parent.authorId === actorId` → bail (self-notify skip; same
+ *     rationale as `RECIPIENTS_BY_ROLE`'s actor-exclusion filter).
+ *
+ * Metadata resolution: the flow / project names come from the React
+ * Query cache populated by `useProjects` / `useFlows`. The notification
+ * row stays denormalized so the inbox's `deriveBody` can render a
+ * sentence without a follow-up read (matches the `notifyRole` /
+ * `BlockPromoteModal` precedent).
+ */
+async function notifyCommentReply(args: {
+  input: AddFlowCommentReplyInput;
+  actorId: string;
+  actorName: string;
+  qc: ReturnType<typeof useQueryClient>;
+}): Promise<void> {
+  const { input, actorId, actorName, qc } = args;
+  if (!actorId) return;
+  // Look up the parent comment so we can find its author and skip
+  // self-replies. The cache is populated by `useFlowComments`, which
+  // the modal opened before the reply button was even visible.
+  const threads =
+    qc.getQueryData<FlowCommentRow[]>(queryKeys.flowComments(input.flowId)) ??
+    [];
+  const parent = threads.find((r) => r.id === input.parentId);
+  // Skip when we couldn't resolve the parent — legacy row, or the
+  // modal opened a context where the read hasn't landed yet. The
+  // reply itself is still in the cloud; the user will see it on
+  // refresh; we'd rather drop one notification than send a
+  // wrong-target one.
+  if (!parent || !parent.authorId) return;
+  // Self-notify skip. A user replying to their own top-level comment
+  // (e.g. adding context) shouldn't see "X replied to you on your
+  // own comment" in their inbox.
+  if (parent.authorId === actorId) return;
+  // Resolve display metadata from cache. The modal opened against a
+  // specific flow; the feature's `useFlows` cache populated before
+  // this reply could fire. A miss falls through to empty strings; the
+  // notifier then renders a generic sentence.
+  const flow = findFlowInCache(qc, input.flowId);
+  const project = flow ? findProjectInCache(qc, flow.projectId) : undefined;
+  const rowBase = {
+    context: "comment",
+    actionName: "replied",
+    actorId,
+    actorName,
+    // `value` carries the resource id (the flow id) so the inbox's
+    // "Reference: <id>" fallback still has a chance to render if
+    // every display field is missing.
+    value: input.flowId,
+    projectId: flow?.projectId ?? "",
+    projectName: project?.name ?? "",
+    featureId: flow?.featureId ?? "",
+    featureName: flow?.name ?? "",
+    flowId: input.flowId,
+    flowName: flow?.name ?? "",
+    envSlug: flow?.envSlug ?? "",
+    oldName: "",
+    newName: "",
+    status: "",
+    stack: "",
+    readAt: "",
+  };
+  // Best-effort write — `notifyCommentReply` is invoked via
+  // `void ... .catch(...)`, so a throw here is already swallowed. The
+  // try/finally is belt-and-braces in case a future refactor moves
+  // this out of `void`.
+  try {
+    await notificationsCollection.create({
+      ...rowBase,
+      userId: parent.authorId,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[notifyCommentReply] failed to write notification row",
+      err,
+    );
+  }
+}
+
+/**
+ * Find a flow row by id from any `useFlows(userId, featureId)` cache
+ * slot. We don't know the featureId at the call site, so walk all
+ * `["flows", ...]` cache entries and pick the matching row. Returns
+ * `undefined` if the flow was never loaded by `useFlows` (rare — the
+ * modal opened the flow row, so the feature's flows were read
+ * earlier).
+ */
+function findFlowInCache(
+  qc: ReturnType<typeof useQueryClient>,
+  flowId: string,
+): Flow | undefined {
+  const caches = qc.getQueryCache().findAll({ queryKey: ["flows"] });
+  for (const entry of caches) {
+    const rows = qc.getQueryData<Flow[]>(entry.queryKey);
+    if (!Array.isArray(rows)) continue;
+    const hit = rows.find((f) => f.id === flowId);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * Look up a project by id from any `["projects", ...]` cache slot —
+ * the workspace-wide project list (`useProjects`) populates the only
+ * keyed entry we expect to find at reply time.
+ */
+function findProjectInCache(
+  qc: ReturnType<typeof useQueryClient>,
+  projectId: string,
+): Project | undefined {
+  const caches = qc
+    .getQueryCache()
+    .findAll({ queryKey: ["projects"] });
+  for (const entry of caches) {
+    const rows = qc.getQueryData<Project[]>(entry.queryKey);
+    if (!Array.isArray(rows)) continue;
+    const hit = rows.find((p) => p.id === projectId);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 export interface AddTestCaseInput {
   featureId: string;
   flowId: string;
@@ -2713,7 +3075,7 @@ export function useCreateProject(): UseMutationResult<
       // testers specifically (not managers) because the actor IS the
       // manager — telling them about their own action would just spam
       // the inbox of the very person who triggered it.
-      void notifyRole("tester", {
+      void notifyRole(["tester", "developer"], {
         context: "project",
         actionName: "created",
         value: project.id,
@@ -3003,14 +3365,32 @@ export function useCreateFlow(): UseMutationResult<
         queryKeys.projects(userId),
       );
       const project = projects?.find((p) => p.id === vars.projectId);
-      void notifyRole("tester", {
+      // Broadcast to manager + developer roles (NOT tester) — the
+      // user request dated 2026-09-27 was explicit: when a tester
+      // creates a flow, manager + developers get notified, tester
+      // does NOT. The actor-exclusion filter inside `notifyRole`
+      // drops the actor's own uid regardless of which role they hold,
+      // so:
+      //   - tester creates → manager (1) + developers (3) receive,
+      //     tester is dropped (was the bug — previously they self-
+      //     notified because the only tester uid was the actor).
+      //   - manager creates → 3 developers receive, manager dropped.
+      //   - developer creates → manager (1) + 2 other developers
+      //     receive, the creating developer dropped.
+      // We exclude tester entirely from the broadcast because the
+      // only tester is the actor in the bug scenario; including
+      // "tester" would re-introduce the self-notify after the dedupe
+      // (the actor-exclusion filter would still drop them, but
+      // listing the role here would be misleading — testers don't
+      // need to be notified about other testers' flow creation).
+      void notifyRole(["manager", "developer"], {
         context: "flow",
         actionName: "created",
         value: flow.id,
         projectId: vars.projectId,
         projectName: project?.name,
         flowName: flow.name,
-        actorName: currentUser?.name ?? "A manager",
+        actorName: currentUser?.name ?? "A teammate",
         actorId: userId,
       }).catch(() => {});
       void qc.invalidateQueries({
@@ -3049,7 +3429,16 @@ export function useDeleteProject(): UseMutationResult<void, Error, string> {
         queryKeys.projects(userId),
       );
       const project = projects?.find((p) => p.id === projectId);
-      void notifyRole("tester", {
+      // Broadcast to tester + developer (the actor-exclusion filter
+      // drops the actor's own uid regardless of role — see
+      // `notifier.ts:154-157`). User request 2026-09-27: project
+      // delete must reach developers, not just testers, since
+      // developers' active branches/casacde-cloned features live
+      // under the project and they need to know the workspace is
+      // gone. Actor exclusion handles the "manager deletes → manager
+      // not notified" case even though manager isn't currently in
+      // the recipient set for project mutations.
+      void notifyRole(["tester", "developer"], {
         context: "project",
         actionName: "deleted",
         value: projectId,
@@ -3154,7 +3543,7 @@ export function useUpdateFeature(): UseMutationResult<
       // caller submitted. They're equal on success; we keep both so the
       // inbox can show "X renamed F to G" without re-querying.
       if (vars.patch.name !== undefined) {
-        void notifyRole("tester", {
+        void notifyRole(["tester", "developer"], {
           context: "feature",
           actionName: "renamed",
           value: vars.id,
@@ -3234,7 +3623,7 @@ export function useDeleteFeature(): UseMutationResult<
       );
       const project = projects?.find((p) => p.id === vars.projectId);
       const feature = features?.find((f) => f.id === vars.id);
-      void notifyRole("tester", {
+      void notifyRole(["tester", "developer"], {
         context: "feature",
         actionName: "deleted",
         value: vars.id,
@@ -3366,7 +3755,7 @@ export function useUpdateFlow(): UseMutationResult<
           queryKeys.projects(userId),
         );
         const project = projects?.find((p) => p.id === vars.projectId);
-        void notifyRole("tester", {
+        void notifyRole(["tester", "developer"], {
           context: "flow",
           actionName: "renamed",
           value: vars.id,
@@ -3449,7 +3838,7 @@ export function useDeleteFlow(): UseMutationResult<
       );
       const flow = flows?.find((f) => f.id === vars.id);
       const project = projects?.find((p) => p.id === vars.projectId);
-      void notifyRole("tester", {
+      void notifyRole(["tester", "developer"], {
         context: "flow",
         actionName: "deleted",
         value: vars.id,
@@ -3526,7 +3915,7 @@ export function useUpdateFlowStatus(): UseMutationResult<
         queryKeys.projects(userId),
       );
       const project = projects?.find((p) => p.id === vars.projectId);
-      void notifyRole("tester", {
+      void notifyRole(["tester", "developer"], {
         context: "flow",
         actionName: "status_changed",
         value: vars.id,
@@ -3596,7 +3985,7 @@ export function useUpdateFlowStack(): UseMutationResult<
         queryKeys.projects(userId),
       );
       const project = projects?.find((p) => p.id === vars.projectId);
-      void notifyRole("tester", {
+      void notifyRole(["tester", "developer"], {
         context: "flow",
         actionName: "stack_changed",
         value: vars.id,
@@ -3694,7 +4083,7 @@ export function useUpdateProject(): UseMutationResult<
         );
         const oldName =
           typeof cached?.name === "string" ? cached.name : vars.patch.name;
-        void notifyRole("tester", {
+        void notifyRole(["tester", "developer"], {
           context: "project",
           actionName: "renamed",
           value: project.id,
@@ -3716,7 +4105,7 @@ export function useUpdateProject(): UseMutationResult<
         // post-state keys. Testers see "X renamed env A to B".
         const newLabels = vars.patch.envLabelOverrides;
         for (const slug of Object.keys(newLabels)) {
-          void notifyRole("tester", {
+          void notifyRole(["tester", "developer"], {
             context: "environment",
             actionName: "renamed",
             value: `${project.id}:${slug}`,
@@ -3739,7 +4128,7 @@ export function useUpdateProject(): UseMutationResult<
         // re-submits don't pile up.
         const newEnvs = vars.patch.customEnvs;
         for (const slug of newEnvs) {
-          void notifyRole("tester", {
+          void notifyRole(["tester", "developer"], {
             context: "environment",
             actionName: "created",
             value: `${project.id}:${slug}`,
@@ -3759,192 +4148,285 @@ export function useUpdateProject(): UseMutationResult<
 }
 
 /**
- * Clone a flow into a different environment on the same project.
+ * Promote a feature into a different environment on the same project
+ * via a sibling record (clone model — source stays, new feature +
+ * its flows appear in target env).
  *
- * Triggered by the per-row Environment chip on [EnvironmentChip.tsx](src/components/flow/EnvironmentChip.tsx).
- * The chip carries the source `flow` and a `targetEnvSlug`; this hook
- * orchestrates three cloud calls in one mutationFn so the UI sees a single
- * pending → success transition:
+ * Two-step mutation:
+ *   1. Create a sibling feature record with `clonedFromFeatureId`
+ *      stamped back to the source feature id, plus
+ *      `envSlug: targetEnvSlug` and the source's metadata
+ *      (`title` / `projectId` / `developerIds` / `qaIds` /
+ *      `githubLink`). The source record is left untouched — its
+ *      `envSlug` stays as "dev" and the dev-env page keeps rendering
+ *      it.
+ *   2. Cascade — for every flow whose `featureId` matches the source
+ *      AND whose `envSlug` matches the source's `envSlug` (i.e. the
+ *      dev-source flows that live alongside the feature), create a
+ *      sibling flow record under the new sibling feature with
+ *      `clonedFromFlowId` linking back to the source flow. The
+ *      destination env page sees a brand-new sibling feature WITH
+ *      its flows, not as an empty shell.
  *
- *   1. Read the source feature to get its name (so we know what to look
- *      for — or create — in the destination env).
- *   2. Find-or-create a feature in the destination env with the same name.
- *      The destination feature is not auto-cloned (that would need a separate
- *      user decision); the source feature name is the lookup key.
- *   3. Insert a new flow under that feature, copying the content fields
- *      (`title`, `description`, `steps`) and resetting every chip value
- *      (`status: "draft"`, stack omitted so the placeholder renders).
+ * The source row's `FeatureEnvWorkflow` chain picks up a persistent
+ * "promoted to {env}" tick on the sibling env because
+ * `useClonedFeatureEnvs` now finds the new sibling via
+ * `clonedFromFeatureId`.
  *
- * The destination feature is allowed to be auto-created because the
- * user's mental model — confirmed during planning — is "click an env to
- * make it visible there", not "find an existing feature or stop".
+ * Despite the name `useCloneFeature` (kept for diff-churn reasons —
+ * the row-level `ManagerFeatureEnvWorkflow` chip fires this hook),
+ * this is a clone operation: source stays, sibling is created.
  *
- * Invalidations match `useCreateFlow` so the destination env's page picks
- * up the new flow without a manual refetch, and so the source env's row
- * counts stay accurate.
+ * Manager-only — see the role gate below. Tester / developer roles get
+ * the read-only `FeatureEnvWorkflow` mirror in `FeatureItem.tsx`
+ * instead.
  */
-export function useCloneFlow(): UseMutationResult<
-  Flow,
+export function useCloneFeature(): UseMutationResult<
+  Feature,
   Error,
-  { flow: Flow; targetEnvSlug: string }
+  { feature: Feature; targetEnvSlug: string }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
-  // Tester guard — mirrors the other role-gated mutation hooks.
-  // Cloning moves data between envs, so it sits alongside other write
-  // paths (create/rename/delete feature/flow). The interactive
-  // `EnvWorkflow` swaps in for the read-only `FlowEnvWorkflow` mirror
-  // for testers (see FlowItem.tsx); this throw catches programmatic /
-  // stale-modal paths that bypass that gate.
-  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  // Manager-only action. Promoting a feature across environments is a
+  // part of the manager's lifecycle workflow (the manager owns the
+  // feature and carries it up the env chain as the work lands in stg /
+  // prod / uat), so only managers are allowed to call this mutation.
+  // Testers and developers see the read-only `FeatureEnvWorkflow`
+  // mirror in `FeatureItem.tsx` and the env pills are non-interactive
+  // on their session; this throw catches programmatic / stale-modal
+  // callers that bypass that UI gate.
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
   return useMutation({
-    mutationFn: async ({ flow, targetEnvSlug }) => {
-      if (isTester) {
+    mutationFn: async ({ feature, targetEnvSlug }) => {
+      if (!isManager) {
         throw new Error(
-          "Testers cannot clone flows across environments. Ask a manager for access.",
+          "Only managers can promote features across environments.",
         );
       }
-      // 1. Source feature — needs its title for the destination lookup.
-      const sourceRaw = await featuresCollection.get(flow.featureId);
-      const sourceItems = unwrapPaged<{ ItemId: string; title: string }>(
-        sourceRaw,
-      ).items;
-      const sourceFeature = sourceItems[0];
-      if (!sourceFeature) {
-        // The flow's parent feature has been deleted underneath it; the
-        // gateway returns an empty page rather than 404. Refusing to clone
-        // here is safer than hallucinating a new feature with no source
-        // name to copy from.
-        throw new Error(`Source feature ${flow.featureId} no longer exists.`);
-      }
-      const sourceFeatureName = sourceFeature.title;
-
-      // 2. Destination feature — find or create.
-      const destRaw = await featuresCollection.list({
+      // Build the clone-record payload. The Feature schema marks
+      // `title`, `status`, and `projectId` as `requiredOn: 3` so we
+      // always send them. `developerIds` / `qaIds` are forwarded
+      // verbatim from the source so the sibling carries the same
+      // assignment as the source (a tester assigned to dev feature X
+      // is still the QA for stg feature X-clone). `githubLink` is
+      // forwarded only if non-empty so the sibling never inherits a
+      // stale empty string. `clonedFromFeatureId` is the cross-env
+      // link the read-only `FeatureEnvWorkflow` mirror queries
+      // (via `useClonedFeatureEnvs`) to paint persistent
+      // "promoted to {env}" ticks for the source row.
+      // Precondition — the feature must have AT LEAST ONE source-env
+      // flow AND every source-env flow must be in "passed" status.
+      // The team's promotion contract is explicit: a feature is
+      // promotion-ready only when QA has signed off on every flow
+      // under it (status === "passed"). Any non-passed status
+      // (`failed`, `pending`, `draft`, `investigating`, `pause`) is
+      // a block — either because the work is unfinished (draft /
+      // pending / investigating / pause) or because it has hit a
+      // regression (failed). Empty features are also blocked —
+      // promoting a feature with zero flows would create a sibling
+      // row in the destination env that has no work to verify.
+      //
+      // The manager-interactive `ManagerFeatureEnvWorkflow` UI also
+      // gates on this — but instead of just disabling the pill, the
+      // new UX opens an error modal with a "Request" button that
+      // sends a `feature.promotion_requested` notification to the
+      // feature's assigned QAs. This server-side check is the
+      // defense-in-depth against stale-modal / programmatic callers
+      // that bypass the UI gate.
+      //
+      // CRITICAL ordering — this query + check MUST run before
+      // `featuresCollection.create()` below. The sibling create is
+      // visible immediately on the destination env page once it lands
+      // (TanStack Query invalidation in onSuccess refetches), so if we
+      // created the sibling first and THEN threw on the precondition,
+      // the user would see the error toast AND the sibling would
+      // already be in the next env. Lifting the check above the
+      // create makes the precondition a hard gate: when it fails, no
+      // sibling row is ever written.
+      //
+      // Filter on envSlug mirrors the cascade filter below — only
+      // flows living in the same env as the source feature are
+      // considered for the precondition, because the cascade carries
+      // over only those (see the cascade comment below). A flow with
+      // a different envSlug already exists in a different env under
+      // the source feature and shouldn't gate this promotion.
+      const sourceFlowsRaw = await flowsCollection.list({
         filter: {
-          ...createdByFilter(userId),
-          projectId: flow.projectId,
-          envSlug: targetEnvSlug,
+          featureId: feature.id,
+          envSlug: feature.envSlug,
         },
         pageNo: 1,
-        pageSize: 500,
+        pageSize: 200,
       });
-      const destItems = unwrapPaged<{ ItemId: string; title: string }>(
-        destRaw,
-      ).items;
-      const foundDestId = destItems.find(
-        (f) => f.title === sourceFeatureName,
-      )?.ItemId;
-      let destFeatureId: string;
-      if (foundDestId) {
-        destFeatureId = foundDestId;
-      } else {
-        // Stamp `clonedFromFeatureId` so the cross-env sync feature can
-        // find this auto-created feature when the source dev feature is
-        // later renamed or deleted. Pre-existing destination features
-        // (those created before this feature shipped) are missing the
-        // link and stay frozen — that's by design, per the user's
-        // "no backfill" decision.
-        const created = await featuresCollection.create({
-          title: sourceFeatureName,
-          projectId: flow.projectId,
-          status: "backlog",
-          envSlug: targetEnvSlug,
-          clonedFromFeatureId: sourceFeature.ItemId,
-        });
-        const newId = extractInsertedItemId(created, "insertFeature");
-        if (!newId) {
-          throw new Error(
-            "Could not create destination feature — no itemId in response.",
-          );
-        }
-        destFeatureId = newId;
+      const sourceFlows = unwrapPaged<CloudFlow>(sourceFlowsRaw).items;
+      if (sourceFlows.length === 0) {
+        throw new Error(
+          "Cannot promote feature — this feature has no flows. Add at least one flow under the feature before promoting.",
+        );
+      }
+      const nonPassedFlows = sourceFlows.filter(
+        (f) => f.status !== "passed",
+      );
+      if (nonPassedFlows.length > 0) {
+        const blockingNames = nonPassedFlows
+          .map((f) => f.title ?? "(untitled)")
+          .slice(0, 3);
+        const more =
+          nonPassedFlows.length > 3
+            ? ` and ${nonPassedFlows.length - 3} more`
+            : "";
+        throw new Error(
+          `Cannot promote feature — ${nonPassedFlows.length} flow${nonPassedFlows.length === 1 ? "" : "s"} under this feature ${nonPassedFlows.length === 1 ? "is" : "are"} not in "Passed" status: ${blockingNames.join(", ")}${more}. Mark every flow as Passed before promoting.`,
+        );
       }
 
-      // 3. New flow — content forward, chip values reset, sibling link stamped.
-      const createdFlowRaw = await flowsCollection.create({
-        title: flow.name,
-        featureId: destFeatureId,
-        status: "draft",
+      const createPayload: Record<string, unknown> = {
+        title: feature.name,
+        projectId: feature.projectId,
+        status: "backlog",
         envSlug: targetEnvSlug,
-        // `clonedFromFlowId` is the sibling link that makes the
-        // cross-env sync cascade work — without it, dev deletes and
-        // renames can't find this clone. Every clone made via this hook
-        // gets the link; pre-existing clones (made before this feature
-        // shipped) won't have it and won't participate in cascade.
-        clonedFromFlowId: flow.id,
-        // Stack is intentionally absent from the payload — leaving it off
-        // produces a record whose `stack` field is undefined, which the
-        // StackChip renders as the neutral "Stack" placeholder. Matches
-        // the user's "every chip's value resets" requirement.
-        ...(flow.description !== undefined
-          ? { description: flow.description }
-          : {}),
-        ...(flow.steps && flow.steps.length > 0
-          ? { steps: flow.steps }
-          : {}),
-      });
-      const newFlowItemId = extractInsertedItemId(createdFlowRaw, "insertFlow");
-      if (!newFlowItemId) {
-        throw new Error("Could not create flow — no itemId in response.");
+        clonedFromFeatureId: feature.id,
+      };
+      if (Array.isArray(feature.developerIds)) {
+        createPayload.developerIds = feature.developerIds;
       }
-      // The insert response only carries `itemId` + ack metadata; assemble
-      // a CloudFlow-shaped record from what we already know so `toFlow`
-      // produces a complete Flow (the toFlow adapter expects the read-
-      // shape field names — `ItemId`, `CreatedDate`, etc.).
+      if (Array.isArray(feature.qaIds)) {
+        createPayload.qaIds = feature.qaIds;
+      }
+      if (
+        typeof feature.githubLink === "string" &&
+        feature.githubLink.trim() !== ""
+      ) {
+        createPayload.githubLink = feature.githubLink.trim();
+      }
+      const created = (await featuresCollection.create(
+        createPayload,
+      )) as unknown;
+      // Mirror `useCreateFeature` — the gateway can wrap the inserted
+      // row in different envelopes depending on the path; use the
+      // helper to pull the new sibling's `ItemId` reliably.
+      const siblingId = extractInsertedItemId(created, "insertFeature");
+      if (!siblingId) {
+        throw new Error(
+          "Could not create feature clone — no itemId in response.",
+        );
+      }
+
+      // Cascade — clone every dev-source flow under the new sibling
+      // feature so the destination env page shows the sibling feature
+      // WITH its flows, not as an empty row. The user explicitly
+      // asked for this ("not taking its flow with it"); promoting a
+      // feature without its flows would leave the stg / prod / uat
+      // sibling as an empty shell, forcing the manager to re-author
+      // every flow in the new env.
+      //
+      // Filter: only flows whose `envSlug` matches the source
+      // feature's `envSlug` are carried over. Reasoning — flows whose
+      // `envSlug` differs from the source feature's are already living
+      // in a different env under the source feature; carrying them
+      // over into the sibling feature would create a duplicate of the
+      // same content in the target env (one flow under the source
+      // feature, one under the new sibling) — that's not what the
+      // manager asked for. The cascade clones only the source-env
+      // flows that "live with" the feature.
+      //
+      // Wire payload mirrors `useCreateFlow`'s shape:
+      //   title, featureId (sibling), status (carried over from
+      //   source — the audit trail of "passed in dev" stays
+      //   attached to the cloned flow, the tester re-runs in stg
+      //   and updates), envSlug (target), clonedFromFlowId (link
+      //   back to source). Optional content fields
+      //   (`description` / `steps` / `stack`) are forwarded only
+      //   when non-empty so the schema's `requiredOn: 0` rule isn't
+      //   tripped.
+      await Promise.all(
+        sourceFlows.map(async (sourceFlow) => {
+          const flowPayload: Record<string, unknown> = {
+            title: sourceFlow.title,
+            featureId: siblingId,
+            status: sourceFlow.status ?? "draft",
+            envSlug: targetEnvSlug,
+            clonedFromFlowId: sourceFlow.ItemId,
+          };
+          if (
+            typeof sourceFlow.description === "string" &&
+            sourceFlow.description.trim() !== ""
+          ) {
+            flowPayload.description = sourceFlow.description;
+          }
+          if (Array.isArray(sourceFlow.steps) && sourceFlow.steps.length > 0) {
+            flowPayload.steps = sourceFlow.steps;
+          }
+          if (typeof sourceFlow.stack === "string" && sourceFlow.stack !== "") {
+            flowPayload.stack = sourceFlow.stack;
+          }
+          await flowsCollection.create(flowPayload);
+        }),
+      );
+      // We don't have the cloud's full row on hand (the create
+      // response only carries the new id), so build a `Feature`-
+      // shaped return from the source's metadata + the new envSlug +
+      // the sibling id. Downstream callers (`onSuccess`) only need
+      // the id + name + projectId + envSlug to construct the
+      // notification payload, and TanStack Query will refetch the
+      // row's full content from `["features", userId, projectId]`
+      // once we invalidate it.
       const now = new Date().toISOString();
-      const flowRecord: CloudFlow = {
-        ItemId: newFlowItemId,
-        title: flow.name,
-        featureId: destFeatureId,
-        status: "draft",
+      const synthetic: CloudFeature = {
+        ItemId: siblingId,
+        title: feature.name,
+        projectId: feature.projectId,
+        status: "backlog",
         envSlug: targetEnvSlug,
-        // Optional content fields — forward only when present so legacy
-        // (pre-description) flows stay pre-description.
-        description: flow.description,
-        steps: flow.steps,
-        clonedFromFlowId: flow.id,
+        clonedFromFeatureId: feature.id,
+        developerIds: feature.developerIds,
+        qaIds: feature.qaIds,
+        githubLink: feature.githubLink,
         CreatedDate: now,
         LastUpdatedDate: now,
       };
-      return toFlow(flowRecord, flow.projectId);
+      return toFeature(synthetic, feature.projectId);
     },
-    onSuccess: (_flow, vars) => {
-      // Refresh every cached view of this project's features and flows so
-      // the destination env's page reflects the new flow/feature and the
-      // source env's row counts remain accurate.
+    onSuccess: (_sibling, vars) => {
+      // Refresh every cached view of this project's features — the
+      // prefix match covers the env-scoped pages, the env-less
+      // (legacy) page, AND the `useClonedFeatureEnvs` lookup the
+      // `FeatureEnvWorkflow` mirror uses to paint persistent
+      // "promoted to {env}" ticks for the source row. Invalidation
+      // key: `["features", userId, projectId]` — note that
+      // `queryKeys.features(userId, projectId, envSlug)` expands to
+      // `["features", userId, projectId, envSlug]` so this prefix
+      // invalidates every env-scoped subkey AND the clonedEnvs
+      // query (`["features", userId, projectId, "_all",
+      // "clonedEnvs", featureId]`). The dev-env page re-renders
+      // with the source row still visible (envSlug unchanged); the
+      // destination env page picks up the new sibling.
       qc.invalidateQueries({
-        queryKey: ["features", userId, vars.flow.projectId],
-      });
-      // Re-fetch the source flow's "cloned envs" set so the chip on the
-      // row immediately disables the env we just cloned to. Without
-      // this, `useClonedEnvs` would keep the previous answer cached and
-      // the user could spam-clone by clicking the same env twice.
-      qc.invalidateQueries({
-        queryKey: [
-          ...queryKeys.flows(userId, vars.flow.id),
-          "clonedEnvs",
-        ],
+        queryKey: ["features", userId, vars.feature.projectId],
       });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
-      // Notify testers on cross-env clone (Option C). `vars.flow` is the
-      // source flow (with its pre-clone env), `vars.targetEnvSlug` is
-      // the destination env the user picked from the chip. The body
-      // builder uses `envSlug` to render "to environment 'uat'" — so we
-      // send the destination env, not the source's env.
+      // Notify testers on cross-env feature promotion. `context:
+      // "feature"` makes the body builder render the feature-shaped
+      // sentence instead of the flow-shaped one. `value` carries the
+      // source feature id (the
+      // sibling has a fresh id and isn't tracked yet by the inbox
+      // subscription filter); `featureName` carries the source's
+      // pre-promote name; `envSlug` is the destination env the
+      // manager picked from the chip.
       const projects = qc.getQueryData<Project[]>(
         queryKeys.projects(userId),
       );
-      const project = projects?.find((p) => p.id === vars.flow.projectId);
-      void notifyRole("tester", {
-        context: "flow",
-        actionName: "cloned",
-        value: vars.flow.id,
-        projectId: vars.flow.projectId,
+      const project = projects?.find((p) => p.id === vars.feature.projectId);
+      void notifyRole(["tester", "developer"], {
+        context: "feature",
+        actionName: "promoted",
+        value: vars.feature.id,
+        projectId: vars.feature.projectId,
         projectName: project?.name,
-        flowName: vars.flow.name,
+        featureName: vars.feature.name,
         envSlug: vars.targetEnvSlug,
         actorName: currentUser?.name ?? "A manager",
         actorId: userId,
@@ -3952,6 +4434,10 @@ export function useCloneFlow(): UseMutationResult<
       void qc.invalidateQueries({
         queryKey: queryKeys.notifications(userId),
       });
+      // Silence unused-param linter — onSuccess exists so callers
+      // can `await` the cloned Feature; the row invalidations above
+      // don't read it directly.
+      void _sibling;
     },
   });
 }
@@ -3982,12 +4468,49 @@ export function useAddProjectEnv(): UseMutationResult<
         );
       }
       const cacheKey = queryKeys.project(userId, projectId);
-      const cached = qc.getQueryData<Project>(cacheKey);
-      const existing = cached?.customEnvs ?? [];
+      // Pull a fresh read when the cache hasn't seen this project yet
+      // (e.g. the user opened AddEnvironmentModal directly from the
+      // project-list kebab menu, so `useProject(targetProjectId)` hasn't
+      // been mounted yet on this page). Without this, two separate bugs
+      // could fire:
+      //   1. `existing` would default to `[]` and we'd PATCH
+      //      `customEnvs: [env]` — wiping out any prior custom envs the
+      //      project already had (silent data loss).
+      //   2. The PATCH would lack the requiredOn: "Both" echoes the
+      //      gateway demands on every update (`name` + `status`). The
+      //      same pattern is used in `useRenameProjectEnv`'s canonical
+      //      env path (see comments at line ~4371 in that hook) —
+      //      the comment claiming `useAddProjectEnv` doesn't need the
+      //      echo was incorrect (verified 2026-09-27 via the user
+      //      report: "manager add env → notification fires but no env
+      //      appears"). The cloud was silently rejecting the partial
+      //      PATCH; the SDK's update() returned a stale-but-shape-ok
+      //      response which fired the success path (and thus the
+      //      notification) without persisting the change.
+      let project = qc.getQueryData<Project>(cacheKey);
+      if (!project) {
+        const raw = await projectsCollection.get(projectId);
+        const paged = unwrapPaged<CloudProject>(raw);
+        const fresh = paged.items[0];
+        if (!fresh) {
+          throw new Error("Project not found.");
+        }
+        const hydrated = toProject(fresh);
+        qc.setQueryData<Project>(cacheKey, hydrated);
+        project = hydrated;
+      }
+      const existing = project.customEnvs ?? [];
       const next: ProjectCustomEnv[] = [...existing, env];
       return updateProject.mutateAsync({
         id: projectId,
-        patch: { customEnvs: next },
+        // Echo `name` and `status` because Project schema marks both
+        // requiredOn: "Both" — gateway rejects partial PATCHes that
+        // don't carry them. Same fix as `useRenameProjectEnv`.
+        patch: {
+          customEnvs: next,
+          name: project.name,
+          status: project.status ?? "active",
+        },
       });
     },
   });
@@ -4263,19 +4786,36 @@ export function useRenameProjectEnv(): UseMutationResult<
 // page is the only consumer, and coupling its updates to dashboard totals
 // would force unnecessary refetches on every change.
 
-// Read every configured URL for the signed-in user. Sort by
-// `LastUpdatedDate` desc so the most recently touched targets surface
-// first — the `UrlInput` panel shows what the user just edited at the top
-// of the list. Matches the Project listing's sort choice.
+// Read every configured URL for the signed-in user, scoped to the
+// active project env. Sort by `LastUpdatedDate` desc so the most
+// recently touched targets surface first — the `UrlInput` panel shows
+// what the user just edited at the top of the list. Matches the
+// Project listing's sort choice.
+//
+// Env scoping: a target row carries `projectId` + `envSlug` at write
+// time (see `useCreateVerificationTarget`). When the user is not on
+// a project env route the query is disabled so we don't leak rows
+// from other envs into the panel. Outside an env the sidebar hides
+// Issue Tracker entry points anyway, so this state is only briefly
+// observable during the transition between routes.
 export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const activeEnv = useActiveEnv();
   return useQuery({
-    queryKey: queryKeys.issueTrackerTargets(userId),
-    enabled: Boolean(userId),
+    queryKey: [
+      ...queryKeys.issueTrackerTargets(userId),
+      activeEnv?.projectId ?? "",
+      activeEnv?.envSlug ?? "",
+    ],
+    enabled: Boolean(userId && activeEnv),
     queryFn: async () => {
       const raw = await verificationTargetsCollection.list({
-        filter: createdByFilter(userId),
+        filter: {
+          ...createdByFilter(userId),
+          projectId: activeEnv!.projectId,
+          envSlug: activeEnv!.envSlug,
+        },
         pageNo: 1,
         pageSize: 200,
         sort: { LastUpdatedDate: -1 },
@@ -4287,19 +4827,29 @@ export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
   });
 }
 
-// Read every credential row for the signed-in user. The page never needs
-// the real password — `passwordMasked` rides alone on the wire, the form
-// holds the value during the active session and clears on unmount (see
-// the form's local-state treatment + spec section 12.3).
+// Read every credential row for the signed-in user, scoped to the
+// active project env. The page never needs the real password —
+// `passwordMasked` rides alone on the wire, the form holds the value
+// during the active session and clears on unmount (see the form's
+// local-state treatment + spec section 12.3).
 export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const activeEnv = useActiveEnv();
   return useQuery({
-    queryKey: queryKeys.issueTrackerSecrets(userId),
-    enabled: Boolean(userId),
+    queryKey: [
+      ...queryKeys.issueTrackerSecrets(userId),
+      activeEnv?.projectId ?? "",
+      activeEnv?.envSlug ?? "",
+    ],
+    enabled: Boolean(userId && activeEnv),
     queryFn: async () => {
       const raw = await secretsCollection.list({
-        filter: createdByFilter(userId),
+        filter: {
+          ...createdByFilter(userId),
+          projectId: activeEnv!.projectId,
+          envSlug: activeEnv!.envSlug,
+        },
         pageNo: 1,
         pageSize: 200,
         sort: { CreatedDate: -1 },
@@ -4347,18 +4897,33 @@ export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
   // Only these two roles need the cross-user fetch; manager keeps the
   // tight wire filter.
   const fetchUnscoped = isTester || isDeveloper;
+  // Env scoping — same shape as targets / secrets: an Issue row carries
+  // its own projectId / envSlug, so the filter sits on top of the wire
+  // fetch whether it's scoped by CreatedBy or unscoped. Disabled
+  // outside an env context.
+  const activeEnv = useActiveEnv();
   return useQuery({
-    queryKey: [...queryKeys.issueTrackerIssues(userId), roles.join(",")],
-    enabled: Boolean(userId),
+    queryKey: [
+      ...queryKeys.issueTrackerIssues(userId),
+      roles.join(","),
+      activeEnv?.projectId ?? "",
+      activeEnv?.envSlug ?? "",
+    ],
+    enabled: Boolean(userId && activeEnv),
     queryFn: async () => {
+      const envFilter = {
+        projectId: activeEnv!.projectId,
+        envSlug: activeEnv!.envSlug,
+      };
       const raw = fetchUnscoped
         ? await issuesCollection.list({
+            filter: envFilter,
             pageNo: 1,
             pageSize: 200,
             sort: { detectedAt: -1 },
           })
         : await issuesCollection.list({
-            filter: createdByFilter(userId),
+            filter: { ...createdByFilter(userId), ...envFilter },
             pageNo: 1,
             pageSize: 200,
             sort: { detectedAt: -1 },
@@ -4392,12 +4957,17 @@ export function useCreateVerificationTarget(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Per-env scoping — the caller (useIssueTracker.addTarget / chat tool)
+  // supplies projectId + envSlug with the payload, so the create site
+  // has nothing else to do.
   return useMutation({
     mutationFn: async (input) => {
       // Only forward fields that have values. Empty strings against
       // `requiredOn: 0` fields are rejected by some gateway versions
       // — better to omit than to send `""` for a brand-new row.
       const created = await verificationTargetsCollection.create({
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         applicationName: input.applicationName,
         url: input.url,
         environment: input.environment,
@@ -4544,7 +5114,13 @@ export function useUpdateVerificationTarget(): UseMutationResult<
 export function useCreateSecret(): UseMutationResult<
   Secret,
   Error,
-  { name: string; email: string; passwordMasked: string }
+  {
+    name: string;
+    email: string;
+    passwordMasked: string;
+    projectId: string;
+    envSlug: string;
+  }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
@@ -4552,6 +5128,8 @@ export function useCreateSecret(): UseMutationResult<
   return useMutation({
     mutationFn: async (input) => {
       const created = await secretsCollection.create({
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         name: input.name,
         email: input.email,
         passwordMasked: input.passwordMasked,
@@ -4563,6 +5141,8 @@ export function useCreateSecret(): UseMutationResult<
       const now = new Date().toISOString();
       const item = {
         ItemId: itemId,
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         name: input.name,
         email: input.email,
         passwordMasked: input.passwordMasked,
@@ -4659,6 +5239,12 @@ export function useCreateIssue(): UseMutationResult<
   return useMutation({
     mutationFn: async (input) => {
       const created = await issuesCollection.create({
+        // Per-environment scoping — included on every persisted Issue.
+        // Callers must stamp these from the active env context (the chat
+        // + mock paths do so); a missing envSlug would be filtered out by
+        // the scoped read, so the row would silently disappear.
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         title: input.title,
         applicationName: input.applicationName,
         url: input.url,

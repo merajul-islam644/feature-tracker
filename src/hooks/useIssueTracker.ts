@@ -28,6 +28,7 @@ import { issueTrackerApi } from "@/services/issueTrackerApi";
 import { mockInitialChat, idleRun, verificationChecks } from "@/data/issueTrackerConstants";
 import { useToast } from "@/hooks/useToast";
 import { useAuth } from "@/hooks/useAuth";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
 import {
   fetchProjectContents,
   useAppendChatMessage,
@@ -278,7 +279,7 @@ const SCOPE_STORAGE_KEY = "issue-tracker:scope";
 const DEVICE_STORAGE_KEY = "issue-tracker:device";
 const DEVICE_VALUES: ReadonlySet<string> = new Set(["desktop", "mobile", "tablet"]);
 
-function readStoredScope(fallback: VerificationCheckId[]): VerificationCheckId[] {
+function readStoredScope(fallback: VerificationCheckId[]): string[] {
   try {
     const raw = localStorage.getItem(SCOPE_STORAGE_KEY);
     if (!raw) return fallback;
@@ -288,7 +289,10 @@ function readStoredScope(fallback: VerificationCheckId[]): VerificationCheckId[]
       parsed.length > 0 &&
       parsed.every((x) => typeof x === "string")
     ) {
-      return parsed as VerificationCheckId[];
+      // Widened to `string[]` to allow custom scopes (see
+      // `useCustomVerificationChecks`). Built-in IDs still match the
+      // `VerificationCheckId` union; custom ones are arbitrary strings.
+      return parsed as string[];
     }
   } catch {
     // Corrupt / private mode — fall through to defaults.
@@ -309,6 +313,13 @@ function readStoredDevice(): "desktop" | "mobile" | "tablet" {
 export function useIssueTracker() {
   const toast = useToast();
   const { currentUser } = useAuth();
+  // Active env from the URL — only set when the user is on
+  // `/projects/:projectId/:envSlug`. Issue Tracker hooks read their data
+  // through this. When null (e.g. user is on /issue-tracker/targets but
+  // hasn't visited a project env yet) the chat-driven mutations below
+  // refuse to act rather than stamp an empty envSlug and silently
+  // mis-file the row.
+  const activeEnv = useActiveEnv();
 
   // Per-user session storage key. Survives refreshes so the user lands back
   // in the conversation they were in. Keyed by user id so a sign-out /
@@ -453,7 +464,7 @@ export function useIssueTracker() {
   // repeats count once, here, without a round-trip. Reset alongside
   // completedTargetsRef at the start of every run.
   const seenFingerprintsRef = useRef<Set<string>>(new Set());
-  const [scope, setScope] = useState<VerificationCheckId[]>(() =>
+  const [scope, setScope] = useState<string[]>(() =>
     readStoredScope(idleRun.scope),
   );
   // Device emulation for the next run — forwarded through the api layer so
@@ -583,21 +594,13 @@ export function useIssueTracker() {
     ],
   );
 
-  // Surface a single error toast when any of the three core queries fail.
-  // Without this aggregation a transient network blip on one collection
-  // could scroll three separate toasts past the user.
-  useEffect(() => {
-    if (
-      targetsQuery.error ||
-      secretsQuery.error ||
-      issuesQuery.error
-    ) {
-      toast.error("Unable to load Issue Tracker data.");
-    }
-    // We intentionally key on the queries themselves — toasts firing on
-    // every render would be the wrong semantic.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetsQuery.error, secretsQuery.error, issuesQuery.error]);
+  // No aggregate error toast here. The three core queries
+  // (targets / secrets / issues) are scoped to the active project
+  // env, and on Issue Tracker pages the per-page error rendering
+  // surfaces `targetsQuery.error` / `secretsQuery.error` /
+  // `issuesQuery.error` directly. A redundant toast in the corner
+  // obscures more than it helps — the user can already see the
+  // failure state on the page they're looking at.
 
   // Reset the hydration flag whenever the active session changes — the
   // effect below then re-pulls the messages for the new session.
@@ -652,8 +655,21 @@ export function useIssueTracker() {
   // ──────────────────────────────────────────────────────────────────────────
   const addTarget = useCallback(
     async (payload: { url: string; applicationName?: string; credentialId?: string | null }) => {
+      // Issue Tracker is env-scoped — refuse to act outside an active
+      // project env. Stamping an empty envSlug would silently mis-file
+      // the row (the schema sets both fields to requiredOn: "Both"), and
+      // the user's URL would be invisible the next time they visited
+      // this project.
+      if (!activeEnv) {
+        toast.error(
+          "Open a project's environment before adding URLs to the Issue Tracker.",
+        );
+        throw new Error("add_failed_no_env");
+      }
       try {
         const created = await createTarget.mutateAsync({
+          projectId: activeEnv.projectId,
+          envSlug: activeEnv.envSlug,
           url: payload.url,
           applicationName:
             payload.applicationName ?? deriveNameFromUrl(payload.url),
@@ -674,7 +690,7 @@ export function useIssueTracker() {
         throw new Error("add_failed");
       }
     },
-    [createTarget, toast],
+    [createTarget, toast, activeEnv],
   );
 
   const removeTarget = useCallback(
@@ -746,10 +762,24 @@ export function useIssueTracker() {
       name: string;
       email: string;
       password: string;
-      targetId?: string;
+      // Multi-binding: the user may pick one or more targets at
+      // creation time. Empty array / undefined = "no binding at
+      // creation". The credential is created first, then each
+      // requested target is PATCHed independently.
+      targetIds?: string[];
     }) => {
+      // Env-scoped: refuse outside an active project env (same reason as
+      // `addTarget`).
+      if (!activeEnv) {
+        toast.error(
+          "Open a project's environment before adding credentials.",
+        );
+        throw new Error("add_failed_no_env");
+      }
       try {
         const created = await createSecret.mutateAsync({
+          projectId: activeEnv.projectId,
+          envSlug: activeEnv.envSlug,
           name: payload.name,
           email: payload.email,
           // Mask before persisting — the cloud only ever stores the
@@ -789,23 +819,29 @@ export function useIssueTracker() {
             err,
           );
         }
-        // If the user picked a target in the form, bind it now. We do
-        // this AFTER the credential is created so we have its id. If the
-        // binding fails we still keep the secret — the user can rebind
-        // from the SecretCard row.
-        if (payload.targetId) {
-          const target = targets.find((t) => t.id === payload.targetId);
-          if (target) {
-            // If another secret was already bound to this target, its
-            // credentialId will be overwritten — which is the documented
-            // contract. The form surfaces a warning before this happens.
-            await updateTarget.mutateAsync({
-              id: target.id,
-              patch: { credentialId: created.id },
-            });
-          }
+        // Bind to every requested target. We do this AFTER the
+        // credential is created so we have its id. If the binding
+        // fails partway we still keep the secret and any successful
+        // bindings — the user can rebind the rest from the SecretCard
+        // row. Each target's existing credentialId (if any) will be
+        // overwritten — that's the documented contract; the form
+        // surfaces a warning before submit.
+        const requestedIds = payload.targetIds ?? [];
+        let boundCount = 0;
+        for (const id of requestedIds) {
+          const target = targets.find((t) => t.id === id);
+          if (!target) continue;
+          await updateTarget.mutateAsync({
+            id: target.id,
+            patch: { credentialId: created.id },
+          });
+          boundCount += 1;
         }
-        toast.success("Credential added successfully.");
+        toast.success(
+          boundCount > 0
+            ? `Credential added successfully and bound to ${boundCount} target${boundCount > 1 ? "s" : ""}.`
+            : "Credential added successfully.",
+        );
         return created;
       } catch (err) {
         // Surface the real failure so the user can self-diagnose — the
@@ -817,7 +853,7 @@ export function useIssueTracker() {
         throw new Error("add_failed");
       }
     },
-    [createSecret, toast, targets, updateTarget],
+    [createSecret, toast, targets, updateTarget, activeEnv],
   );
 
   const deleteSecretFn = useCallback(
@@ -854,44 +890,65 @@ export function useIssueTracker() {
     [secrets, updateSecret, toast],
   );
 
-  // Re-bind an existing secret to a (possibly different) target, or clear
-  // its binding entirely. The relationship is stored on the target side
-  // (target.credentialId) — to clear, we set it back to null/empty. To
-  // unbind from the previously-bound target when switching, we also patch
-  // the old target so we don't leave a dangling pointer.
+  // Re-bind a saved secret to a (possibly different) set of targets, or
+  // clear all bindings by passing an empty array. The relationship is
+  // stored on the target side as a single scalar (target.credentialId);
+  // multi-binding emerges from N targets independently pointing at the
+  // same secret. To avoid data loss we run a diff: only the targets
+  // that joined the set get PATCHed in, and only the targets that left
+  // the set get PATCHed back to null.
   const bindSecret = useCallback(
-    async (secretId: string, newTargetId: string | null) => {
+    async (secretId: string, newTargetIds: string[]) => {
       const secret = secrets.find((s) => s.id === secretId);
-      const previousTarget = targets.find((t) => t.credentialId === secretId);
       try {
-        // 1) Clear any previous binding so we don't leave the old target
-        //    pointing at a credential that has moved.
-        if (previousTarget && previousTarget.id !== newTargetId) {
+        const previousIds = targets
+          .filter((t) => t.credentialId === secretId)
+          .map((t) => t.id);
+        const previousSet = new Set(previousIds);
+        const nextSet = new Set(newTargetIds);
+        const toAdd = newTargetIds.filter((id) => !previousSet.has(id));
+        const toRemove = previousIds.filter((id) => !nextSet.has(id));
+
+        // No-op when the set hasn't changed — avoid empty toasts.
+        if (toAdd.length === 0 && toRemove.length === 0) return;
+
+        // Run removals FIRST so we never leave a target pointing at a
+        // credential that's been removed. Removing then re-adding is
+        // also safe (the writes are independent), but reversing the
+        // order would briefly claim a target with two concurrent
+        // credentialId values, which can confuse the AI snapshot.
+        for (const id of toRemove) {
           await updateTarget.mutateAsync({
-            id: previousTarget.id,
+            id,
             patch: { credentialId: null },
           });
         }
-        // 2) Set the new binding (or clear it).
-        if (newTargetId) {
-          const next = targets.find((t) => t.id === newTargetId);
-          if (!next) {
-            toast.error("That target no longer exists.");
-            return;
-          }
-          // If the new target was bound to a different secret, that binding
-          // is replaced — same contract as on creation. We just write the
-          // new credentialId; Blocks will hold the latest value.
+        for (const id of toAdd) {
+          // If the new target was bound to a different secret, that
+          // binding is replaced — same contract as on creation. Blocks
+          // holds the latest value.
           await updateTarget.mutateAsync({
-            id: newTargetId,
+            id,
             patch: { credentialId: secretId },
           });
         }
-        toast.success(
-          newTargetId
-            ? `${secret?.name ?? "Credential"} re-bound.`
-            : `${secret?.name ?? "Credential"} un-bound.`,
-        );
+        const name = secret?.name ?? "Credential";
+        if (nextSet.size === 0) {
+          const k = toRemove.length;
+          toast.success(
+            `${name} un-bound from ${k} target${k > 1 ? "s" : ""}.`,
+          );
+        } else if (toRemove.length === 0 && toAdd.length > 0) {
+          const k = toAdd.length;
+          toast.success(
+            `${name} bound to ${k} new target${k > 1 ? "s" : ""}.`,
+          );
+        } else {
+          const k = nextSet.size;
+          toast.success(
+            `${name} re-bound to ${k} target${k > 1 ? "s" : ""}.`,
+          );
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error("useIssueTracker.bindSecret failed:", err);
@@ -1425,6 +1482,7 @@ export function useIssueTracker() {
           fresh,
           setRun,
           persistDetectedIssue,
+          { projectId: activeEnv?.projectId ?? "", envSlug: activeEnv?.envSlug ?? "" },
           () => {
             mockCancelRef.current = null;
             toast.success("Verification complete.");
@@ -1668,6 +1726,7 @@ export function useIssueTracker() {
         run,
         filters,
         projects,
+        activeEnv,
       });
       // Give the model the last browser tool results — the AI call is
       // stateless per message, so this memory is the only way it can
@@ -1991,8 +2050,16 @@ export function useIssueTracker() {
           const environment: TargetEnvironment =
             (tool.input.environment as TargetEnvironment | undefined) ??
             "production";
+          // Env-scoped: refuse outside an active project env. Mirror of the
+          // hook-level `addTarget` check so the chat tool can't stamp an
+          // empty envSlug (which would silently mis-file the row).
+          if (!activeEnv) {
+            return "Skipped — open a project's environment before adding Issue Tracker targets.";
+          }
           try {
             await createTarget.mutateAsync({
+              projectId: activeEnv.projectId,
+              envSlug: activeEnv.envSlug,
               applicationName,
               url: parsed.toString(),
               environment,
@@ -2058,7 +2125,17 @@ export function useIssueTracker() {
             return `Skipped — target ${targetId} not found.`;
           }
           try {
-            const created = await addSecret({ name, email, password, targetId });
+            const created = await addSecret({
+              name,
+              email,
+              password,
+              // The chat-tool schema for create_secret still declares a
+              // single targetId (see chatTools.ts:171) — keep that
+              // contract intact by wrapping it in an array. The UI
+              // uses multi-binding via TargetSelect directly; the
+              // AI tool stays single-target for now.
+              targetIds: targetId ? [targetId] : undefined,
+            });
             return `Credential "${created.name}" created${
               targetId ? " and bound to its target" : ""
             }.`;
@@ -2106,7 +2183,11 @@ export function useIssueTracker() {
           if (targetId && !targets.some((x) => x.id === targetId)) {
             return `Skipped — target ${targetId} not found.`;
           }
-          await bindSecret(secretId!, targetId);
+          // The chat-tool schema for bind_secret still declares a single
+          // targetId (see chatTools.ts:280) — keep that contract intact
+          // by wrapping it in an array. The UI does multi-binding via
+          // TargetSelect directly; the AI tool stays single-target.
+          await bindSecret(secretId!, targetId ? [targetId] : []);
           return targetId
             ? `"${s.name}" bound to ${targets.find((t) => t.id === targetId)?.applicationName ?? targetId}.`
             : `"${s.name}" unbound.`;
@@ -2513,8 +2594,17 @@ export function useIssueTracker() {
           const credentialId =
             exactTwin?.credentialId ??
             (distinctCreds.size === 1 ? [...distinctCreds][0] : null);
+          // Synthetic in-memory target for a one-off live verify — never
+          // persisted to Blocks, but VerificationTarget.projectId /
+          // envSlug are required fields, so stamp them from the active
+          // env. When the chat tool fires outside an env (shouldn't be
+          // possible because the sidebar hides Issue Tracker entry
+          // points then) fall back to empty strings: the row is
+          // throwaway so a mis-file here is invisible.
           const synthetic: VerificationTarget = {
             id: liveId,
+            projectId: activeEnv?.projectId ?? "",
+            envSlug: activeEnv?.envSlug ?? "",
             applicationName: parsed.hostname.replace(/^www\./, ""),
             url: parsed.toString(),
             environment: "production",
@@ -2525,9 +2615,10 @@ export function useIssueTracker() {
           };
 
           // Optional scope override from the tool input; fall back to the
-          // user's currently-enabled scope.
+          // user's currently-enabled scope. The wire carries `string[]`
+          // because custom scopes pass through as arbitrary ids.
           const requestedScope = Array.isArray(tool.input.scope)
-            ? (tool.input.scope as VerificationCheckId[])
+            ? (tool.input.scope as string[])
             : scope;
 
           try {
@@ -2560,6 +2651,7 @@ export function useIssueTracker() {
                 fresh,
                 setRun,
                 persistDetectedIssue,
+                { projectId: activeEnv?.projectId ?? "", envSlug: activeEnv?.envSlug ?? "" },
                 () => {
                   mockCancelRef.current = null;
                   toast.success("Verification complete.");
@@ -2959,7 +3051,7 @@ Continue.`;
   // ──────────────────────────────────────────────────────────────────────────
   //  Scope
   // ──────────────────────────────────────────────────────────────────────────
-  const toggleScope = useCallback((id: VerificationCheckId) => {
+  const toggleScope = useCallback((id: string) => {
     setScope((cur) =>
       cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
     );
@@ -3163,10 +3255,20 @@ type PersistDetectedIssue = (
   runId: string,
 ) => Promise<void>;
 
+// Env scope stamped onto the synthetic issue `driveMockRun` discovers
+// late in the run. Empty strings when the mock fires outside a project
+// env (defensive — the chat-path refuses to start a verification
+// without an active env, but the mock path is reachable for tests).
+interface DriveMockScope {
+  projectId: string;
+  envSlug: string;
+}
+
 function driveMockRun(
   initial: VerificationRun,
   setRun: React.Dispatch<React.SetStateAction<VerificationRun>>,
   persistDetectedIssue: PersistDetectedIssue,
+  scope: DriveMockScope,
   onDone: () => void,
 ): () => void {
   let snapshot = initial;
@@ -3240,6 +3342,11 @@ function driveMockRun(
         ? `ISSUE-${firstApp.targetId}-${Date.now().toString(36)}`
         : `ISSUE-${String(Math.floor(Math.random() * 9000) + 1000)}`,
       title: "Newly discovered: console error on initial paint",
+      // Per-environment scoping — required fields on the Issue row.
+      // Stamped from the active env so the new finding lands in the
+      // same scoped view the user is browsing on the Issue Tracker.
+      projectId: scope.projectId,
+      envSlug: scope.envSlug,
       applicationName: firstApp?.applicationName ?? "Unverified application",
       url: firstApp?.targetId
         ? ""

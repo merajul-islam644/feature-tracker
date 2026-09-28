@@ -22,10 +22,15 @@ export function ProjectsPage() {
   const { data: counts } = useProjectsDevCounts();
   const viewMode = useProjectsViewStore((s) => s.mode);
   const t = useT();
-  // Testers can browse existing environments but cannot add new ones. The
-  // hook itself enforces this — see `useAddProjectEnv` in `hooks.ts` —
-  // but hiding the CTA keeps the page honest about what a tester can do.
-  const isTester = useIsRole("tester");
+  // Project-domain mutations (create project, add environment) are
+  // manager-only. Developers and testers can browse existing projects,
+  // but cannot author new ones. The matching mutation hooks enforce
+  // this server-side (see `useAddProjectEnv` / `useCreateProject` in
+  // `hooks.ts`) — hiding the CTAs here is the UI half of the
+  // defense-in-depth pattern, and keeps the page honest about what a
+  // non-manager can do. Pattern mirrors `MembersPage` / `AnnouncementsPanel`,
+  // which both gate manager-only surfaces on `useIsRole("manager")`.
+  const isManager = useIsRole("manager");
   const [createOpen, setCreateOpen] = useState(false);
   const [addEnvOpen, setAddEnvOpen] = useState(false);
   // Filter is session-local — no persistence. The user typed query is
@@ -59,7 +64,7 @@ export function ProjectsPage() {
           right. The actions cluster is a single row: filter input
           leftmost, then ViewToggle (a "global" control that affects
           the whole list), then Add Environment, then Create Project.
-          Tester hider applies to the buttons only — the toggle and
+          Manager hider applies to the buttons only — the toggle and
           the filter are visible to everyone (both only touch
           localStorage / component state, no network or mutation). */}
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -112,7 +117,7 @@ export function ProjectsPage() {
               />
             </div>
             <ViewToggle />
-            {!isTester && (
+            {isManager && (
               <>
                 <Button
                   variant="outline"

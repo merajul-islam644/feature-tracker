@@ -15,9 +15,12 @@
 // chip strip. Rows with ≤4 envs sit at exactly 56px, matching the
 // skeleton.
 //
-// Tester role gating: kebab uses `RowKebabMenu`'s `readOnly` mode so
-// testers see only "Project Details"; rename/delete hooks are still
-// reachable via the mutation hooks' own role check (defense in depth).
+// Manager role gating: kebab uses `RowKebabMenu`'s `readOnly` mode so
+// non-managers (developers / testers) see only "Project Details";
+// rename/delete hooks are still reachable via the mutation hooks'
+// own role check (defense in depth). Mirrors ProjectCard's
+// `useIsRole("manager")` gate so the card and row layouts render the
+// same menu for the same role.
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -73,7 +76,7 @@ function ProjectListRow({
   const navigate = useNavigate();
   const { formatRelativeTime } = useLocale();
   const t = useT();
-  const isTester = useIsRole("tester");
+  const isManager = useIsRole("manager");
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -132,7 +135,7 @@ function ProjectListRow({
       </span>
       <RowKebabMenu
         ariaLabel={t("projectCard.menu", "Project actions")}
-        readOnly={isTester}
+        readOnly={!isManager}
         viewDetailsLabel={t("projectCard.details", "Project Details")}
         onViewDetails={() => navigate(`/projects/${project.id}/info`)}
         renameLabel={t("projectCard.rename", "Rename")}

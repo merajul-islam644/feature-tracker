@@ -1,11 +1,14 @@
 // Wrapper for the Secrets section (spec section 12): empty state, list of
 // saved credentials, and the add form.
 //
-// The form shows a target-binding dropdown so the user can pick exactly one
-// configured verification target to bind the credential to at creation time.
-// Binding is enforced server-side too — only one credential can be active
-// per target — so if the user picks an already-bound target, the existing
-// binding is replaced.
+// The form shows a target-binding dropdown so the user can pick one or more
+// configured verification targets to bind the credential to at creation
+// time. Each target has at most one credential, but a single credential
+// can be reused across many targets — so "pick all that apply" semantics
+// make sense here. The orchestration layer turns the selected set into
+// a diff-based N PATCHes against target.credentialId (see `bindSecret`
+// in `useIssueTracker` — the function name stays the same; the body
+// now handles the N-target case via toAdd/toRemove).
 
 import { useMemo, useState } from "react";
 import { ShieldCheck } from "lucide-react";
@@ -22,13 +25,19 @@ interface Props {
     name: string;
     email: string;
     password: string;
-    targetId?: string;
+    // Optional array of targetIds — multi-binding is supported. Empty
+    // array / undefined = "no binding at creation time". The parent
+    // computes the diff (which is always "bind all" for a brand-new
+    // secret) and dispatches one PATCH per added target.
+    targetIds?: string[];
   }) => Promise<void>;
   onEdit: (id: string, patch: { name: string; email: string }) => void;
   onDelete: (id: string) => void;
-  // Re-bind a saved secret to a different target (or clear the binding by
-  // passing empty string). Receives the secretId and the new targetId.
-  onBind: (secretId: string, targetId: string | null) => void;
+  // Re-bind a saved secret to a (possibly different) set of targets.
+  // Empty array means "unbind from everything". The parent computes
+  // the diff against the previous set and dispatches only the
+  // changed targets.
+  onBind: (secretId: string, targetIds: string[]) => void;
 }
 
 export function SecretsPanel({
@@ -88,6 +97,10 @@ export function SecretsPanel({
                 <SecretCard
                   secret={s}
                   targets={targets}
+                  // Same map the add-form passes to its dropdown —
+                  // built once at the panel level and reused so the
+                  // badge never drifts between the two surfaces.
+                  boundSecretByTargetId={boundSecretByTargetId}
                   onEdit={onEdit}
                   onDelete={onDelete}
                   onBind={onBind}

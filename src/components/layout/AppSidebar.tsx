@@ -1,26 +1,22 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import type { LucideIcon } from "lucide-react";
-import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   FolderKanban,
-  ShieldAlert,
   PanelLeftClose,
   PanelLeftOpen,
-  FolderTree,
   MessageSquare,
-  PlayCircle,
   Settings as SettingsIcon,
   Contact,
-  LogOut,
   NotebookPen,
-  ChevronRight,
   Globe,
   KeyRound,
   ListChecks,
   Activity,
   History,
   AlertCircle,
+  LayoutGrid,
 } from "lucide-react";
 import {
   Sidebar,
@@ -32,172 +28,298 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { UserAvatar } from "@/components/ui/UserAvatar";
-import { useAuth } from "@/hooks/useAuth";
-import { useLocale, useT } from "@/lib/blocks/i18n";
+import { useAuth, useIsRole } from "@/hooks/useAuth";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
+import { useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 
 // `useT` looks up against the loaded `common` module. Nav items map onto
-// the `nav.*` namespace. The sidebar supports two shapes of nav item:
-//   - `link`: a normal route entry that highlights when its path is
-//     the current pathname (with the existing startsWith carve-out for
-//     parent routes like `/projects` and `/notepad`).
-//   - `group`: a collapsible parent that has no route of its own —
-//     clicking it only toggles its children's visibility. The
-//     Issue Tracker group is the first user of this shape; if more
-//     groups get added later, promote `expanded` to a
-//     `Record<string, boolean>` keyed on `group.key`.
+// the `nav.*` namespace. The sidebar supports one shape of nav item:
+//   - `link`: a normal route entry that highlights when its path is the
+//     current pathname (with the existing startsWith carve-out for parent
+//     routes like `/projects` and `/notepad`, and a custom `activeMatch`
+//     predicate for rows whose "selected" state spans more than one
+//     route — e.g. Features is highlighted on BOTH the env landing
+//     `/projects/X/Y` AND the dedicated page `/projects/X/Y/features`).
+//
+// Two optional flags narrow which links show for which audience:
+//
+//   - `envOnly`: true on rows that are scoped to a project env. The
+//     sidebar gate hides them off-env and shows them on-env (replacing
+//     the global nav, see the env-context block below).
+//
+//   - `devAllowKey`: key used to filter Issue Tracker sub-surfaces for
+//     the developer role. When set on an `envOnly` row, the developer
+//     sees only the row whose key matches theirs — e.g. "issues" — so
+//     they don't get visual noise from QA- / manager-driven surfaces
+//     (targets / secrets / scope / panel / run history). Features has
+//     no `devAllowKey` (visible to all roles).
 export function AppSidebar() {
   const t = useT();
   const location = useLocation();
+  // Developer role narrows the Issue Tracker surface down to just the
+  // Issues row. The verification / secret / panel workflows are driven
+  // by the manager + tester roles — developers author features and
+  // flows but don't drive verifications, so showing them the full
+  // surface would be visual noise. The flag is consumed in the
+  // flatMap below.
+  const isDeveloper = useIsRole("developer");
 
-  type NavItem =
-    | {
-        kind: "link";
-        to: string;
-        label: string;
-        icon: LucideIcon;
-      }
-    | {
-        kind: "group";
-        key: string;
-        label: string;
-        icon: LucideIcon;
-        children: {
-          key: string;
-          label: string;
-          to?: string;
-          icon?: LucideIcon;
-        }[];
-      };
+  // Active env context — the source of truth for "which project's env
+  // am I scoped to". The Features link below consumes this to build
+  // its `to` URL (`/projects/X/Y/features`).
+  //
+  // We also derive `(projectId, envSlug)` straight from the URL as a
+  // fallback — `useActiveEnv` is populated by `ProjectDetailPage` /
+  // `FeaturesPage` on mount, but there is a brief render window on
+  // first navigation where the context hasn't caught up yet (the
+  // page component just mounted but its effect hasn't run). Without
+  // the URL fallback, the Features link flickers or stays missing on
+  // direct deep-links. The URL parse is cheap and the regex below
+  // matches the same paths the env-context gate cares about.
+  const activeEnv = useActiveEnv();
+  const envFromUrl = useMemo(() => {
+    const m = location.pathname.match(
+      /^\/projects\/([^/]+)\/([^/]+)(?:\/features)?\/?$/,
+    );
+    if (!m) return null;
+    if (m[2] === "info") return null;
+    return { projectId: m[1], envSlug: m[2] };
+    // Re-derive on every pathname change.
+  }, [location.pathname]);
+  // Prefer the URL — it's synchronously available on every render,
+  // including the very first. Fall back to the context for the
+  // Issue Tracker sub-routes where the env is active but the URL
+  // doesn't carry the (projectId, envSlug) pair.
+  const effectiveEnv = envFromUrl ?? activeEnv;
 
-  const navItems: NavItem[] = [
+  type NavItem = {
+    kind: "link";
+    to: string;
+    label: string;
+    icon: LucideIcon;
+    // Issue Tracker sub-surfaces (Targets, Secrets, Scopes, Panel,
+    // Run History, Issues) and the Features link all share one
+    // constraint: they're scoped to a project env. The same flag
+    // covers all of them so the render pipe doesn't have to
+    // special-case by `to`. Tagging instead of route-keying keeps the
+    // rule self-documenting at the definition site.
+    envOnly?: boolean;
+    // Used by the developer narrowing — when `envOnly` and the user
+    // is on a developer role, the row is kept only if its key appears
+    // in this set. Without a key the row is dropped alongside the
+    // others (developer sees their role-appropriate subset of Issue
+    // Tracker surfaces — "issues" only today). The Features link
+    // carries no key on purpose; it uses `allRoles: true` instead
+    // (see below) so the developer narrowing doesn't have to
+    // special-case by absence-of-key.
+    devAllowKey?: string;
+    // Bypass the developer narrowing — when `true`, the row stays
+    // visible to every role regardless of `devAllowKey`. Used by the
+    // Features link so developers see it alongside their Issues row.
+    allRoles?: boolean;
+    // Custom active-state matcher for rows whose "selected" state
+    // spans more than one route. When unset, the default predicate
+    // applies:
+    //   - /projects and /notepad use startsWith for parent-route
+    //     highlight;
+    //   - everything else uses === pathname match.
+    activeMatch?: (pathname: string) => boolean;
+  };
+
+  // Issue Tracker sub-surfaces as flat top-level links. Each row is
+  // `envOnly`, so the env-context gate below hides all six together
+  // when the user is off-env and shows them together when they're
+  // inside a project env — no parent collapsible to click. The
+  // grouping still exists conceptually (data hooks, AI snapshot,
+  // i18n namespace `nav.issueTracker.*`) but the sidebar reflects the
+  // user-facing flatten: each surface is its own nav row, top-level,
+  // with its own active-state highlight on deep-link.
+  const issueTrackerSurface: NavItem[] = [
     {
       kind: "link",
-      to: "/dashboard",
-      label: t("nav.dashboard", "Dashboard"),
-      icon: LayoutDashboard,
-    },
-    {
-      kind: "link",
-      to: "/projects",
-      label: t("nav.projects", "Projects"),
-      icon: FolderKanban,
-    },
-    {
-      kind: "group",
-      key: "issue-tracker",
-      label: t("nav.issueTracker", "Issue Tracker"),
-      icon: ShieldAlert,
-      children: [
-        {
-          key: "targets",
-          to: "/issue-tracker/targets",
-          icon: Globe,
-          label: t(
-            "nav.issueTracker.targets",
-            "Verification Targets",
-          ),
-        },
-        {
-          key: "secrets",
-          to: "/issue-tracker/secrets",
-          icon: KeyRound,
-          label: t(
-            "nav.issueTracker.secrets",
-            "Verification Secrets",
-          ),
-        },
-        {
-          key: "scope",
-          to: "/issue-tracker/scope",
-          icon: ListChecks,
-          label: t("nav.issueTracker.scope", "Verification Scopes"),
-        },
-        {
-          key: "panel",
-          to: "/issue-tracker/panel",
-          icon: Activity,
-          label: t(
-            "issueTracker.panel.title",
-            "Verification Panel",
-          ),
-        },
-        {
-          key: "history",
-          to: "/issue-tracker/history",
-          icon: History,
-          label: t(
-            "issueTracker.history.title",
-            "Run History",
-          ),
-        },
-        {
-          key: "issues",
-          to: "/issue-tracker/issues",
-          icon: AlertCircle,
-          label: t(
-            "issueTracker.issues.title",
-            "Issues",
-          ),
-        },
-      ],
+      to: "/issue-tracker/targets",
+      label: t("nav.issueTracker.targets", "Verification Targets"),
+      icon: Globe,
+      envOnly: true,
     },
     {
       kind: "link",
-      to: "/chat",
-      label: t("nav.chat", "Message"),
-      icon: MessageSquare,
+      to: "/issue-tracker/secrets",
+      label: t("nav.issueTracker.secrets", "Verification Secrets"),
+      icon: KeyRound,
+      envOnly: true,
     },
     {
       kind: "link",
-      to: "/notepad",
-      label: t("nav.notepad", "Notepad"),
-      icon: NotebookPen,
+      to: "/issue-tracker/scope",
+      label: t("nav.issueTracker.scope", "Verification Scopes"),
+      icon: ListChecks,
+      envOnly: true,
     },
     {
       kind: "link",
-      to: "/members",
-      label: t("nav.members", "Members"),
-      icon: Contact,
+      to: "/issue-tracker/panel",
+      label: t("issueTracker.panel.title", "Verification Panel"),
+      icon: Activity,
+      envOnly: true,
     },
     {
       kind: "link",
-      to: "/settings",
-      label: t("nav.settings", "Settings"),
-      icon: SettingsIcon,
+      to: "/issue-tracker/history",
+      label: t("issueTracker.history.title", "Run History"),
+      icon: History,
+      envOnly: true,
     },
-    // {
-    //   to: "/repo-browser",
-    //   label: t("nav.repoBrowser", "Repo Browser"),
-    //   icon: FolderTree,
-    // },
-    // {
-    //   to: "/test-runner",
-    //   label: t("nav.testRunner", "Test Runner"),
-    //   icon: PlayCircle,
-    // },
+    {
+      kind: "link",
+      to: "/issue-tracker/issues",
+      label: t("issueTracker.issues.title", "Issues"),
+      icon: AlertCircle,
+      envOnly: true,
+      // Developer role: keep only the Issues surface among the Issue
+      // Tracker rows. The rest (Targets / Secrets / Scopes / Panel /
+      // Run History) are QA/manager-driven — a developer author sees
+      // them as visual noise.
+      devAllowKey: "issues",
+    },
   ];
 
-  // The Issue Tracker group is the only collapsible entry today. When
-  // other groups get added, lift this to `Record<string, boolean>`
-  // keyed on `group.key` so they each remember their own state.
-  const [issueTrackerOpen, setIssueTrackerOpen] = useState(false);
+  // Features link — top of the env-only nav (user requirement:
+  // "shobar upor"). Plain link, no children. Clicking it navigates
+  // to `/projects/X/Y/features` which renders `FeaturesPage` — the
+  // dedicated single-page view that lists every feature authored
+  // under the active env. Built only when `activeEnv` is set; off-env
+  // the env-only gate filters it out anyway.
+  //
+  // Active-by-default on the env landing AND on the dedicated page:
+  // when the user lands on `/projects/X/Y` (env detail) the Features
+  // row is already highlighted, matching the user's "by default
+  // selected থাকবে" requirement. Issue Tracker sub-routes do NOT
+  // light up the Features row — they're a separate context. The
+  // `/projects/X/info` route is excluded (project metadata, not an
+  // env context).
+  const featuresLink: NavItem | null = effectiveEnv
+    ? {
+        kind: "link",
+        to: `/projects/${effectiveEnv.projectId}/${effectiveEnv.envSlug}/features`,
+        label: t("nav.features", "Features"),
+        icon: LayoutGrid,
+        envOnly: true,
+        // Visible to every role — developers see Features alongside
+        // their Issues row. Without this flag the developer
+        // narrowing would drop Features (since it has no
+        // `devAllowKey` to match "issues").
+        allRoles: true,
+        activeMatch: (pathname) => {
+          const m = pathname.match(
+            /^\/projects\/([^/]+)\/([^/]+)(\/features)?\/?$/,
+          );
+          if (!m) return false;
+          if (m[3] === "/features") return true;
+          return m[2] !== "info";
+        },
+      }
+    : null;
 
-  // Auto-open the group when the user is on (or navigates to) the
-  // Issue Tracker page so deep-linking to `/issue-tracker*` always
-  // shows the children the user came looking for. Re-runs on each
-  // pathname change to keep deep links in a consistent state.
-  const isOnIssueTracker = location.pathname.startsWith("/issue-tracker");
-  useEffect(() => {
-    if (isOnIssueTracker) setIssueTrackerOpen(true);
-  }, [isOnIssueTracker]);
+  // Flat list rendered top-to-bottom inside the sidebar. The Features
+  // link sits at the very top of the on-env nav. Off-env, `envOnly:
+  // true` rows are filtered out by the gate below — so off-env still
+  // shows the same global nav as before, with Features nowhere on the
+  // page.
+  //
+  // The order is rebuilt on every render via `useMemo` keyed on the
+  // inputs that affect it (`activeEnv` for the Features link's
+  // existence, `t` for the i18n labels).
+  const navItems: NavItem[] = useMemo(() => {
+    return [
+      ...(featuresLink ? [featuresLink] : []),
+      {
+        kind: "link" as const,
+        to: "/dashboard",
+        label: t("nav.dashboard", "Dashboard"),
+        icon: LayoutDashboard,
+      },
+      {
+        kind: "link" as const,
+        to: "/projects",
+        label: t("nav.projects", "Projects"),
+        icon: FolderKanban,
+      },
+      ...issueTrackerSurface,
+      {
+        kind: "link" as const,
+        to: "/chat",
+        label: t("nav.chat", "Message"),
+        icon: MessageSquare,
+      },
+      {
+        kind: "link" as const,
+        to: "/notepad",
+        label: t("nav.notepad", "Notepad"),
+        icon: NotebookPen,
+      },
+      {
+        kind: "link" as const,
+        to: "/members",
+        label: t("nav.members", "Members"),
+        icon: Contact,
+      },
+      {
+        kind: "link" as const,
+        to: "/settings",
+        label: t("nav.settings", "Settings"),
+        icon: SettingsIcon,
+      },
+    ];
+    // `featuresLink` is derived from `activeEnv`; `t` is the i18n
+    // translator. Re-runs when either changes. The Issue Tracker
+    // sub-surface is intentionally not a dependency — its labels are
+    // stable per `t` and its members don't depend on env.
+  }, [activeEnv, t, featuresLink, issueTrackerSurface]);
+
+  // Issue Tracker only exists inside a project environment — clicking
+  // an env chip on a project card lands on `/projects/:id/:envSlug`,
+  // and that's the only context where its data (targets / secrets /
+  // scope / panel / history / issues) is scoped. The sidebar reacts
+  // in two directions:
+  //
+  //   * Off-env (the user is on Dashboard, /projects, /chat, …):
+  //     `envOnly` rows hide entirely. Their data hooks refuse to act
+  //     outside an env anyway, so leaving them visible would invite
+  //     a dead-end click.
+  //   * On-env (the user is inside `/projects/:id/:envSlug` or an
+  //     `/issue-tracker/*` sub-route): the global nav collapses down
+  //     to the env-only surface only. Dashboard / Projects / Message /
+  //     Notepad / Members / Settings all bypass the env scope or
+  //     duplicate the env-free experience, so showing them alongside
+  //     Issue Tracker / Features would be both context-noise and an
+  //     invitation to leave the env unintentionally. The brand logo
+  //     at the top of the sidebar (links to /dashboard) stays visible
+  //     as the escape hatch.
+  //
+  // We treat TWO url shapes as "env context active":
+  //   1. `/projects/:id/:envSlug...` — the user is on a project env
+  //      page. The env slug is the path segment count >= 3 (split
+  //      strips the leading slash). The literal `info` segment is
+  //      excluded — `/projects/X/info` is project metadata, not an
+  //      env landing, and should show the global nav.
+  //   2. `/issue-tracker/*` — the user is inside the Issue Tracker
+  //      surface, which is only reachable from an env context.
+  //
+  // Reading straight from the URL avoids a new context provider for
+  // this visibility-only signal; the env slug remains the single
+  // source of truth.
+  const segments = location.pathname.split("/").filter(Boolean);
+  const envContextActive =
+    (location.pathname.startsWith("/projects/") &&
+      segments.length >= 3 &&
+      segments[2] !== "info") ||
+    location.pathname.startsWith("/issue-tracker");
 
   return (
     <Sidebar collapsible="icon" variant="sidebar">
@@ -221,18 +343,62 @@ export function AppSidebar() {
             <NavToggle />
           </SidebarGroupLabel>
           <SidebarMenu>
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              // Keep the parent route highlighted on detail pages
-              // (e.g. /projects/:id should highlight "Project",
-              // /notepad/text should highlight "Notepad").
-              const isActive =
-                item.kind === "link" &&
-                (item.to === "/projects" || item.to === "/notepad"
-                  ? location.pathname.startsWith(item.to)
-                  : location.pathname === item.to);
+            {/*
+              Off-env: keep the global nav, hide `envOnly` rows
+              (Features + Issue Tracker sub-surfaces). Their data
+              hooks refuse to act outside an env and would land the
+              user on an empty panel.
 
-              if (item.kind === "link") {
+              On-env: collapse the navigation down to the env-only
+              surface ONLY. The rest of the global nav (Dashboard /
+              Projects / Message / Notepad / Members / Settings) becomes
+              contextual noise. Brand logo at the top stays visible as
+              the escape hatch.
+
+              Developer narrowing: on-env, when the user is on the
+              developer role, keep only the Issue Tracker row whose
+              `devAllowKey` matches the developer surface ("issues").
+              Features is kept (no narrowing — visible to all roles per
+              the user's explicit requirement).
+            */}
+            {navItems
+              .filter((item) => {
+                if (envContextActive) {
+                  if (!item.envOnly) return false;
+                  // Developer narrowing on env: keep rows that opt in
+                  // for every role (`allRoles: true` — currently the
+                  // Features link) and rows whose `devAllowKey`
+                  // matches the developer surface ("issues"). Every
+                  // other env-scoped row (Targets, Secrets, Scope,
+                  // Panel, History) drops because they are
+                  // QA/manager-driven.
+                  if (
+                    isDeveloper &&
+                    item.kind === "link" &&
+                    !item.allRoles &&
+                    item.devAllowKey !== "issues"
+                  ) {
+                    return false;
+                  }
+                  return true;
+                }
+                return !item.envOnly;
+              })
+              .map((item) => {
+                const Icon = item.icon;
+                // Custom active matcher wins when set — used by the
+                // Features link so it highlights on BOTH the env
+                // landing and the dedicated /features route. Default
+                // predicate applies for everything else:
+                //   - /projects and /notepad use startsWith for
+                //     parent-route highlight;
+                //   - everything else uses === pathname match.
+                const isActive = item.activeMatch
+                  ? item.activeMatch(location.pathname)
+                  : item.to === "/projects" || item.to === "/notepad"
+                    ? location.pathname.startsWith(item.to)
+                    : location.pathname === item.to;
+
                 return (
                   <SidebarMenuItem key={item.to}>
                     <SidebarMenuButton
@@ -261,122 +427,7 @@ export function AppSidebar() {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 );
-              }
-
-              // `kind: "group"` — collapsible parent. No NavLink on the
-              // parent itself: clicking it toggles the sub-menu and
-              // does NOT navigate. The button still uses the same
-              // hover/active background as a regular item so the
-              // chevron affordance reads as part of the row, not as a
-              // separate control.
-              const groupActive = isOnIssueTracker;
-              return (
-                <SidebarMenuItem key={item.key}>
-                  <SidebarMenuButton
-                    tooltip={item.label}
-                    isActive={groupActive}
-                    onClick={() => setIssueTrackerOpen((v) => !v)}
-                    aria-expanded={issueTrackerOpen}
-                  >
-                    <Icon
-                      aria-hidden="true"
-                      className={
-                        groupActive
-                          ? "text-sidebar-accent-foreground"
-                          : "text-sidebar-foreground/70"
-                      }
-                    />
-                    <span>{item.label}</span>
-                    <ChevronRight
-                      aria-hidden="true"
-                      className={cn(
-                        "ml-auto h-4 w-4 transition-transform",
-                        // Rotated 90° when open — mirrors the
-                        // apps-website folder convention so the cue
-                        // reads at a glance.
-                        issueTrackerOpen && "rotate-90",
-                      )}
-                    />
-                  </SidebarMenuButton>
-
-                  {issueTrackerOpen && (
-                    <SidebarMenuSub>
-                      {item.children.map((child) => {
-                        // Children with a `to` route via `NavLink` and
-                        // pick up active styling when their path is the
-                        // current pathname. Children without a `to`
-                        // remain visual-only placeholders for sections
-                        // that haven't been split into routes yet.
-                        //
-                        // Icons render before the label. The
-                        // `SidebarMenuSubButton` primitive applies
-                        // `[&>svg]:text-sidebar-accent-foreground`
-                        // unconditionally to any direct `<svg>`
-                        // descendant, so even an idle row gets an icon
-                        // painted in the accent-foreground colour
-                        // (which only reads against the hover/active
-                        // background, not against the default
-                        // sidebar background, so idle icons effectively
-                        // disappear).
-                        //
-                        // To override that we can't just pass
-                        // `text-sidebar-foreground/70` on the icon —
-                        // CSS class strings don't pierce into a tag
-                        // child from className alone. Instead we attach
-                        // a descendant selector on the wrapper that
-                        // reaches the SVG: `[&>svg]:text-sidebar-foreground/70`
-                        // for idle rows, `[&>svg]:text-sidebar-accent-foreground`
-                        // for active. Same rule as the parent nav rows
-                        // (muted when idle, accent-foreground when
-                        // active) so the visual language is consistent.
-                        const Icon = child.icon;
-                        if (child.to) {
-                          const childActive =
-                            location.pathname === child.to ||
-                            location.pathname.startsWith(`${child.to}/`);
-                          return (
-                            <SidebarMenuSubItem key={child.key}>
-                              <SidebarMenuSubButton
-                                size="sm"
-                                asChild
-                                isActive={childActive}
-                                className={
-                                  childActive
-                                    ? "[&>svg]:text-sidebar-accent-foreground"
-                                    : "[&>svg]:text-sidebar-foreground/70"
-                                }
-                              >
-                                <NavLink to={child.to}>
-                                  {Icon && <Icon aria-hidden="true" />}
-                                  <span>{child.label}</span>
-                                </NavLink>
-                              </SidebarMenuSubButton>
-                            </SidebarMenuSubItem>
-                          );
-                        }
-                        return (
-                          <SidebarMenuSubItem key={child.key}>
-                            <SidebarMenuSubButton
-                              size="sm"
-                              asChild
-                              aria-disabled="true"
-                              // Same descendant rule: muted foreground
-                              // for the disabled placeholder row.
-                              className="[&>svg]:text-sidebar-foreground/70"
-                            >
-                              <span>
-                                {Icon && <Icon aria-hidden="true" />}
-                                {child.label}
-                              </span>
-                            </SidebarMenuSubButton>
-                          </SidebarMenuSubItem>
-                        );
-                      })}
-                    </SidebarMenuSub>
-                  )}
-                </SidebarMenuItem>
-              );
-            })}
+              })}
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>

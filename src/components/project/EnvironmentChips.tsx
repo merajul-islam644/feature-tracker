@@ -17,6 +17,7 @@
 // Both modes share the same chip styling, the same overflow trigger,
 // and the same dropdown markup so the two surfaces stay in sync.
 
+import { forwardRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   DropdownMenu,
@@ -148,22 +149,56 @@ export function EnvironmentChips({
 // Renders a single env chip in either interactive (`mode="link"`) or
 // decorative (`mode="static"`) form. Keeps the styling identical
 // between inline and overflow so the two surfaces look the same.
-function EnvChipButton({
-  env,
-  mode,
-  onActivate,
-}: {
-  env: EnvChip;
-  mode: "link" | "static";
-  onActivate?: () => void;
-}) {
+//
+// `forwardRef` is load-bearing here: the overflow path renders the chip
+// inside `<DropdownMenuItem asChild>`, which uses Radix's `Slot` to
+// merge its event handlers (including `onSelect`) onto the immediate
+// child via a ref. Without `forwardRef`, React warns
+// "Function components cannot be given refs" and the ref never lands
+// on the inner `<button>` — Radix's `onSelect` never fires, so clicks
+// on overflow chips did nothing (verified 2026-09-27: manager added
+// custom env, clicked chip in the +N dropdown, nothing happened;
+// console showed the Slot/ref warning with `EnvChipButton` in the
+// stack). The inline path works regardless because it wires `onClick`
+// directly via the `onActivate` prop — but `forwardRef` doesn't hurt
+// the inline path either. `HTMLAttributes<HTMLButtonElement>` is
+// spread on the inner button so callers (Radix, parent buttons) can
+// pass through arbitrary DOM props.
+const EnvChipButton = forwardRef<
+  HTMLButtonElement,
+  {
+    env: EnvChip;
+    mode: "link" | "static";
+    onActivate?: () => void;
+  } & React.ButtonHTMLAttributes<HTMLButtonElement>
+>(function EnvChipButton(
+  { env, mode, onActivate, className: passedClassName, ...rest },
+  ref,
+) {
   const t = useT();
 
+  // Merge the slot-injected className (e.g. DropdownMenuItem's
+  // `cursor-default …` on the overflow path) WITH the chip's own
+  // classes. Order matters here: `cn()` runs tailwind-merge which
+  // dedupes conflicting utilities and keeps the LAST one in the
+  // argument list. If `passedClassName` comes after `cursor-pointer`,
+  // tailwind-merge drops our `cursor-pointer` in favour of the
+  // parent's `cursor-default` — verified 2026-09-27: chips in the +N
+  // dropdown showed `cursor: default` despite both classes being
+  // passed. Putting `passedClassName` FIRST means our chip's
+  // `cursor-pointer` (and `rounded-full` / `text-xs` / etc.) are the
+  // last occurrence, so they win the dedupe.
   const className = cn(
+    passedClassName,
     "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium transition-colors",
     env.kind === "canonical"
       ? `${env.className} hover:brightness-95 active:brightness-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`
       : "border-transparent hover:brightness-95 active:brightness-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+    // `<button type="button">` doesn't get `cursor: pointer` by default
+    // (only `<a href>` does), so the link-mode chips need it explicitly.
+    // Without this the chips looked non-interactive even though clicks
+    // worked after the forwardRef fix.
+    mode === "link" && "cursor-pointer",
   );
 
   const style =
@@ -180,12 +215,14 @@ function EnvChipButton({
   if (mode === "link") {
     return (
       <button
+        ref={ref}
         type="button"
         onClick={onActivate}
         aria-label={ariaLabel}
         className={className}
         style={style}
         title={env.label}
+        {...rest}
       >
         {env.label}
       </button>
@@ -196,4 +233,4 @@ function EnvChipButton({
       {env.label}
     </span>
   );
-}
+});

@@ -23,7 +23,10 @@ interface Props {
   targets: VerificationTarget[];
   draftUrl: string;
   draftError: string | null;
+  draftName: string;
+  draftNameError: string | null;
   onDraftChange: (value: string) => void;
+  onDraftNameChange: (value: string) => void;
   onAddDraft: () => void;
   onRemoveTarget: (id: string) => void;
   onToggleEnabled: (id: string, enabled: boolean) => void;
@@ -42,7 +45,10 @@ export function VerificationTargets({
   targets,
   draftUrl,
   draftError,
+  draftName,
+  draftNameError,
   onDraftChange,
+  onDraftNameChange,
   onAddDraft,
   onRemoveTarget,
   onToggleEnabled,
@@ -99,20 +105,65 @@ export function VerificationTargets({
         )}
 
         <div className="space-y-2 border-t border-border pt-3">
-          <UrlInput
-            id="draft"
-            value={draftUrl}
-            error={inlineError}
-            onChange={onDraftChange}
-            onRemove={() => onDraftChange("")}
-            canRemove={canAdd && draftUrl.length > 0}
-          />
+          {/* Display name + URL side by side, mirroring the inline
+              edit form's own 1fr/2fr grid (`grid-cols-[minmax(0,1fr)_minmax(0,2fr)]`).
+              Display name is required: it appears at the top of every
+              row in the list and is the human-readable label Claude
+              refers to in the verify output. The form mirrors the edit
+              form's UX so the user can predict the field layout
+              before clicking Save. */}
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+            <div className="space-y-1">
+              <label
+                htmlFor="draft-name"
+                className="text-xs font-medium text-muted-foreground"
+              >
+                Display name
+              </label>
+              <Input
+                id="draft-name"
+                value={draftName}
+                onChange={(e) => onDraftNameChange(e.target.value)}
+                aria-invalid={!!draftNameError}
+                placeholder="My App"
+                className={
+                  draftNameError
+                    ? "border-destructive focus-visible:ring-destructive"
+                    : undefined
+                }
+              />
+              {draftNameError && (
+                <p className="text-xs text-destructive">{draftNameError}</p>
+              )}
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor="draft-url"
+                className="text-xs font-medium text-muted-foreground"
+              >
+                Application URL
+              </label>
+              <UrlInput
+                id="draft-url"
+                value={draftUrl}
+                error={inlineError}
+                onChange={onDraftChange}
+                onRemove={() => onDraftChange("")}
+                canRemove={canAdd && draftUrl.length > 0}
+              />
+            </div>
+          </div>
           <Button
             type="button"
             variant="outline"
             size="sm"
             onClick={onAddDraft}
-            disabled={!canAdd || !!inlineError || !draftUrl.trim()}
+            disabled={
+              !canAdd ||
+              !!inlineError ||
+              !draftUrl.trim() ||
+              !draftName.trim()
+            }
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
             Add URL

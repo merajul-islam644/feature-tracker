@@ -43,8 +43,8 @@ export function SecretsPage() {
         }}
         onEdit={(id, patch) => void editSecret(id, patch)}
         onDelete={deleteSecret}
-        onBind={async (secretId, targetId) => {
-          await bindSecret(secretId, targetId);
+        onBind={async (secretId, targetIds) => {
+          await bindSecret(secretId, targetIds);
         }}
       />
     </div>

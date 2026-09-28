@@ -14,6 +14,16 @@
 //      itself must always succeed regardless of notification backend
 //      health.
 //
+//   1a. Actor exclusion. Both surfaces filter the actor's own id
+//      out of the recipient list before writing — a tester who
+//      creates a flow shouldn't get a notification about their own
+//      action. The actor id comes from `payload.actorId` (and
+//      `input.actorId` on the assigned-feature surface) which every
+//      call site already populates from `useAuth().currentUser.id`.
+//      Callers that deliberately want the actor in the inbox (none
+//      today) would need to opt back in — keep that as a future
+//      `includeActor` param if it ever comes up.
+//
 //   2. `useNotificationInbox()` — TanStack Query-backed inbox for the
 //      signed-in user. Polls `notificationsCollection.list({ filter:
 //      { userId: me } })` every 5 s, sorts newest-first, returns
@@ -106,9 +116,17 @@ export const RECIPIENTS_BY_ROLE: Record<string, readonly string[]> = {
     "4832284e-9219-42d5-bd2a-4d60dd30a3e8",
     "9890d32d-c956-429d-88d7-cce465824fe5",
   ],
-  // Manager role intentionally has no recipients — managers see
-  // their own actions reflected in the project list and don't need
-  // to be notified.
+  // Managers — populated per the user request dated 2026-09-27: a
+  // tester/dev creating a flow should notify "everyone except the
+  // actor", which means testers' + developers' + managers' recipient
+  // lists all need to have entries so the actor-exclusion filter
+  // (see `notifyRole` above) can drop the actor and leave the others.
+  // Confirmed via `blocks iam users list --json` (filter on `roles:
+  // ["manager"]`) — 41a74053-… is the active manager
+  // (Meraj Zoarder, merajzoarder6@gmail.com). Re-verify before
+  // adding new managers; the long-term TODO at the top of this
+  // section tracks when the server-side proxy replaces this map.
+  manager: ["41a74053-2c79-4fd5-aab3-90abce656a1d"],
 };
 
 export async function notifyRole(
@@ -124,11 +142,26 @@ export async function notifyRole(
   const userIds = Array.from(
     new Set(roleList.flatMap((r) => RECIPIENTS_BY_ROLE[r] ?? [])),
   );
-  // No recipients registered for any of the requested roles —
-  // silently no-op. This happens when notifyRole is called with a
-  // role we haven't onboarded (e.g. `admin`) and shouldn't surface
-  // as an error.
-  if (userIds.length === 0) return undefined;
+  // Actor exclusion — the user who triggered the action should not be
+  // notified about their own action. The actor id is carried on
+  // `payload.actorId` (every call site already populates it from
+  // `useAuth().currentUser.id`). Empty/missing `actorId` is a no-op
+  // filter — every uid compares unequal to "" so nothing is dropped,
+  // preserving the behaviour for any legacy caller that didn't stamp
+  // the actor. Verified 2026-09-27: tester-creates-flow self-notify
+  // bug — the actor's uid was in `RECIPIENTS_BY_ROLE.tester`, so the
+  // tester saw their own action in the bell. Filter dropped them.
+  const actorId =
+    typeof payload.actorId === "string" ? payload.actorId : "";
+  const filteredUserIds =
+    actorId === "" ? userIds : userIds.filter((uid) => uid !== actorId);
+  // No recipients registered for any of the requested roles (after
+  // excluding the actor) — silently no-op. This happens when
+  // notifyRole is called with a role we haven't onboarded (e.g.
+  // `admin`) or when the actor was the only registered recipient for
+  // the requested role (the common bug case: a tester creating a
+  // flow with a single tester in the map).
+  if (filteredUserIds.length === 0) return undefined;
   // Build the row payload ONCE — every recipient's row carries the
   // same denormalized fields, only `userId` differs.
   const rowBase: Omit<NotificationInsert, "userId"> = {
@@ -161,7 +194,7 @@ export async function notifyRole(
   // returned promise because notifier errors must never block the
   // underlying mutation.
   return Promise.allSettled(
-    userIds.map((userId) =>
+    filteredUserIds.map((userId) =>
       notificationsCollection.create({ ...rowBase, userId }),
     ),
   );
@@ -233,7 +266,15 @@ export async function notifyAssignedFeature(
   const recipients = Array.from(
     new Set([...input.developerIds, ...input.qaIds]),
   );
-  if (recipients.length === 0) return undefined;
+  // Actor exclusion — same rationale as in `notifyRole` above. In
+  // practice a manager who assigns the feature isn't in
+  // `developerIds` / `qaIds` so this filter is usually a no-op, but
+  // a flow that hands the role-boundary feature to a manager actor
+  // (rare today, possible in future) would otherwise self-notify.
+  const filteredRecipients = recipients.filter(
+    (uid) => uid !== input.actorId,
+  );
+  if (filteredRecipients.length === 0) return undefined;
   const rowBase: Omit<NotificationInsert, "userId"> = {
     context: "feature",
     actionName: "assigned",
@@ -254,10 +295,58 @@ export async function notifyAssignedFeature(
     readAt: "",
   };
   return Promise.allSettled(
-    recipients.map((userId) =>
+    filteredRecipients.map((userId) =>
       notificationsCollection.create({ ...rowBase, userId }),
     ),
   );
+}
+
+/**
+ * Where the "Open <context>" link / bell-dropdown chevron should land.
+ * Returns null when no useful href can be built (missing projectId or
+ * a context the app doesn't currently render at a dedicated route).
+ *
+ * Lives here (next to `InboxItem`) so the bell dropdown row and the
+ * notification detail page both consume the same URL derivation — any
+ * project-routing change updates both surfaces in one edit. The
+ * `comment` branch is what carries reply notifications: each row
+ * resolves to the project page with the flow deep-link AND the
+ * comments modal auto-open (`?comments=<flowId>`); `FlowItem.tsx`
+ * watches that param and pops the modal so the recipient sees the
+ * specific reply without needing a second click.
+ */
+export function getResourceHref(item: InboxItem): string | null {
+  if (!item.projectId) return null;
+  const base = `/projects/${item.projectId}`;
+  if (item.context === "project") {
+    return item.envSlug ? `${base}/${item.envSlug}` : base;
+  }
+  if (item.context === "feature" || item.context === "flow") {
+    return item.envSlug ? `${base}/${item.envSlug}` : base;
+  }
+  if (item.context === "comment") {
+    // Deep-link to the flow the thread lives under and auto-open the
+    // comments modal so the recipient sees the specific reply.
+    // `flowId` is the row's resource id (the flow that owns the thread).
+    if (!item.flowId) return item.envSlug ? `${base}/${item.envSlug}` : base;
+    const env = item.envSlug ? `/${item.envSlug}` : "";
+    // Only emit `?comments=<flowId>` — FlowItem watches this param and
+    // auto-opens the CommentsModal so the recipient sees the specific
+    // reply. Intentionally NOT emitting `?flow=<flowId>` here — that
+    // param drives FeatureItem's Flow Details drawer (`openFlowId`),
+    // which would pop a second dialog on top of the comments modal and
+    // bury the reply the user came to read. Instead, FeatureItem also
+    // watches `?comments=<flowId>` and auto-expands the owning feature
+    // so the row mounts and FlowItem can run its own modal-pop effect.
+    return `${base}${env}?comments=${encodeURIComponent(item.flowId)}`;
+  }
+  if (item.context === "environment") {
+    // Environment notifications only carry a slug — pick a sensible
+    // default env if none is attached so the link still lands on a
+    // valid page.
+    return `${base}/${item.envSlug ?? "dev"}`;
+  }
+  return null;
 }
 
 // ── Inbox hook ────────────────────────────────────────────────────────
@@ -311,6 +400,21 @@ function deriveTitle(payload: Record<string, unknown>): string {
   if (ctx === "flow" && action === "created") return "New flow";
   if (ctx === "flow" && action === "renamed") return "Flow name updated";
   if (ctx === "flow" && action === "deleted") return "Flow deleted";
+  if (ctx === "feature" && action === "promoted") return "Feature promoted";
+  // Promotion-request notification — fired from the
+  // `BlockPromoteModal` when a manager tries to promote a feature
+  // but the precondition blocks (0 flows OR any failed). Distinct
+  // from "promoted" because nothing actually moved across envs —
+  // the QA still has to fix the failing flow(s) before the
+  // promotion can land.
+  if (ctx === "feature" && action === "promotion_requested")
+    return "Promotion requested";
+  // Comment-reply notification — fired from
+  // `useAddFlowCommentReply.onSuccess` when someone replies to a
+  // comment you wrote. Recipient is the parent comment's author
+  // (post self-notify skip), actor is whoever posted the reply.
+  if (ctx === "comment" && action === "replied")
+    return "New reply on your comment";
   if (ctx === "environment" && action === "created") return "Environment added";
   if (ctx === "environment" && action === "renamed")
     return oldName && oldName !== newName
@@ -321,6 +425,7 @@ function deriveTitle(payload: Record<string, unknown>): string {
   if (ctx === "flow" && action === "stack_changed")
     return "Flow stack updated";
   if (ctx === "flow" && action === "cloned") return "Flow cloned";
+  if (ctx === "flow" && action === "promoted") return "Flow promoted";
   return `${ctx} ${action}`;
 }
 
@@ -385,6 +490,20 @@ function deriveBody(payload: Record<string, unknown>): string {
       return `${actorName} deleted feature “${featureName}”${
         projectName ? ` from project “${projectName}”` : ""
       }.`;
+    if (action === "promoted" && envSlug)
+      return `${actorName} promoted feature “${featureName}” to environment “${envSlug}”${
+        projectName ? ` in project “${projectName}”` : ""
+      }.`;
+    // Promotion-request body — fired from `BlockPromoteModal` when a
+    // manager hits a blocked env pill (no flows OR failed flows)
+    // and clicks "Request". Body points at the env the manager tried
+    // to promote to so the QA knows what to verify once they fix the
+    // flow(s). Distinct from "promoted" because nothing actually
+    // moved yet — the QA still has work to do.
+    if (action === "promotion_requested" && envSlug)
+      return `${actorName} requested promotion of feature “${featureName}” to environment “${envSlug}”${
+        projectName ? ` in project “${projectName}”` : ""
+      }.`;
   }
   // Flow events
   if (ctx === "flow" && flowName) {
@@ -437,6 +556,22 @@ function deriveBody(payload: Record<string, unknown>): string {
       return `${actorName} cloned flow “${flowName}” to environment “${envSlug}”${
         projectName ? ` in project “${projectName}”` : ""
       }.`;
+    if (action === "promoted" && envSlug)
+      return `${actorName} promoted flow “${flowName}” to environment “${envSlug}”${
+        projectName ? ` in project “${projectName}”` : ""
+      }.`;
+  }
+  // Comment-reply body — points at the flow the thread lives under
+  // so the recipient knows where to open the thread. `flowName` is
+  // the strongest signal; falls back to a generic sentence when the
+  // cache couldn't resolve the display name (cached row missed,
+  // hook fired from a context where the read hasn't landed yet).
+  if (ctx === "comment" && action === "replied") {
+    if (flowName)
+      return `${actorName} replied to your comment on flow “${flowName}”${
+        projectName ? ` in project “${projectName}”` : ""
+      }.`;
+    return `${actorName} replied to your comment.`;
   }
   const value =
     typeof payload.value === "string" && payload.value !== "*"
@@ -1111,6 +1246,17 @@ export function actionVisual(
         Icon: Trash2,
         tone: "text-red-600 dark:text-red-400",
         ring: "bg-red-500/10 dark:bg-red-400/10",
+      };
+    // Promotion-request event — fired from `BlockPromoteModal`. The
+    // icon is amber (request / pending attention), visually distinct
+    // from the green of `promoted` and the red of `deleted`, so the
+    // bell can tell at a glance "someone needs me to act" vs
+    // "something happened" vs "something failed".
+    if (action === "promotion_requested")
+      return {
+        Icon: Activity,
+        tone: "text-amber-600 dark:text-amber-400",
+        ring: "bg-amber-500/10 dark:bg-amber-400/10",
       };
   }
   // Fallback for any unknown context/action pair.

@@ -7,24 +7,47 @@
 // accepts a `trailing` slot for actions rendered to the right of the
 // meta line.
 //
-// Comments live in local state, persisted to localStorage so a refresh
-// doesn't lose the thread. Key is per-flow so different flows don't
-// collide. Replace the localStorage helpers with a TanStack-Query-backed
-// hook when comments move to a real backend schema — the modal/chip
-// contract stays the same.
+// The EnvWorkflow chain diagram (Dev → Stg → Prod → UAT) was removed
+// from this row per user request — flow promotion is now handled
+// exclusively at the feature level via the manager's
+// `ManagerFeatureEnvWorkflow`. Cross-env flow state still lives on the
+// `flow.envSlug` field (set by the flow-cascade in `useCloneFeature`
+// and read by the env-scoped page filters) but no UI on this row
+// surfaces it.
+//
+// Chip role gating — only TESTERS can edit the Stack and Status chips.
+// Managers (curators) and developers (feature authors) see the chips
+// as inert labels so they can't accidentally overwrite QA's status /
+// stack assignments on the dev source env. The role gate is added on
+// top of the env-based `readOnly` prop: the chip is read-only when
+// either condition holds (non-dev env OR non-tester role). The
+// Comments chip stays interactive for every role — the user
+// explicitly opted to keep annotations open to everyone since they
+// represent team-wide discussion rather than QA-owned state.
+//
+// Comments are persisted to Blocks Data via the `FlowComment` schema
+// (`useFlowComments` / `useAddFlowComment` / `useAddFlowCommentReply` in
+// `src/lib/blocks/hooks.ts`). The wire shape is flat rows joined by
+// `parentId`; `groupNested` below collapses those rows into the
+// nested `comments[] + replies[]` shape that `CommentsModal` consumes.
 
 import { useEffect, useState } from "react";
 import { GitBranch } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { useAuthContext } from "@/components/blocks/AuthProvider";
-import { useIsRole } from "@/hooks/useAuth";
 import { useLocale } from "@/lib/blocks/i18n";
+import { useIsRole } from "@/hooks/useAuth";
+import {
+  useAddFlowComment,
+  useAddFlowCommentReply,
+  useFlowComments,
+} from "@/lib/blocks/hooks";
 import type { Flow } from "@/lib/blocks/data";
+import type { FlowCommentRow } from "@/lib/blocks/data";
 import type { ReactNode } from "react";
 import { StatusChip } from "./StatusChip";
 import { StackChip } from "./StackChip";
 import { CommentsChip } from "./CommentsChip";
-import { EnvWorkflow } from "./EnvWorkflow";
-import { FlowEnvWorkflow } from "./FlowEnvWorkflow";
 import {
   CommentsModal,
   type FlowComment,
@@ -39,140 +62,104 @@ interface FlowItemProps {
   trailing?: ReactNode;
 }
 
-// localStorage key — scoped per-flow so different flows don't collide.
-// Versioned (`v1`) so a future schema change can migrate rather than
-// silently corrupt the user's saved comments.
-const STORAGE_KEY_PREFIX = "feature-tracker:flow-comments:v1:";
-
-function storageKey(flowId: string): string {
-  return `${STORAGE_KEY_PREFIX}${flowId}`;
-}
-
-function loadComments(flowId: string): FlowComment[] {
-  // SSR / non-browser safety — localStorage doesn't exist outside the
-  // browser, and unit tests can mount components without a window.
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(storageKey(flowId));
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Defensive shape check — a corrupt row from a prior version
-    // shouldn't crash the modal. Drop bad entries, keep the rest.
-    return parsed.filter(isFlowComment);
-  } catch {
-    return [];
+// Collapse the cloud's flat-row shape (one row per comment or reply,
+// joined by `parentId`) into the nested `FlowComment[]` shape that
+// `CommentsModal` consumes. Top-level rows carry `parentId === ""`;
+// replies carry the parent's cloud ItemId. Replies whose parent didn't
+// survive the list query (e.g. a rare race where the parent was just
+// deleted) are dropped rather than rendered as orphans — the parent
+// existence is the source of truth.
+//
+// Both lists are sorted oldest-first so the modal renders the thread
+// in chronological reading order. `localeCompare` on ISO strings is
+// equivalent to chronological sort without needing to parse the dates.
+function groupNested(rows: FlowCommentRow[]): FlowComment[] {
+  const top: FlowComment[] = [];
+  const repliesByParent = new Map<string, FlowCommentReply[]>();
+  for (const r of rows) {
+    const reply: FlowCommentReply = {
+      id: r.id,
+      // Forward `authorId` so the modal can hide the Reply button on
+      // the viewer's own rows (see `CommentsModal.isOwnComment`).
+      // Spreads cleanly into the `FlowComment` shape that `top.push`
+      // accepts.
+      authorId: r.authorId,
+      authorName: r.authorName,
+      authorEmail: r.authorEmail,
+      authorAvatar: r.authorAvatar,
+      content: r.content,
+      createdAt: r.createdAt,
+    };
+    if (r.parentId === "") {
+      top.push({ ...reply, replies: [] });
+    } else {
+      const list = repliesByParent.get(r.parentId) ?? [];
+      list.push(reply);
+      repliesByParent.set(r.parentId, list);
+    }
   }
-}
-
-function saveComments(flowId: string, comments: FlowComment[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      storageKey(flowId),
-      JSON.stringify(comments),
-    );
-  } catch {
-    // Quota exceeded / private mode — silently ignore. The UI still
-    // works for the session; the next save will retry.
+  for (const t of top) {
+    t.replies = repliesByParent.get(t.id) ?? [];
   }
-}
-
-// Narrow an unknown JSON-decoded value to FlowComment. Anything that
-// doesn't match the shape is dropped (see loadComments above). Replies
-// go through the same check, recursively.
-function isFlowComment(value: unknown): value is FlowComment {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.id === "string" &&
-    typeof v.authorName === "string" &&
-    typeof v.authorEmail === "string" &&
-    typeof v.content === "string" &&
-    typeof v.createdAt === "string" &&
-    Array.isArray(v.replies) &&
-    v.replies.every(isFlowCommentReply)
-  );
-}
-
-function isFlowCommentReply(value: unknown): value is FlowCommentReply {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.id === "string" &&
-    typeof v.authorName === "string" &&
-    typeof v.authorEmail === "string" &&
-    typeof v.content === "string" &&
-    typeof v.createdAt === "string"
-  );
-}
-
-// Stable id generator — prefers crypto.randomUUID for proper UUIDs;
-// falls back to a time + random combo on older browsers / tests where
-// crypto isn't available.
-function newId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
+  top.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  for (const t of top) {
+    t.replies.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return top;
 }
 
 export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
   const { formatRelativeTime } = useLocale();
   const { user } = useAuthContext();
-  // Testers are read-only across the workspace — even on dev-source
-  // flows where regular users can click the env-workflow to clone
-  // across envs. Swap in the read-only `FlowEnvWorkflow` mirror for
-  // testers so the chain still shows the chain state ("already cloned
-  // to Stg / Prod / UAT") but no pill is actionable. The matching
-  // `useCloneFlow` hook also throws for testers — defense in depth
-  // against programmatic / stale-modal callers.
+  // Role gate for chip editability. The Stack / Status chips stay
+  // interactive ONLY for testers on the dev source env; everyone else
+  // sees them as inert labels. The Comments chip ignores this gate —
+  // annotations are open to every role on every env. Combined with the
+  // env-based `readOnly` prop, the effective chip `readOnly` is true
+  // when either:
+  //   * `readOnly` (caller passed in — true on non-dev envs) OR
+  //   * `!isTester` (signed-in user is manager / developer)
+  // The `readOnly` prop wins for the env dimension, the role gate
+  // wins for the role dimension; either one flips the chip inert.
   const isTester = useIsRole("tester");
+  const chipReadOnly = readOnly || !isTester;
 
-  // Comments are seeded from localStorage on first render so a reload
-  // restores the thread. The lazy initializer avoids a synchronous
-  // JSON parse on every render — only the first one.
-  const [comments, setComments] = useState<FlowComment[]>(() =>
-    loadComments(flow.id),
-  );
+  // Cloud-backed reader — flat rows, joined into threads via
+  // `groupNested`. TanStack Query handles staleness, refetch-on-mount,
+  // and the same in-flight guard that every other flow-scoped reader
+  // uses (`enabled: Boolean(userId && flowId)` inside the hook, so no
+  // empty-string fires a no-op request here).
+  const { data: rows } = useFlowComments(flow.id);
+  const addComment = useAddFlowComment();
+  const addReply = useAddFlowCommentReply();
+  const comments = groupNested(rows ?? []);
+
   const [commentsOpen, setCommentsOpen] = useState(false);
-
-  // Persist on every change. The dep on `flow.id` is harmless (the
-  // key is flow-scoped) but explicit so future readers know the save
-  // site is tied to a specific flow.
+  // Deep-link from a notification bell "Go to flow" click carries a
+  // `?comments=<flowId>` search param. When the param matches this
+  // flow's id, open the comments modal straight away (and clear the
+  // param so a refresh doesn't keep re-opening it). The same pattern
+  // `FeatureItem.openFlowId = searchParams.get("flow")` uses for the
+  // Flow Details drawer.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openCommentsFromParam = searchParams.get("comments");
   useEffect(() => {
-    saveComments(flow.id, comments);
-  }, [flow.id, comments]);
+    if (openCommentsFromParam !== flow.id) return;
+    setCommentsOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("comments");
+    setSearchParams(next, { replace: true });
+    // `setSearchParams` identity changes on every render and would
+    // re-trigger the effect; the early return on param mismatch is the
+    // real gate. eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCommentsFromParam, flow.id]);
 
   const handleAddComment = (content: string) => {
-    const newComment: FlowComment = {
-      id: newId(),
-      authorName: user?.name ?? "You",
-      authorEmail: user?.email ?? "",
-      authorAvatar: user?.avatarUrl,
-      content,
-      createdAt: new Date().toISOString(),
-      replies: [],
-    };
-    setComments((prev) => [...prev, newComment]);
+    addComment.mutate({ flowId: flow.id, content });
   };
 
   const handleAddReply = (parentId: string, content: string) => {
-    const newReply: FlowCommentReply = {
-      id: newId(),
-      authorName: user?.name ?? "You",
-      authorEmail: user?.email ?? "",
-      authorAvatar: user?.avatarUrl,
-      content,
-      createdAt: new Date().toISOString(),
-    };
-    setComments((prev) =>
-      prev.map((c) =>
-        c.id === parentId
-          ? { ...c, replies: [...c.replies, newReply] }
-          : c,
-      ),
-    );
+    addReply.mutate({ flowId: flow.id, parentId, content });
   };
 
   return (
@@ -184,43 +171,19 @@ export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
       <span className="flex-1 truncate font-medium text-foreground">
         {flow.name}
       </span>
-      {/* Environment workflow — sits *just before* the stack chip.
-          Three cases:
-            * flow.envSlug === "dev"      → interactive workflow
-                                            (clickable Stg/Prod/UAT
-                                            nodes that fire
-                                            useCloneFlow)
-            * flow.envSlug set but non-dev
-                                          → read-only FlowEnvWorkflow
-                                            (Dev + outlined sibling
-                                            pills, no pointer cursor,
-                                            no click affordance — non-
-                                            dev envs are read-only
-                                            views per the page-level
-                                            readOnly flag)
-            * flow.envSlug === undefined  → nothing (legacy env-less
-                                            page has no row-level env
-                                            anchor)
-          See EnvWorkflow.tsx (interactive) and FlowEnvWorkflow.tsx
-          (read-only mirror) for state details. */}
-      {flow.envSlug === "dev" && !isTester ? (
-        <EnvWorkflow flow={flow} />
-      ) : flow.envSlug !== undefined ? (
-        <FlowEnvWorkflow flow={flow} />
-      ) : null}
       {/* Stack chip — sits to the left of the Status chip. Always
           rendered so the row has stable horizontal layout regardless
-          of which values are set. */}
-      <StackChip flow={flow} readOnly={readOnly} />
-      {/* Status chip — sits to the left of the Comments chip. */}
-      <StatusChip flow={flow} readOnly={readOnly} />
+          of which values are set. Role-gated: tester-only on top of
+          the env-based `readOnly` prop (see `chipReadOnly` derivation
+          above). Managers and developers see it as an inert label. */}
+      <StackChip flow={flow} readOnly={chipReadOnly} />
+      {/* Status chip — sits to the left of the Comments chip. Same
+          role gate as Stack: tester-only on top of the env-based
+          `readOnly` prop. */}
+      <StatusChip flow={flow} readOnly={chipReadOnly} />
       {/* Comments chip — opens the comments modal. Lives between the
           Status chip and the relative time so the chip order matches
-          the natural reading order (state → annotations → time). The
-          Environment chip used to live between Status and Comments,
-          but the per-row interactive EnvWorkflow now handles
-          cloning — so the dropdown is gone to keep the row from
-          duplicating the same action. */}
+          the natural reading order (state → annotations → time). */}
       <CommentsChip
         count={comments.length}
         onOpen={() => setCommentsOpen(true)}
@@ -240,6 +203,14 @@ export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
         currentUserName={user?.name ?? "You"}
         currentUserEmail={user?.email ?? ""}
         currentUserAvatar={user?.avatarUrl}
+        // IAM sub of the signed-in viewer. The modal uses this to
+        // hide the Reply button on the viewer's own comments —
+        // matching the self-notify skip in
+        // `useAddFlowCommentReply.onSuccess` (no notification would
+        // fire, so the affordance would be a dead click). Pulled
+        // from `useAuthContext` for parity with `currentUserName` /
+        // `currentUserEmail`.
+        currentUserId={user?.id}
       />
     </>
   );

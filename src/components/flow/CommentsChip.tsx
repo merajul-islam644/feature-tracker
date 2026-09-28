@@ -13,8 +13,11 @@
 // StatusChip / StackChip use for their placeholder labels.
 //
 // Read-only mode does NOT disable the chip — annotations are a
-// read-write affordance independent of state ownership. Users on
-// uat/prod can still view and post comments.
+// read-write affordance independent of state ownership. The user
+// explicitly opted to keep comments interactive for every role
+// (manager / developer / tester) on every env, so the chip is
+// always clickable. Non-tester roles on dev can read + post
+// comments even though their status / stack chips are inert.
 
 import { MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";

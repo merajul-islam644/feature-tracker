@@ -96,20 +96,47 @@ export function StackChip({ flow, readOnly = false }: StackChipProps) {
     });
   };
 
+  // Read-only path: render the chip as a plain static <span> — no
+  // DropdownMenu wrapper, no trigger, no content. This is a HARD
+  // gate: nothing can open a dropdown because no dropdown exists in
+  // the DOM. Earlier versions put `disabled` on the trigger button,
+  // but Radix's `DropdownMenuTrigger` ignores `disabled` on the
+  // asChild'd button — clicking the (visually muted) chip still
+  // opened the menu. Wrapping the chip in a plain span (instead of a
+  // button) also keeps it out of the keyboard tab order and out of
+  // the focus ring, which matches the "non-interactive label" UX.
+  // Mirrors `StatusChip`'s read-only branch.
+  if (readOnly) {
+    return (
+      <span
+        aria-label={t("flowStack.chipLabel", "Flow stack")}
+        className={cn(
+          "inline-flex h-5 shrink-0 items-center rounded-full border px-2 text-[10px] font-medium",
+          visual
+            ? visual.className
+            : "border-border bg-muted text-muted-foreground",
+          "cursor-default opacity-60",
+        )}
+      >
+        {visual
+          ? t(`flowStack.${visual.i18nKey}`, capitalize(visual.i18nKey))
+          : t("flowStack.label", "Stack")}
+      </span>
+    );
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
           aria-label={t("flowStack.chipLabel", "Flow stack")}
-          disabled={readOnly}
           className={cn(
             "inline-flex h-5 shrink-0 items-center rounded-full border px-2 text-[10px] font-medium transition-colors",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
             visual
               ? visual.className
               : "border-border bg-muted text-muted-foreground hover:bg-accent",
-            readOnly && "cursor-default opacity-60",
           )}
         >
           {visual

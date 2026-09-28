@@ -18,6 +18,7 @@ import { RenameFeatureModal } from "./RenameFeatureModal";
 import { DeleteFeatureDialog } from "./DeleteFeatureDialog";
 import { FeatureDetailsDrawer } from "./FeatureDetailsDrawer";
 import { FeatureEnvWorkflow } from "./FeatureEnvWorkflow";
+import { ManagerFeatureEnvWorkflow } from "./ManagerFeatureEnvWorkflow";
 import { RenameFlowModal } from "@/components/flow/RenameFlowModal";
 import { DeleteFlowDialog } from "@/components/flow/DeleteFlowDialog";
 import { FlowDetailsDrawer } from "@/components/flow/FlowDetailsDrawer";
@@ -174,15 +175,40 @@ export function FeatureItem({
   readOnly = false,
   envSlug,
 }: FeatureItemProps) {
-  // Testers are read-only across the workspace, even on the dev source
-  // env. We OR with `readOnly` here rather than relying on the page
-  // thread `readOnly` all the way down — the kebab gate lives next to
-  // the rename/delete state so it can't be accidentally bypassed by a
-  // page that forgets the OR. The hooks (`useUpdateFeature` /
-  // `useDeleteFeature` / `useUpdateFlow` / `useDeleteFlow`) also throw
-  // for testers as defense-in-depth.
+  // Role gates. Three distinct policies live on this component:
+  //
+  //   1. Feature-domain mutations (Rename Feature / Delete Feature on
+  //      the kebab at the end of the header row) are manager-only.
+  //      Developers and testers — even on the dev source env — see
+  //      the feature as read-only. `effectiveReadOnly` captures the
+  //      OR so the kebab gate can't be bypassed by a page that
+  //      forgets to thread `readOnly` down. The hooks
+  //      (`useUpdateFeature` / `useDeleteFeature`) throw the same
+  //      error as defense-in-depth.
+  //
+  //   2. Flow-domain mutations are TESTER-only across every surface:
+  //      a. Inline flow authoring — the "+ Add another flow" button,
+  //         the empty-state "Add Flow" CTA, AND the project-header
+  //         "Add Flow" button in `ProjectDetailPage`. Previously this
+  //         was "non-manager (developer + tester)"; narrowing to
+  //         testers aligns the inline creation surfaces with the
+  //         flow-row kebab Rename / Delete policy below — managers
+  //         curate via chat tools, developers author features but
+  //         not flows, testers do the QA work that includes inline
+  //         flow authoring.
+  //      b. Flow row kebab Rename + Delete — also TESTER-only.
+  //         Managers (curators) and developers (feature authors)
+  //         inspect flows but don't rename / delete them inline; the
+  //         kebab drops to its read-only "Flow Details" entry.
+  //      c. The `useCreateFlow` / `useUpdateFlow` / `useDeleteFlow`
+  //         hooks themselves intentionally stay open (no role guard)
+  //         because the chat tools in `useIssueTracker.ts` call them
+  //         on behalf of any role — gating the hook would break
+  //         AI-driven flow mutations. Every flow-domain gate on this
+  //         component is UI enforcement only.
+  const isManager = useIsRole("manager");
   const isTester = useIsRole("tester");
-  const effectiveReadOnly = readOnly || isTester;
+  const effectiveReadOnly = readOnly || !isManager;
 
   const [expanded, setExpanded] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
@@ -229,12 +255,18 @@ export function FeatureItem({
   // every time the row is minimized).
   //
   // `feature.projectId` is forwarded so the returned `Flow` records
-  // carry the right projectId — required by `useCloneFlow`'s env chip
-  // to filter and create the destination feature.
+  // carry the right projectId — useful for any cloud call that filters
+  // on `projectId`.
   const { data: flows } = useFeatureFlows(feature.id, feature.projectId);
   const t = useT();
   const { formatRelativeTime } = useLocale();
   const flowList: Flow[] = flows ?? [];
+
+  // Per-feature promotion is gated at the row level (see the
+  // `ManagerFeatureEnvWorkflow` render below) — managers on dev-source
+  // features see the interactive chain, everyone else sees the
+  // read-only mirror. Cross-env cascade (flows under the feature) is
+  // handled inside `useCloneFeature`'s mutationFn.
 
   // Flow Details drawer open state mirrors the Feature Details pattern:
   // lives in URL search params (`?flow=<id>`) instead of local state
@@ -270,18 +302,37 @@ export function FeatureItem({
     next.delete("flow");
     setSearchParams(next, { replace: false });
   };
-  // When the page is env-scoped, every visible count on this row
-  // (badge, status pills, +5 dropdown, expanded list) needs to be
-  // filtered to that env — otherwise the badge could say 6 while the
-  // status pills sum to 2, which is the exact mismatch the user
-  // flagged. On the env-less page (envSlug undefined), aggregate
-  // across every env.
-  const visibleFlowList: Flow[] =
-    envSlug !== undefined
-      ? flowList.filter((f) => f.envSlug === envSlug)
-      : flowList;
+  // Show every flow of this feature regardless of its envSlug — a
+  // flow promoted out of dev stays visible under its source feature
+  // so the chain on its row can keep showing the persistent "I was
+  // promoted to {env}" tick + animated arrow. Without this, the dev
+  // page would filter out the row as soon as the in-place promote
+  // mutation ran and the visual would disappear with the row —
+  // defeating the user's "show the animation + tick always after
+  // clicking" requirement.
+  const visibleFlowList: Flow[] = flowList;
   const statusCounts = tallyByStatus(visibleFlowList);
   const otherCounts = tallyOthers(visibleFlowList);
+
+  // Deep-link from a comment-reply notification carries
+  // `?comments=<flowId>` (the same param FlowItem watches to pop the
+  // CommentsModal). For that modal to mount, the owning FlowItem has
+  // to render — which only happens when this feature is expanded.
+  // When the param points at one of our flows, auto-expand so the
+  // user lands on the open modal directly. We deliberately don't
+  // clear the param here — FlowItem's own effect clears it after
+  // popping the modal, and clearing from both components would race
+  // (one effect would re-fire because the URL identity changed under
+  // its feet). The expand state is purely local so the param stays
+  // URL-truth only as long as FlowItem needs it.
+  useEffect(() => {
+    const targetFlowId = searchParams.get("comments");
+    if (!targetFlowId) return;
+    if (!visibleFlowList.some((f) => f.id === targetFlowId)) return;
+    if (expanded) return;
+    setExpanded(true);
+  }, [searchParams, visibleFlowList, expanded]);
+
 
   // Measure the inner content's height after every render that could
   // change it (rows added/removed, modal opens, error-state swap) and
@@ -351,17 +402,61 @@ export function FeatureItem({
         <span className="flex-1 text-sm font-semibold text-foreground">
           {feature.name}
         </span>
-        {/* Read-only environment workflow diagram — sits between the
-            feature name and the status pills so it mirrors the
-            flow-row's position. Renders for every env (dev / uat /
-            stg / prod / custom) so the user sees where this feature
-            has been promoted regardless of which env they're viewing.
-            No click handler — the read-only mirror is intentional;
-            cloning happens on the dev-source flow row's interactive
-            EnvWorkflow, not on the feature row. The env-less page
-            (feature.envSlug undefined) has no row-level env anchor,
-            so we skip the diagram there. */}
-        {feature.envSlug !== undefined && <FeatureEnvWorkflow feature={feature} />}
+        {/* Environment workflow diagram — sits between the feature
+            name and the status pills so it mirrors the flow-row's
+            position. Four cases:
+              * dev env + manager + source  → interactive
+                                            ManagerFeatureEnvWorkflow
+                                            (clickable Stg/Prod/UAT
+                                            pills that fire
+                                            useCloneFeature — managers
+                                            are the only role allowed
+                                            to promote features across
+                                            envs; the source row is
+                                            the one whose
+                                            `clonedFromFeatureId` is
+                                            unset, i.e. the original
+                                            feature record that
+                                            sibling clones link back
+                                            to)
+              * dev env + manager + sibling → read-only
+                                            FeatureEnvWorkflow
+                                            (a sibling is a clone of a
+                                            source feature — its
+                                            `clonedFromFeatureId`
+                                            points back to the source,
+                                            so promoting it would
+                                            create a sibling-of-a-
+                                            sibling which the read-
+                                            only mirror can't
+                                            visualize; render the
+                                            mirror instead)
+              * dev env + non-manager /
+                non-dev env                → read-only FeatureEnvWorkflow
+                                            (Dev + outlined sibling
+                                            pills; envs where this
+                                            feature has a sibling
+                                            carry a persistent tick +
+                                            animated arrow so the
+                                            user sees where this
+                                            feature has been
+                                            promoted; no click
+                                            affordance — non-managers
+                                            must ask a manager to
+                                            promote the feature)
+              * feature.envSlug === undefined → nothing (legacy env-
+                                            less page has no row-level
+                                            env anchor)
+            See ManagerFeatureEnvWorkflow.tsx (interactive) and
+            FeatureEnvWorkflow.tsx (read-only mirror) for state
+            details. */}
+        {feature.envSlug === "dev" &&
+        isManager &&
+        !feature.clonedFromFeatureId ? (
+          <ManagerFeatureEnvWorkflow feature={feature} />
+        ) : feature.envSlug !== undefined ? (
+          <FeatureEnvWorkflow feature={feature} />
+        ) : null}
         {/* Per-env Passed / Failed / Pending counts as three small
             pills. Always rendered (including 0) so the row's
             horizontal layout doesn't shift with the data. Filtered
@@ -375,9 +470,26 @@ export function FeatureItem({
               border) so the row stays vertically aligned. */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
+              {/*
+                TESTER-only gate. Manager + developer roles see the
+                trigger rendered as a disabled chip (matching the
+                disabled styling on StackChip / StatusChip on the
+                flow row) instead of an actionable dropdown — they
+                can still see the "+5" label so the row keeps its
+                shape, but clicking does nothing. The `radix`
+                DropdownMenuTrigger forwards `disabled` through to
+                the asChild'd button, which both blocks pointer
+                events and suppresses focus — keyboard + screen-
+                reader users also fall into the inert branch.
+              */}
               <button
                 type="button"
-                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 data-[state=open]:bg-accent"
+                disabled={!isTester}
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                  isTester && "hover:bg-accent data-[state=open]:bg-accent",
+                  !isTester && "cursor-default opacity-60",
+                )}
               >
                 +5
               </button>
@@ -442,10 +554,12 @@ export function FeatureItem({
               * readOnly  → kebab with ONLY a "Feature Details" entry
                             that opens the details drawer. No Rename /
                             Delete — non-dev envs are read-only views
-                            of what was authored in dev.
+                            of what was authored in dev, and any
+                            non-manager role (developer / tester) is
+                            read-only across the workspace.
               * editable  → kebab with Rename + Delete + Feature Details.
                             Destructive Delete stays anchored at the
-                            bottom. */}
+                            bottom. Manager-only. */}
         {effectiveReadOnly ? (
           <RowKebabMenu
             ariaLabel={t("featureItem.menu", "Feature actions")}
@@ -505,7 +619,18 @@ export function FeatureItem({
         >
           <Separator className="mb-3" />
           {visibleFlowList.length === 0 ? (
-            !effectiveReadOnly ? (
+            // Same inverted policy as the "+ Add another flow" button
+            // above: only render the Add Flow CTA for TESTERS on the
+            // dev source env. Managers (curators) and developers
+            // (feature authors) see the empty state without the CTA —
+            // managers author flows via chat tools / kebab create
+            // actions, developers don't author flows inline. Every role
+            // on non-dev envs also sees the read-only empty state
+            // because flows only get authored under dev. Mirroring the
+            // inline button's `!readOnly && isTester` keeps both
+            // surfaces in sync: empty or non-empty, the rule is the
+            // same.
+            !readOnly && isTester ? (
               <FlowEmptyState onAdd={() => setAddFlowOpen(true)} />
             ) : (
               <FlowEmptyState />
@@ -521,11 +646,36 @@ export function FeatureItem({
                     flow={flow}
                     readOnly={readOnly}
                     trailing={
-                      readOnly ? (
-                        // Read-only flows (non-dev envs): kebab with
-                        // ONLY a "Flow Details" entry that opens the
-                        // details drawer. No Rename/Delete — non-dev
-                        // envs are read-only views.
+                      // Flow row kebab gate: read-only on non-dev envs
+                      // AND for managers on the dev source env (they
+                      // curate flows through chat tools / kebab create
+                      // actions, not the inline rename/delete).
+                      // Editable kebab with Rename + Delete renders for
+                      // TESTERS on dev only — managers (curators) and
+                      // developers (feature authors) inspect flows but
+                      // don't rename / delete them inline, so they
+                      // fall into the read-only branch below. The
+                      // gate matches the inline flow authoring
+                      // surfaces ("+ Add another flow", empty-state
+                      // "Add Flow" CTA, project-header "Add Flow" in
+                      // `ProjectDetailPage`) — all are tester-only on
+                      // dev, all hidden for managers + developers
+                      // + non-dev envs. The narrower tester-only
+                      // scope is intentional — managers skip inline
+                      // flow authoring (they curate via chat tools),
+                      // developers don't author flows at all, and
+                      // testers are the QA role that fills the rows
+                      // in. The `useUpdateFlow` / `useDeleteFlow`
+                      // hooks themselves stay open (no role guard)
+                      // — chat tools in `useIssueTracker.ts` call
+                      // them on behalf of any role, so the only
+                      // enforcement here is the UI gate.
+                      readOnly || !isTester ? (
+                        // Read-only flows: kebab with ONLY a "Flow
+                        // Details" entry that opens the details drawer.
+                        // No Rename/Delete — non-dev envs are
+                        // read-only views, and managers + developers
+                        // fall into this branch per the policy above.
                         <RowKebabMenu
                           ariaLabel={t("flowItem.menu", "Flow actions")}
                           readOnly
@@ -575,12 +725,22 @@ export function FeatureItem({
                   />
                 </li>
               ))}
-              {!effectiveReadOnly && (
+              {!readOnly && isTester && (
                 <li className="pt-2">
-                  {/* "+ Add another flow" button — gated on effectiveReadOnly
-                      so testers can't add flows either, matching the rest of
-                      the read-only posture. Stays visible when the row is
-                      editable. */}
+                  {/* "+ Add another flow" button — TESTER-only policy
+                      on the dev source env. Managers (curators) and
+                      developers (feature authors) don't author flows
+                      inline — managers curate via chat tools / kebab
+                      create actions, developers don't author flows at
+                      all — so the inline button is hidden for both.
+                      Mirrors the empty-state "Add Flow" CTA directly
+                      above (same `!readOnly && isTester` gate) and
+                      the project-level header "Add Flow" button in
+                      `ProjectDetailPage`. The dev-only `readOnly`
+                      check still applies so non-dev envs stay
+                      view-only. `useCreateFlow` itself has no role
+                      guard — the chat tools call it on behalf of any
+                      role — so the gate here is UI enforcement only. */}
                   <Button
                     variant="ghost"
                     size="sm"
