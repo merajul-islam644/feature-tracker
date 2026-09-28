@@ -22,6 +22,7 @@ import type {
   VerificationRun,
   VerificationTarget,
 } from "@/types/issue-tracker";
+import type { CustomVerificationCheck } from "@/hooks/useCustomVerificationChecks";
 import type { Project } from "@/lib/blocks/data";
 import { verificationChecks } from "@/data/issueTrackerConstants";
 
@@ -54,10 +55,11 @@ export interface IssueTrackerContextSnapshot {
     id: string;
     name: string;
     email: string;
-    // Name of the target this secret is currently bound to, if any. Lets
-    // the AI answer "which target uses this credential?" without scanning
-    // the targets[] list itself.
-    boundToTargetName?: string | null;
+    // Names of every target this secret is currently bound to, if any.
+    // One credential can be bound to several targets simultaneously;
+    // the array lets the AI answer "what does secret X log into?" with
+    // the full set instead of one entry. Empty array = unbound.
+    boundToTargetNames?: string[];
   }>;
   issues: Array<{
     id: string;
@@ -73,9 +75,13 @@ export interface IssueTrackerContextSnapshot {
     lastSeenAt?: string;
   }>;
   scope: {
-    enabled: VerificationCheckId[];
-    available: VerificationCheckId[];
-    labels: Record<VerificationCheckId, string>;
+    enabled: string[];
+    available: string[];
+    // Labels indexed by check id. Built-in `VerificationCheckId`s map
+    // to their shipped labels; custom scopes (prefixed `custom_`) map
+    // to the user-defined label. `Record<string, string>` because
+    // custom IDs are arbitrary strings.
+    labels: Record<string, string>;
   };
   run: {
     status: VerificationRun["status"];
@@ -116,15 +122,23 @@ export function buildIssueTrackerContext(input: {
   targets: VerificationTarget[];
   secrets: Secret[];
   issues: Issue[];
-  scope: VerificationCheckId[];
+  scope: string[];
   run: VerificationRun;
   filters: IssueFilters;
   projects?: Project[];
+  customChecks?: CustomVerificationCheck[];
 }): IssueTrackerContextSnapshot {
-  const { targets, secrets, issues, scope, run, filters, projects } = input;
-  const labelMap = Object.fromEntries(
+  const { targets, secrets, issues, scope, run, filters, projects, customChecks = [] } = input;
+  // Merge built-in + custom labels so the AI can answer "what does
+  // this scope do?" for any id the user has enabled, including
+  // custom_*. Built-in wins on collision (shouldn't happen — custom
+  // IDs are slug-prefixed `custom_`).
+  const labelMap: Record<string, string> = Object.fromEntries(
     verificationChecks.map((c) => [c.id, c.label]),
-  ) as Record<VerificationCheckId, string>;
+  );
+  for (const c of customChecks) {
+    labelMap[c.id] = c.label;
+  }
 
   // Drop the verbose `evidence` payload from issues — the assistant
   // doesn't render screenshots, and the wire would balloon the prompt
@@ -164,15 +178,19 @@ export function buildIssueTrackerContext(input: {
       id: s.id,
       name: s.name,
       email: s.email,
-      boundToTargetName: (() => {
-        const owner = targets.find((t) => t.credentialId === s.id);
-        return owner?.applicationName ?? null;
-      })(),
+      // Filter-then-map once — N targets can share the same
+      // credentialId when multi-binding is in use.
+      boundToTargetNames: targets
+        .filter((t) => t.credentialId === s.id)
+        .map((t) => t.applicationName),
     })),
     issues: compactIssues,
     scope: {
       enabled: scope,
-      available: verificationChecks.map((c) => c.id),
+      available: [
+        ...verificationChecks.map((c) => c.id),
+        ...customChecks.map((c) => c.id),
+      ],
       labels: labelMap,
     },
     run: {
@@ -253,7 +271,9 @@ function trimUrl(url: string): string {
 
 // Quick lookup for the renderer when summarising a tool_use proposal
 // ("toggle off the Forms check" needs the human label, not the id).
-export function checkLabel(id: VerificationCheckId): string {
+// Widened to accept arbitrary strings so custom `custom_*` IDs pass
+// through; the lookup falls back to the id when no match is found.
+export function checkLabel(id: string): string {
   return verificationChecks.find((c) => c.id === id)?.label ?? id;
 }
 

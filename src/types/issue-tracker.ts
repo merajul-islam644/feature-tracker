@@ -110,6 +110,13 @@ export interface Secret {
   passwordMasked: string;
   createdAt: string;
   updatedAt: string;
+  // Derived (never persisted): ids of every verification target whose
+  // `credentialId` currently points at this secret. The binding is
+  // expressed on the target side as a single scalar; multi-binding
+  // emerges from N targets independently pointing at the same secret.
+  // Computed once at the panel level so dropdowns and AI snapshots can
+  // share the same projection without each consumer re-scanning.
+  boundTargetIds?: string[];
 }
 
 // ────────────────────────────────────────────────────────────────────────────

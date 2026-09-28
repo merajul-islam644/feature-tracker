@@ -27,6 +27,7 @@ export function TargetsPage() {
   } = tracker;
 
   const [draftUrl, setDraftUrl] = useState("");
+  const [draftName, setDraftName] = useState("");
 
   // Same dedupe pattern as `IssueTrackerPage` — `validateUrl` checks
   // the trimmed draft against the existing target list and the draft
@@ -37,6 +38,16 @@ export function TargetsPage() {
     if (!trimmed) return null;
     return validateUrl(trimmed, existingUrls.concat(trimmed));
   })();
+  // Display name is required when the user is adding a new target —
+  // mirrors the inline-edit form's own `nameError` rule. Empty
+  // (untouched) draft doesn't block the Add button; the button
+  // already requires a URL to enable, and once the URL is filled the
+  // name error becomes meaningful.
+  const draftNameError = draftName.trim()
+    ? null
+    : draftUrl.trim()
+      ? "Display name is required."
+      : null;
 
   return (
     <div className="space-y-6">
@@ -56,16 +67,22 @@ export function TargetsPage() {
         targets={targets}
         draftUrl={draftUrl}
         draftError={draftError}
+        draftName={draftName}
+        draftNameError={draftNameError}
         onDraftChange={setDraftUrl}
+        onDraftNameChange={setDraftName}
         onAddDraft={async () => {
           const clean = draftUrl.trim();
+          const cleanName = draftName.trim();
           if (
             !clean ||
+            !cleanName ||
             validateUrl(clean, existingUrls.concat(clean))
           )
             return;
-          await addTarget({ url: clean });
+          await addTarget({ url: clean, applicationName: cleanName });
           setDraftUrl("");
+          setDraftName("");
         }}
         onRemoveTarget={removeTarget}
         onToggleEnabled={setTargetEnabled}

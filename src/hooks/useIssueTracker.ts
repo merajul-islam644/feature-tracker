@@ -278,7 +278,7 @@ const SCOPE_STORAGE_KEY = "issue-tracker:scope";
 const DEVICE_STORAGE_KEY = "issue-tracker:device";
 const DEVICE_VALUES: ReadonlySet<string> = new Set(["desktop", "mobile", "tablet"]);
 
-function readStoredScope(fallback: VerificationCheckId[]): VerificationCheckId[] {
+function readStoredScope(fallback: VerificationCheckId[]): string[] {
   try {
     const raw = localStorage.getItem(SCOPE_STORAGE_KEY);
     if (!raw) return fallback;
@@ -288,7 +288,10 @@ function readStoredScope(fallback: VerificationCheckId[]): VerificationCheckId[]
       parsed.length > 0 &&
       parsed.every((x) => typeof x === "string")
     ) {
-      return parsed as VerificationCheckId[];
+      // Widened to `string[]` to allow custom scopes (see
+      // `useCustomVerificationChecks`). Built-in IDs still match the
+      // `VerificationCheckId` union; custom ones are arbitrary strings.
+      return parsed as string[];
     }
   } catch {
     // Corrupt / private mode — fall through to defaults.
@@ -453,7 +456,7 @@ export function useIssueTracker() {
   // repeats count once, here, without a round-trip. Reset alongside
   // completedTargetsRef at the start of every run.
   const seenFingerprintsRef = useRef<Set<string>>(new Set());
-  const [scope, setScope] = useState<VerificationCheckId[]>(() =>
+  const [scope, setScope] = useState<string[]>(() =>
     readStoredScope(idleRun.scope),
   );
   // Device emulation for the next run — forwarded through the api layer so
@@ -746,7 +749,11 @@ export function useIssueTracker() {
       name: string;
       email: string;
       password: string;
-      targetId?: string;
+      // Multi-binding: the user may pick one or more targets at
+      // creation time. Empty array / undefined = "no binding at
+      // creation". The credential is created first, then each
+      // requested target is PATCHed independently.
+      targetIds?: string[];
     }) => {
       try {
         const created = await createSecret.mutateAsync({
@@ -789,23 +796,29 @@ export function useIssueTracker() {
             err,
           );
         }
-        // If the user picked a target in the form, bind it now. We do
-        // this AFTER the credential is created so we have its id. If the
-        // binding fails we still keep the secret — the user can rebind
-        // from the SecretCard row.
-        if (payload.targetId) {
-          const target = targets.find((t) => t.id === payload.targetId);
-          if (target) {
-            // If another secret was already bound to this target, its
-            // credentialId will be overwritten — which is the documented
-            // contract. The form surfaces a warning before this happens.
-            await updateTarget.mutateAsync({
-              id: target.id,
-              patch: { credentialId: created.id },
-            });
-          }
+        // Bind to every requested target. We do this AFTER the
+        // credential is created so we have its id. If the binding
+        // fails partway we still keep the secret and any successful
+        // bindings — the user can rebind the rest from the SecretCard
+        // row. Each target's existing credentialId (if any) will be
+        // overwritten — that's the documented contract; the form
+        // surfaces a warning before submit.
+        const requestedIds = payload.targetIds ?? [];
+        let boundCount = 0;
+        for (const id of requestedIds) {
+          const target = targets.find((t) => t.id === id);
+          if (!target) continue;
+          await updateTarget.mutateAsync({
+            id: target.id,
+            patch: { credentialId: created.id },
+          });
+          boundCount += 1;
         }
-        toast.success("Credential added successfully.");
+        toast.success(
+          boundCount > 0
+            ? `Credential added successfully and bound to ${boundCount} target${boundCount > 1 ? "s" : ""}.`
+            : "Credential added successfully.",
+        );
         return created;
       } catch (err) {
         // Surface the real failure so the user can self-diagnose — the
@@ -854,44 +867,65 @@ export function useIssueTracker() {
     [secrets, updateSecret, toast],
   );
 
-  // Re-bind an existing secret to a (possibly different) target, or clear
-  // its binding entirely. The relationship is stored on the target side
-  // (target.credentialId) — to clear, we set it back to null/empty. To
-  // unbind from the previously-bound target when switching, we also patch
-  // the old target so we don't leave a dangling pointer.
+  // Re-bind a saved secret to a (possibly different) set of targets, or
+  // clear all bindings by passing an empty array. The relationship is
+  // stored on the target side as a single scalar (target.credentialId);
+  // multi-binding emerges from N targets independently pointing at the
+  // same secret. To avoid data loss we run a diff: only the targets
+  // that joined the set get PATCHed in, and only the targets that left
+  // the set get PATCHed back to null.
   const bindSecret = useCallback(
-    async (secretId: string, newTargetId: string | null) => {
+    async (secretId: string, newTargetIds: string[]) => {
       const secret = secrets.find((s) => s.id === secretId);
-      const previousTarget = targets.find((t) => t.credentialId === secretId);
       try {
-        // 1) Clear any previous binding so we don't leave the old target
-        //    pointing at a credential that has moved.
-        if (previousTarget && previousTarget.id !== newTargetId) {
+        const previousIds = targets
+          .filter((t) => t.credentialId === secretId)
+          .map((t) => t.id);
+        const previousSet = new Set(previousIds);
+        const nextSet = new Set(newTargetIds);
+        const toAdd = newTargetIds.filter((id) => !previousSet.has(id));
+        const toRemove = previousIds.filter((id) => !nextSet.has(id));
+
+        // No-op when the set hasn't changed — avoid empty toasts.
+        if (toAdd.length === 0 && toRemove.length === 0) return;
+
+        // Run removals FIRST so we never leave a target pointing at a
+        // credential that's been removed. Removing then re-adding is
+        // also safe (the writes are independent), but reversing the
+        // order would briefly claim a target with two concurrent
+        // credentialId values, which can confuse the AI snapshot.
+        for (const id of toRemove) {
           await updateTarget.mutateAsync({
-            id: previousTarget.id,
+            id,
             patch: { credentialId: null },
           });
         }
-        // 2) Set the new binding (or clear it).
-        if (newTargetId) {
-          const next = targets.find((t) => t.id === newTargetId);
-          if (!next) {
-            toast.error("That target no longer exists.");
-            return;
-          }
-          // If the new target was bound to a different secret, that binding
-          // is replaced — same contract as on creation. We just write the
-          // new credentialId; Blocks will hold the latest value.
+        for (const id of toAdd) {
+          // If the new target was bound to a different secret, that
+          // binding is replaced — same contract as on creation. Blocks
+          // holds the latest value.
           await updateTarget.mutateAsync({
-            id: newTargetId,
+            id,
             patch: { credentialId: secretId },
           });
         }
-        toast.success(
-          newTargetId
-            ? `${secret?.name ?? "Credential"} re-bound.`
-            : `${secret?.name ?? "Credential"} un-bound.`,
-        );
+        const name = secret?.name ?? "Credential";
+        if (nextSet.size === 0) {
+          const k = toRemove.length;
+          toast.success(
+            `${name} un-bound from ${k} target${k > 1 ? "s" : ""}.`,
+          );
+        } else if (toRemove.length === 0 && toAdd.length > 0) {
+          const k = toAdd.length;
+          toast.success(
+            `${name} bound to ${k} new target${k > 1 ? "s" : ""}.`,
+          );
+        } else {
+          const k = nextSet.size;
+          toast.success(
+            `${name} re-bound to ${k} target${k > 1 ? "s" : ""}.`,
+          );
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error("useIssueTracker.bindSecret failed:", err);
@@ -2058,7 +2092,17 @@ export function useIssueTracker() {
             return `Skipped — target ${targetId} not found.`;
           }
           try {
-            const created = await addSecret({ name, email, password, targetId });
+            const created = await addSecret({
+              name,
+              email,
+              password,
+              // The chat-tool schema for create_secret still declares a
+              // single targetId (see chatTools.ts:171) — keep that
+              // contract intact by wrapping it in an array. The UI
+              // uses multi-binding via TargetSelect directly; the
+              // AI tool stays single-target for now.
+              targetIds: targetId ? [targetId] : undefined,
+            });
             return `Credential "${created.name}" created${
               targetId ? " and bound to its target" : ""
             }.`;
@@ -2106,7 +2150,11 @@ export function useIssueTracker() {
           if (targetId && !targets.some((x) => x.id === targetId)) {
             return `Skipped — target ${targetId} not found.`;
           }
-          await bindSecret(secretId!, targetId);
+          // The chat-tool schema for bind_secret still declares a single
+          // targetId (see chatTools.ts:280) — keep that contract intact
+          // by wrapping it in an array. The UI does multi-binding via
+          // TargetSelect directly; the AI tool stays single-target.
+          await bindSecret(secretId!, targetId ? [targetId] : []);
           return targetId
             ? `"${s.name}" bound to ${targets.find((t) => t.id === targetId)?.applicationName ?? targetId}.`
             : `"${s.name}" unbound.`;
@@ -2525,9 +2573,10 @@ export function useIssueTracker() {
           };
 
           // Optional scope override from the tool input; fall back to the
-          // user's currently-enabled scope.
+          // user's currently-enabled scope. The wire carries `string[]`
+          // because custom scopes pass through as arbitrary ids.
           const requestedScope = Array.isArray(tool.input.scope)
-            ? (tool.input.scope as VerificationCheckId[])
+            ? (tool.input.scope as string[])
             : scope;
 
           try {
@@ -2959,7 +3008,7 @@ Continue.`;
   // ──────────────────────────────────────────────────────────────────────────
   //  Scope
   // ──────────────────────────────────────────────────────────────────────────
-  const toggleScope = useCallback((id: VerificationCheckId) => {
+  const toggleScope = useCallback((id: string) => {
     setScope((cur) =>
       cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
     );
