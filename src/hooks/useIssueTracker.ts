@@ -59,9 +59,18 @@ import {
   useUpdateProject,
   useUpdateSecret,
   useUpdateVerificationTarget,
+  useSecretBindings,
+  useSaveSecretBindings,
+  useUserPreference,
+  useSaveUserPreference,
 } from "@/lib/blocks/hooks";
 import { buildIssueTrackerContext } from "@/lib/issueTrackerContext";
-import { readBindings, writeBinding, removeBinding } from "@/lib/issueTrackerBindings";
+import {
+  readBindings,
+  setBinding,
+  writeMirrorBindings,
+  removeBinding,
+} from "@/lib/issueTrackerBindings";
 import { chatTools, browserToolSummary } from "@/lib/chatTools";
 import type {
   AnthropicTool,
@@ -274,41 +283,75 @@ const CLOSED_ISSUE_STATUSES: readonly IssueStatus[] = [
 // can't grow unbounded in the primitive-only Blocks schema.
 const MAX_TRACKED_RUN_IDS = 20;
 
-// Scope + device survive reloads via localStorage. These are per-browser
-// UI prefs (not shared state) — same bucket as a remembered filter.
-const SCOPE_STORAGE_KEY = "issue-tracker:scope";
-const DEVICE_STORAGE_KEY = "issue-tracker:device";
+// Scope + device + activeSession survive reloads via the cloud's
+// `UserPreference` row (one per user). localStorage under
+// `lattice.mirror.userPreference.v1` is the synchronous read fallback so
+// the page boots before the cloud query resolves.
+const USER_PREFERENCE_MIRROR_KEY = "lattice.mirror.userPreference.v1";
 const DEVICE_VALUES: ReadonlySet<string> = new Set(["desktop", "mobile", "tablet"]);
 
-function readStoredScope(fallback: VerificationCheckId[]): string[] {
-  try {
-    const raw = localStorage.getItem(SCOPE_STORAGE_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.length > 0 &&
-      parsed.every((x) => typeof x === "string")
-    ) {
-      // Widened to `string[]` to allow custom scopes (see
-      // `useCustomVerificationChecks`). Built-in IDs still match the
-      // `VerificationCheckId` union; custom ones are arbitrary strings.
-      return parsed as string[];
-    }
-  } catch {
-    // Corrupt / private mode — fall through to defaults.
-  }
-  return fallback;
+interface MirroredUserPreference {
+  scope?: string[];
+  device?: string;
+  activeSession?: string;
 }
 
-function readStoredDevice(): "desktop" | "mobile" | "tablet" {
+function readPrefMirror(userId: string): MirroredUserPreference {
+  if (typeof window === "undefined") return {};
   try {
-    const raw = localStorage.getItem(DEVICE_STORAGE_KEY);
-    if (raw && DEVICE_VALUES.has(raw)) return raw as "desktop" | "mobile" | "tablet";
+    const raw = window.localStorage.getItem(USER_PREFERENCE_MIRROR_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as MirroredUserPreference;
   } catch {
-    // Same best-effort rationale as readStoredScope.
+    return {};
+  }
+}
+
+function writePrefMirror(userId: string, value: MirroredUserPreference): void {
+  if (typeof window === "undefined") return;
+  try {
+    const all: Record<string, MirroredUserPreference> = {};
+    const raw = window.localStorage.getItem(USER_PREFERENCE_MIRROR_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") {
+        Object.assign(all, parsed as Record<string, MirroredUserPreference>);
+      }
+    }
+    all[userId] = value;
+    window.localStorage.setItem(USER_PREFERENCE_MIRROR_KEY, JSON.stringify(all));
+  } catch {
+    // best-effort
+  }
+}
+
+function readStoredScope(fallback: VerificationCheckId[], userId: string): string[] {
+  if (!userId) return fallback;
+  const mirror = readPrefMirror(userId).scope;
+  if (!Array.isArray(mirror)) return fallback;
+  const valid = mirror.filter((x): x is string => typeof x === "string");
+  if (valid.length === 0) return fallback;
+  // Widened to `string[]` to allow custom scopes (see
+  // `useCustomVerificationChecks`). Built-in IDs still match the
+  // `VerificationCheckId` union; custom ones are arbitrary strings.
+  return valid;
+}
+
+function readStoredDevice(userId: string): "desktop" | "mobile" | "tablet" {
+  if (!userId) return "desktop";
+  const mirror = readPrefMirror(userId).device;
+  if (mirror && DEVICE_VALUES.has(mirror)) {
+    return mirror as "desktop" | "mobile" | "tablet";
   }
   return "desktop";
+}
+
+function readStoredActiveSession(userId: string, fallback: string): string {
+  if (!userId) return fallback;
+  const mirror = readPrefMirror(userId).activeSession;
+  return mirror && mirror.length > 0 ? mirror : fallback;
 }
 
 export function useIssueTracker() {
@@ -322,41 +365,54 @@ export function useIssueTracker() {
   // mis-file the row.
   const activeEnv = useActiveEnv();
 
-  // Per-user session storage key. Survives refreshes so the user lands back
-  // in the conversation they were in. Keyed by user id so a sign-out /
-  // sign-in cycle doesn't bleed one user's session into another's.
-  const sessionStorageKey = currentUser
-    ? `issue-tracker:active-session:${currentUser.id}`
-    : null;
+  // User preference row — the canonical store for scope, device,
+  // activeSession. Read+write through `useUserPreference` /
+  // `useSaveUserPreference`. The localStorage mirror under
+  // `lattice.mirror.userPreference.v1` is the synchronous first-paint
+  // fallback. We populate the mirror from the cloud value once it
+  // resolves so cold-boot reads from a synced state.
+  const prefQuery = useUserPreference();
+  const savePref = useSaveUserPreference();
+  const userId = currentUser?.id ?? "";
+  useEffect(() => {
+    if (prefQuery.data && userId) {
+      writePrefMirror(userId, {
+        scope: prefQuery.data.customChecks as string[] | undefined,
+        device: prefQuery.data.device,
+        activeSession: prefQuery.data.activeSession,
+      });
+    }
+  }, [prefQuery.data, userId]);
 
   // Default session id: a stable per-user string for first-time visitors.
   // Matches the previous behaviour exactly so anyone upgrading doesn't lose
   // their existing chat. New sessions spin off a UUID from this prefix.
-  const defaultSessionId = currentUser
-    ? `issue-tracker:${currentUser.id}`
+  const defaultSessionId = userId
+    ? `issue-tracker:${userId}`
     : "issue-tracker:anon";
 
-  const [sessionId, setSessionId] = useState<string>(() => {
-    if (!sessionStorageKey) return defaultSessionId;
-    try {
-      const stored = window.localStorage.getItem(sessionStorageKey);
-      return stored && stored.length > 0 ? stored : defaultSessionId;
-    } catch {
-      // Private mode / disabled storage — fall back silently.
-      return defaultSessionId;
-    }
-  });
+  const [sessionId, setSessionId] = useState<string>(() =>
+    readStoredActiveSession(userId, defaultSessionId),
+  );
 
   // Persist on every change. Effects run after render, so the UI sees the
-  // new id first; the next tick the localStorage copy catches up.
+  // new id first; the next tick the localStorage mirror + cloud copy
+  // catch up. The cloud write is fire-and-forget — failure doesn't
+  // block the local mirror from being the source of truth.
   useEffect(() => {
-    if (!sessionStorageKey) return;
-    try {
-      window.localStorage.setItem(sessionStorageKey, sessionId);
-    } catch {
-      /* ignore — best-effort */
+    if (!userId) return;
+    writePrefMirror(userId, {
+      ...readPrefMirror(userId),
+      activeSession: sessionId,
+    });
+    if (prefQuery.data) {
+      void savePref.mutateAsync({ activeSession: sessionId });
     }
-  }, [sessionId, sessionStorageKey]);
+    // We deliberately skip `prefQuery.data` and `savePref` in the deps —
+    // sessionId is the only meaningful input. Listing them would cause
+    // an extra mutation on every prefQuery refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, userId]);
 
   // ──────────────────────────────────────────────────────────────────────────
   //  Core data — sourced from TanStack Query so refreshes pull fresh rows,
@@ -396,6 +452,22 @@ export function useIssueTracker() {
     setBindingVersion((v) => v + 1);
   }, []);
 
+  // Cloud-side binding row — `SecretBinding` collection, env-scoped. The
+  // hook is the canonical store; the localStorage mirror above is the
+  // synchronous read fallback. When the cloud row loads we replace the
+  // mirror so cold-boot state syncs from another device.
+  const cloudBindings = useSecretBindings(activeEnv);
+  const saveCloudBindings = useSaveSecretBindings();
+  useEffect(() => {
+    if (cloudBindings.data && activeEnv) {
+      writeMirrorBindings(activeEnv, cloudBindings.data.bindings);
+      setBindingVersion((v) => v + 1);
+    }
+    // We deliberately ignore bindingVersion in the deps — only the
+    // cloud value should trigger the sync, not the local writes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloudBindings.data, activeEnv?.projectId, activeEnv?.envSlug]);
+
   const boundTargetsBySecretId = useMemo(() => {
     const mirror = readBindings(activeEnv);
     // Cross-reference with the live targets list so a stale localStorage
@@ -411,6 +483,22 @@ export function useIssueTracker() {
     // is a fresh read on each invocation; `bindingVersion` is the
     // explicit signal that storage changed.
   }, [activeEnv, targets, bindingVersion]);
+
+  // Push the mirror to the cloud whenever a local write happens (so other
+  // devices pick up the binding). Fire-and-forget; failures don't block
+  // the local mirror from being the source of truth.
+  useEffect(() => {
+    if (!activeEnv || !currentUser) return;
+    if (bindingVersion === 0) return;
+    const snapshot = readBindings(activeEnv);
+    void saveCloudBindings.mutateAsync({
+      scope: activeEnv,
+      bindings: snapshot,
+    });
+    // We deliberately only re-run when bindingVersion or the scope
+    // changes — not on every cloud mutation reference update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bindingVersion, activeEnv?.projectId, activeEnv?.envSlug, currentUser?.id]);
 
   // Mutations — wrapped in stable callbacks further down. Holding them as
   // refs at the top avoids re-creating the `addTarget` etc. closures on
@@ -497,31 +585,42 @@ export function useIssueTracker() {
   // completedTargetsRef at the start of every run.
   const seenFingerprintsRef = useRef<Set<string>>(new Set());
   const [scope, setScope] = useState<string[]>(() =>
-    readStoredScope(idleRun.scope),
+    readStoredScope(idleRun.scope, userId),
   );
   // Device emulation for the next run — forwarded through the api layer so
   // the backend sizes the browser context (viewport + touch).
   const [device, setDevice] = useState<"desktop" | "mobile" | "tablet">(
-    readStoredDevice,
+    () => readStoredDevice(userId),
   );
 
-  // Scope + device survive page reloads (localStorage) — the user's check
-  // matrix is a deliberate setup, and losing it to every HMR refresh or
-  // navigation silently shrank full runs to the 8-check default twice.
+  // Scope + device survive page reloads (cloud's `UserPreference` row +
+  // localStorage mirror under `lattice.mirror.userPreference.v1`). The
+  // user's check matrix is a deliberate setup, and losing it to every
+  // HMR refresh or navigation silently shrank full runs to the 8-check
+  // default twice. The cloud write is fire-and-forget — failure doesn't
+  // block the local mirror from being the source of truth.
   useEffect(() => {
-    try {
-      localStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify(scope));
-    } catch {
-      // Private mode / storage disabled — persistence is best-effort.
+    if (!userId) return;
+    writePrefMirror(userId, {
+      ...readPrefMirror(userId),
+      scope,
+    });
+    if (prefQuery.data) {
+      void savePref.mutateAsync({ customChecks: scope as unknown[] });
     }
-  }, [scope]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, userId]);
   useEffect(() => {
-    try {
-      localStorage.setItem(DEVICE_STORAGE_KEY, device);
-    } catch {
-      // Same best-effort rationale as scope.
+    if (!userId) return;
+    writePrefMirror(userId, {
+      ...readPrefMirror(userId),
+      device,
+    });
+    if (prefQuery.data) {
+      void savePref.mutateAsync({ device });
     }
-  }, [device]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device, userId]);
   // Live-preview overlay removed: the Playwright agent runs in headed
   // mode, so the actual browser window is the preview. No in-app state
   // mirror needed — the MCP server still emits `live_preview` / `target_
@@ -913,7 +1012,7 @@ export function useIssueTracker() {
         // Mirror the binding in localStorage so the UI reflects the
         // user's intent even when the cloud write was silently dropped
         // by the gateway's ruleGroup.
-        writeBinding(activeEnv, created.id, requestedIds);
+        setBinding(activeEnv, created.id, requestedIds);
         bumpBindingVersion();
         toast.success(
           boundCount > 0
@@ -1051,7 +1150,7 @@ export function useIssueTracker() {
           }
         }
         // Mirror the binding in localStorage — see comment in addSecret.
-        writeBinding(activeEnv, secretId, newTargetIds);
+        setBinding(activeEnv, secretId, newTargetIds);
         bumpBindingVersion();
         const name = secret?.name ?? "Credential";
         if (nextSet.size === 0) {

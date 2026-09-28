@@ -7,6 +7,7 @@
 // session, so callers never have to pass `userId` themselves.
 
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -42,6 +43,10 @@ import {
   userAiConfigsCollection,
   userAvatarConfigsCollection,
   verificationTargetsCollection,
+  secretBindingsCollection,
+  userPreferencesCollection,
+  hiddenAnnouncementsCollection,
+  userNotesCollection,
   toAnnouncement,
   toCallSignal,
   toChatMessage,
@@ -53,9 +58,12 @@ import {
   toMemberProjectAssignment,
   toProject,
   toSecret,
+  toSecretBinding,
   toTestCase,
   toUserAiConfig,
   toUserAvatarConfig,
+  toUserNote,
+  toUserPreference,
   toUserProfilePic,
   toVerificationTarget,
   type Announcement,
@@ -68,11 +76,15 @@ import {
   type CloudFeature,
   type CloudFlow,
   type CloudFlowComment,
+  type CloudHiddenAnnouncement,
   type CloudMemberProject,
   type CloudProject,
+  type CloudSecretBinding,
   type CloudTestCase,
   type CloudUserAiConfig,
   type CloudUserAvatarConfig,
+  type CloudUserNote,
+  type CloudUserPreference,
   type CloudUserProfile,
   type DirectMessage,
   type Feature,
@@ -85,10 +97,13 @@ import {
   type PersistedChatMessage,
   type Project,
   type ProjectCustomEnv,
+  type SecretBindings,
   type TestCase,
   type TestCaseStatus,
   type UserAiConfig,
   type UserAvatarConfig,
+  type UserNoteRow,
+  type UserPreference,
   type UserProfilePic,
 } from "./data";
 import {
@@ -364,6 +379,26 @@ export const queryKeys = {
   // is the canonical reader; `useAddFlowComment` and
   // `useAddFlowCommentReply` invalidate this key in their `onSuccess`.
   flowComments: (flowId: string) => ["flow-comments", flowId] as const,
+  // Per-(project, env) secret-binding map. Keyed per-scope so two open
+  // projects never share a stale map; per-user prefix keeps a sign-out
+  // / sign-in cycle from bleeding one user's bindings into another's
+  // cache. See `useSecretBindings` / `useSaveSecretBindings`.
+  secretBindings: (userId: string, projectId: string, envSlug: string) =>
+    ["secret-bindings", userId, projectId, envSlug] as const,
+  // Per-user preference row (scope/device/activeSession/customChecks/
+  // repoBrowserPath/githubCredentialId). Mirrors `userAiConfig`'s keying
+  // — different cache key so an invalidation of the AI config never
+  // flushes the preferences and vice versa.
+  userPreference: (userId: string) => ["user-preference", userId] as const,
+  // Per-user hidden-announcement inbox — list of announcement ids the
+  // user dismissed. Keyed per-user, same shape as `notifications` /
+  // `directMessages`.
+  hiddenAnnouncements: (userId: string) =>
+    ["hidden-announcements", userId] as const,
+  // Per-(user, padType) notepad row. Keyed per-user + per-pad so the
+  // text pad and excel pad caches never collide.
+  userNote: (userId: string, padType: string) =>
+    ["user-note", userId, padType] as const,
 };
 
 // --- Reads ------------------------------------------------------------------
@@ -5758,6 +5793,760 @@ export function useSaveUserAvatarConfig(): UseMutationResult<
       qc.invalidateQueries({ queryKey: queryKeys.userAvatarConfig(userId) });
     },
   });
+}
+
+// --- Per-(project, env) Secret bindings ------------------------------------
+//
+// Stores the canonical `secretId → targetId[]` map the
+// VerificationTarget ruleGroup currently strips from cloud PATCHes (see
+// memory `verification-target-credentialid-rulegroup-strip`). One row per
+// (projectId, envSlug). The UI (SecretCard chip, TargetSelect dropdown,
+// chat runModelTurn credential resolution) reads through this row; the
+// stripped `credentialId` column on VerificationTarget is intentionally
+// ignored so the localStorage mirror's one-source-of-truth rule holds.
+//
+// The active-env row also lives in this collection with the sentinel
+// `projectId = "__active__" && envSlug = "__active__"` and the actual
+// selected `(projectId, envSlug)` JSON-encoded in `bindingsJson`. That
+// keeps the read+write helpers shared with the bindings and avoids a
+// fifth schema. See `useActiveEnv` for the thin wrapper.
+export interface SecretBindingScope {
+  projectId: string;
+  envSlug: string;
+}
+
+export function useSecretBindings(
+  scope: SecretBindingScope | null,
+): UseQueryResult<SecretBindings> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.secretBindings(
+      userId,
+      scope?.projectId ?? "",
+      scope?.envSlug ?? "",
+    ),
+    enabled: Boolean(userId && scope),
+    // Bindings are small and rarely change; cache warm across navigations
+    // so the dropdown doesn't re-fetch on every SecretCard open.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      if (!scope) {
+        return {
+          id: "",
+          projectId: "",
+          envSlug: "",
+          bindings: {},
+          updatedBy: null,
+        };
+      }
+      const raw = await secretBindingsCollection.list({
+        filter: { projectId: scope.projectId, envSlug: scope.envSlug },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const row = unwrapPaged<CloudSecretBinding>(raw).items[0];
+      if (!row) {
+        return {
+          id: "",
+          projectId: scope.projectId,
+          envSlug: scope.envSlug,
+          bindings: {},
+          updatedBy: null,
+        };
+      }
+      return toSecretBinding(row);
+    },
+  });
+}
+
+export interface SaveSecretBindingsInput {
+  scope: SecretBindingScope;
+  bindings: Record<string, string[]>;
+  updatedBy?: string;
+}
+
+export function useSaveSecretBindings(): UseMutationResult<
+  SecretBindings,
+  Error,
+  SaveSecretBindingsInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) {
+        throw new Error("You must be signed in to save secret bindings.");
+      }
+      const listRaw = await secretBindingsCollection.list({
+        filter: {
+          projectId: input.scope.projectId,
+          envSlug: input.scope.envSlug,
+        },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudSecretBinding>(listRaw).items[0];
+      const baseFields = {
+        projectId: input.scope.projectId,
+        envSlug: input.scope.envSlug,
+        bindingsJson: JSON.stringify(input.bindings),
+        updatedBy: input.updatedBy ?? userId,
+      };
+      if (existing) {
+        await secretBindingsCollection.update(existing.ItemId, baseFields);
+      } else {
+        await secretBindingsCollection.create(baseFields);
+      }
+      return {
+        id: existing?.ItemId ?? "",
+        projectId: input.scope.projectId,
+        envSlug: input.scope.envSlug,
+        bindings: input.bindings,
+        updatedBy: input.updatedBy ?? userId,
+      };
+    },
+    onSuccess: (row) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.secretBindings(
+          userId,
+          row.projectId,
+          row.envSlug,
+        ),
+      });
+    },
+  });
+}
+
+// --- Per-user preference row ------------------------------------------------
+//
+// One row per user (upsert by userId), holding the Issue Tracker
+// scope/device, the last-active chat session id, custom verification
+// scopes, the GitHub repo-browser current path, and the MCP /api/secrets
+// id for the GitHub PAT. Mirrors `useUserAiConfig` — different cache
+// key so a chat proxy change never flushes the preferences and vice
+// versa.
+export function useUserPreference(): UseQueryResult<UserPreference> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.userPreference(userId),
+    enabled: Boolean(userId),
+    // Preferences rarely change; keep warm across navigations.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const raw = await userPreferencesCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const row = unwrapPaged<CloudUserPreference>(raw).items[0];
+      if (!row) {
+        return {
+          id: "",
+          userId,
+          scope: "",
+          device: "",
+          activeSession: "",
+          customChecks: [],
+          repoBrowserPath: "",
+          githubCredentialId: "",
+        };
+      }
+      return toUserPreference(row);
+    },
+  });
+}
+
+export function useSaveUserPreference(): UseMutationResult<
+  UserPreference,
+  Error,
+  Partial<Omit<UserPreference, "id" | "userId">>
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) {
+        throw new Error("You must be signed in to save your preferences.");
+      }
+      const listRaw = await userPreferencesCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudUserPreference>(listRaw).items[0];
+      // Merge on top of the existing row so callers can patch a single
+      // field without echoing every other column.
+      const current = existing
+        ? toUserPreference(existing)
+        : {
+            id: "",
+            userId,
+            scope: "",
+            device: "",
+            activeSession: "",
+            customChecks: [],
+            repoBrowserPath: "",
+            githubCredentialId: "",
+          };
+      const next = { ...current, ...input };
+      const baseFields = {
+        userId,
+        scope: next.scope,
+        device: next.device,
+        activeSession: next.activeSession,
+        customChecksJson: JSON.stringify(next.customChecks),
+        repoBrowserPath: next.repoBrowserPath,
+        githubCredentialId: next.githubCredentialId,
+      };
+      if (existing) {
+        await userPreferencesCollection.update(existing.ItemId, baseFields);
+      } else {
+        await userPreferencesCollection.create(baseFields);
+      }
+      return { ...next, id: existing?.ItemId ?? "" };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.userPreference(userId) });
+    },
+  });
+}
+
+// --- Per-user hidden-announcement inbox ------------------------------------
+//
+// Many-rows-per-user inbox pattern (one row per `(userId,
+// announcementId)`). The AnnouncementsPanel reads the set so it can hide
+// dismissed cards; the hide/unhide mutations create/delete the matching
+// row. `userId` and `announcementId` both ride on PATCH because the
+// schema declares them `requiredOn: "Both"`.
+export function useHiddenAnnouncements(): UseQueryResult<Set<string>> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.hiddenAnnouncements(userId),
+    enabled: Boolean(userId),
+    // Inbox rarely changes; keep warm across navigations.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const raw = await hiddenAnnouncementsCollection.list({
+        filter: { userId },
+        pageNo: 1,
+        pageSize: 200,
+        sort: { CreatedDate: -1 },
+      });
+      const ids = unwrapPaged<CloudHiddenAnnouncement>(raw).items.map(
+        (r) => r.announcementId,
+      );
+      return new Set(ids);
+    },
+  });
+}
+
+export function useHideAnnouncementMutation(): UseMutationResult<
+  void,
+  Error,
+  { announcementId: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ announcementId }) => {
+      if (!userId) {
+        throw new Error("You must be signed in to hide an announcement.");
+      }
+      await hiddenAnnouncementsCollection.create({
+        userId,
+        announcementId,
+        hiddenAt: new Date().toISOString(),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.hiddenAnnouncements(userId) });
+    },
+  });
+}
+
+export function useUnhideAnnouncementMutation(): UseMutationResult<
+  void,
+  Error,
+  { announcementId: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async ({ announcementId }) => {
+      if (!userId) {
+        throw new Error("You must be signed in to restore an announcement.");
+      }
+      const raw = await hiddenAnnouncementsCollection.list({
+        filter: { userId, announcementId },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudHiddenAnnouncement>(raw).items[0];
+      if (existing) {
+        await hiddenAnnouncementsCollection.delete(existing.ItemId);
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.hiddenAnnouncements(userId) });
+    },
+  });
+}
+
+// --- Per-(user, padType) notepad row ----------------------------------------
+//
+// One row per (userId, padType) where padType is `"text" | "excel"`. The
+// full pad array rides as a JSON-encoded blob in `rowsJson` — same
+// `*Json` primitive-string convention as MemberProject.projectIdsJson.
+// Both `userId` and `padType` are `requiredOn: "Both"` so they ride on
+// every PATCH.
+export type NotepadPadType = "text" | "excel";
+
+export function useUserNote(
+  padType: NotepadPadType,
+): UseQueryResult<UserNoteRow> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.userNote(userId, padType),
+    enabled: Boolean(userId),
+    // Notepad rarely changes; keep warm across navigations.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const raw = await userNotesCollection.list({
+        filter: { userId, padType },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const row = unwrapPaged<CloudUserNote>(raw).items[0];
+      if (!row) {
+        return { id: "", userId, padType, rows: [], updatedAt: "" };
+      }
+      return toUserNote(row);
+    },
+  });
+}
+
+export interface SaveUserNoteInput {
+  padType: NotepadPadType;
+  rows: unknown[];
+}
+
+export function useSaveUserNote(): UseMutationResult<
+  UserNoteRow,
+  Error,
+  SaveUserNoteInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) {
+        throw new Error("You must be signed in to save your notepad.");
+      }
+      const listRaw = await userNotesCollection.list({
+        filter: { userId, padType: input.padType },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudUserNote>(listRaw).items[0];
+      const updatedAt = new Date().toISOString();
+      const baseFields = {
+        userId,
+        padType: input.padType,
+        rowsJson: JSON.stringify(input.rows),
+        updatedAt,
+      };
+      if (existing) {
+        await userNotesCollection.update(existing.ItemId, baseFields);
+      } else {
+        await userNotesCollection.create(baseFields);
+      }
+      return {
+        id: existing?.ItemId ?? "",
+        userId,
+        padType: input.padType,
+        rows: input.rows,
+        updatedAt,
+      };
+    },
+    onSuccess: (row) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.userNote(userId, row.padType),
+      });
+    },
+  });
+}
+
+// --- Active env (per-user, lives on the SecretBinding collection) ---------
+//
+// The active env is per-user, NOT env-scoped. Rather than ship a fifth
+// schema, it rides in `SecretBinding` with the sentinel
+// `projectId = "__active__" && envSlug = "__active__"`. The actual
+// selected `(projectId, envSlug)` is JSON-encoded in `bindingsJson` — the
+// same JSON-map shape `useSecretBindings` parses today, so `toSecretBinding`
+// does all the heavy lifting.
+//
+// The sentinel values are reserved names — no real project uses them —
+// so the row never collides with a real env-scoped binding row.
+//
+// NOTE: the legacy `useActiveEnv()` from `ActiveEnvContext` reads
+// through this hook (it backs the provider's state). Do not rename or
+// remove without updating `ActiveEnvContext`.
+const ACTIVE_ENV_PROJECT_ID = "__active__";
+const ACTIVE_ENV_ENV_SLUG = "__active__";
+
+export interface ActiveEnvSelection {
+  projectId: string;
+  envSlug: string;
+}
+
+export function useActiveEnvSelection(): UseQueryResult<ActiveEnvSelection | null> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.secretBindings(
+      userId,
+      ACTIVE_ENV_PROJECT_ID,
+      ACTIVE_ENV_ENV_SLUG,
+    ),
+    enabled: Boolean(userId),
+    // Active env rarely changes; keep warm across navigations.
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const raw = await secretBindingsCollection.list({
+        filter: {
+          projectId: ACTIVE_ENV_PROJECT_ID,
+          envSlug: ACTIVE_ENV_ENV_SLUG,
+        },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const row = unwrapPaged<CloudSecretBinding>(raw).items[0];
+      if (!row) return null;
+      const parsed = toSecretBinding(row);
+      // The "active" row stores the env in `bindingsJson` as
+      // `{ "<key>": ["<projectId>::<envSlug>"] }`. Treat any of the
+      // listed values as the canonical selection; fall back to null if
+      // the row is malformed.
+      const entries = Object.values(parsed.bindings).flat();
+      const first = entries.find((v) => v.includes("::"));
+      if (!first) return null;
+      const [projectId, envSlug] = first.split("::");
+      if (!projectId || !envSlug) return null;
+      return { projectId, envSlug };
+    },
+  });
+}
+
+export function useSaveActiveEnvSelection(): UseMutationResult<
+  ActiveEnvSelection | null,
+  Error,
+  ActiveEnvSelection | null
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) {
+        throw new Error("You must be signed in to change your active env.");
+      }
+      const listRaw = await secretBindingsCollection.list({
+        filter: {
+          projectId: ACTIVE_ENV_PROJECT_ID,
+          envSlug: ACTIVE_ENV_ENV_SLUG,
+        },
+        pageNo: 1,
+        pageSize: 1,
+      });
+      const existing = unwrapPaged<CloudSecretBinding>(listRaw).items[0];
+      // Pass `null` to clear the active env (delete the row).
+      if (!input) {
+        if (existing) {
+          await secretBindingsCollection.delete(existing.ItemId);
+        }
+        return null;
+      }
+      const baseFields = {
+        projectId: ACTIVE_ENV_PROJECT_ID,
+        envSlug: ACTIVE_ENV_ENV_SLUG,
+        bindingsJson: JSON.stringify({
+          active: [`${input.projectId}::${input.envSlug}`],
+        }),
+        updatedBy: userId,
+      };
+      if (existing) {
+        await secretBindingsCollection.update(existing.ItemId, baseFields);
+      } else {
+        await secretBindingsCollection.create(baseFields);
+      }
+      return input;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.secretBindings(
+          userId,
+          ACTIVE_ENV_PROJECT_ID,
+          ACTIVE_ENV_ENV_SLUG,
+        ),
+      });
+    },
+  });
+}
+
+// --- Notepad cloud sync ----------------------------------------------------
+//
+// Thin wrapper that pages call once on mount to seed the cloud row into
+// the localStorage mirror (read), then push subsequent writes back. The
+// notepad pages still call the synchronous `loadTextPads` /
+// `saveTextPads` / `loadExcelPads` / `saveExcelPads` helpers in
+// `src/lib/notepad/storage.ts` — those read+write the mirror
+// synchronously so first paint matches the last-known state. This hook
+// is what wires that mirror to the cloud.
+//
+// Usage:
+//   const { save } = useNotepadSync<TextPad>("text");
+//   // On mount: cloud row seeds mirror; user edits write to mirror +
+//   // fire-and-forget save.
+//   save(pads); // also pushes to cloud
+
+export interface NotepadSyncApi<T> {
+  /** Push the current pad array to the cloud. Fire-and-forget. */
+  save: (pads: T[]) => void;
+}
+
+export function useNotepadSync<T>(
+  padType: NotepadPadType,
+): NotepadSyncApi<T> {
+  const prefQuery = useUserNote(padType);
+  const savePref = useSaveUserNote();
+  // Seed the localStorage mirror from the cloud row once it resolves,
+  // and fire-and-forget every save. Pages still drive the in-memory
+  // state via the synchronous load/save helpers in `storage.ts`.
+  useEffect(() => {
+    if (!prefQuery.data) return;
+    const key =
+      padType === "text"
+        ? "lattice.mirror.notepad.text.v1"
+        : "lattice.mirror.notepad.excel.v1";
+    try {
+      window.localStorage.setItem(
+        key,
+        JSON.stringify(prefQuery.data.rows),
+      );
+    } catch {
+      // best-effort
+    }
+  }, [prefQuery.data, padType]);
+
+  const save = useCallback(
+    (pads: T[]) => {
+      void savePref.mutateAsync({
+        padType,
+        rows: pads as unknown[],
+      });
+    },
+    [padType, savePref],
+  );
+
+  return { save };
+}
+
+// --- Per-user GitHub credential --------------------------------------------
+//
+// The PAT itself lives only on the MCP server (`/api/secrets` route —
+// the same AES-256-GCM-at-rest path `addSecret` uses for Secret
+// passwords). The MCP id is stamped on `UserPreference.githubCredentialId`
+// so the read path can ask for it back. Net result: the plaintext PAT
+// never lands in localStorage or in Blocks Data — only the MCP
+// reference id does.
+//
+// If the MCP server is unreachable, the hook falls back to a
+// localStorage mirror under `lattice.mirror.github-token.v1` so the next
+// refresh still has the token to retry the sync.
+const GITHUB_TOKEN_MIRROR_KEY = "lattice.mirror.github-token.v1";
+const GITHUB_CREDENTIAL_NAME = "github-pat";
+
+function readGithubMirror(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(GITHUB_TOKEN_MIRROR_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeGithubMirror(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) {
+      window.localStorage.setItem(GITHUB_TOKEN_MIRROR_KEY, token);
+    } else {
+      window.localStorage.removeItem(GITHUB_TOKEN_MIRROR_KEY);
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+interface McpSecretEcho {
+  id: string;
+  name: string;
+  email?: string;
+  hasPassword?: boolean;
+  passwordMasked?: string;
+  passwordLength?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+async function mcpListSecrets(): Promise<McpSecretEcho[]> {
+  try {
+    const res = await fetch("/api/secrets", { credentials: "include" });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { secrets?: McpSecretEcho[] };
+    return Array.isArray(data.secrets) ? data.secrets : [];
+  } catch {
+    return [];
+  }
+}
+
+async function mcpUpsertSecret(
+  payload: { id?: string; name: string; email: string; password: string },
+): Promise<McpSecretEcho | null> {
+  try {
+    const res = await fetch("/api/secrets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { secret?: McpSecretEcho };
+    return data.secret ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function mcpDeleteSecret(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/secrets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export interface UserGitHubCredential {
+  /** MCP echo — present iff the user has saved a PAT. The plaintext
+   *  never rides back to the browser; `masked` is a "•••" string. */
+  hasToken: boolean;
+  /** Masked echo (for display); empty when none. */
+  masked: string;
+  /** MCP id; empty when none. */
+  credentialId: string;
+  /** Save the PAT — round-trips through MCP and updates
+   *  `UserPreference.githubCredentialId`. */
+  setToken: (token: string) => Promise<void>;
+  /** Delete the MCP secret + clear `UserPreference.githubCredentialId`. */
+  clear: () => Promise<void>;
+  /** True while a save/clear is in flight. */
+  busy: boolean;
+}
+
+export function useUserGitHubCredential(): UserGitHubCredential {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  const pref = useUserPreference();
+  const savePref = useSaveUserPreference();
+  const [busy, setBusy] = useState(false);
+
+  const credentialId = pref.data?.githubCredentialId ?? "";
+  const [masked, setMasked] = useState("");
+  const [hasToken, setHasToken] = useState(false);
+
+  // Read MCP echo when credentialId changes. Best-effort — the MCP
+  // server may be down; in that case we fall back to the localStorage
+  // mirror so the UI still shows the token is "set".
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!credentialId) {
+        setMasked("");
+        setHasToken(false);
+        return;
+      }
+      const secrets = await mcpListSecrets();
+      if (cancelled) return;
+      const hit = secrets.find((s) => s.id === credentialId);
+      if (hit) {
+        setMasked(hit.passwordMasked ?? "");
+        setHasToken(true);
+      } else if (readGithubMirror()) {
+        // MCP is down / row missing — fall back to mirror.
+        setMasked("•••");
+        setHasToken(true);
+      } else {
+        setMasked("");
+        setHasToken(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [credentialId, userId]);
+
+  const setToken = useCallback(
+    async (token: string) => {
+      if (!userId) throw new Error("You must be signed in to save a PAT.");
+      setBusy(true);
+      try {
+        const echoed = await mcpUpsertSecret({
+          id: credentialId || undefined,
+          name: GITHUB_CREDENTIAL_NAME,
+          email: GITHUB_CREDENTIAL_NAME,
+          password: token,
+        });
+        const id = echoed?.id || credentialId;
+        if (!id) {
+          throw new Error("MCP server did not return a credential id.");
+        }
+        await savePref.mutateAsync({ githubCredentialId: id });
+        writeGithubMirror(token);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [credentialId, savePref, userId],
+  );
+
+  const clear = useCallback(async () => {
+    if (!userId) throw new Error("You must be signed in to clear a PAT.");
+    setBusy(true);
+    try {
+      if (credentialId) {
+        await mcpDeleteSecret(credentialId);
+      }
+      await savePref.mutateAsync({ githubCredentialId: "" });
+      writeGithubMirror("");
+    } finally {
+      setBusy(false);
+    }
+  }, [credentialId, savePref, userId]);
+
+  return { hasToken, masked, credentialId, setToken, clear, busy };
 }
 
 // Upload an AI-generated avatar blob (from the preview modal) to Blocks

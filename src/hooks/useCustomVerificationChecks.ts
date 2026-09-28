@@ -4,27 +4,21 @@
 // `src/data/issueTrackerConstants.ts` and is read-only. This hook
 // owns the per-user ADDITIONAL scopes the user defines themselves —
 // the labels and descriptions the AI uses as guidance when running
-// a verification pass. Custom scopes are stored in localStorage
-// because they're a per-device preference (mirrors the existing
-// scope-selection storage at `useIssueTracker.ts:281`).
+// a verification pass.
 //
-// Why localStorage and not Blocks Data:
-//   - Custom scopes are personal preferences ("I want my runs to
-//     always check accessibility" vs "don't") — not shared data.
-//   - The other scope-selection state already lives in localStorage;
-//     keeping custom IDs alongside avoids cross-store inconsistencies
-//     when one store updates but the other doesn't.
-//   - No new schema, no rules, no deploy — UI ships today.
-//
-// Trade-offs:
-//   - Custom scopes don't sync across devices. A user on a second
-//     device has to re-create them. Acceptable for personal
-//     preferences; revisit if team-shared scopes become a need.
-//   - localStorage caps out around 5MB; with ~50 chars per scope
-//     we can store tens of thousands of custom scopes before
-//     hitting the limit. Not a practical concern.
+// Storage choice (v2): the canonical store is `UserPreference.customChecksJson`
+// in Blocks Data (one row per user). The cloud write fires
+// fire-and-forget after every mutation; a `lattice.mirror.userPreference.v1`
+// mirror under the same shape is read synchronously on first paint so
+// the page boots before the cloud query resolves. The `customChecks`
+// field on `UserPreference` is `unknown[]` in the cloud shape so the
+// hook's typed surface still uses `CustomVerificationCheck[]`.
 
 import { useCallback, useEffect, useState } from "react";
+import {
+  useUserPreference,
+  useSaveUserPreference,
+} from "@/lib/blocks/hooks";
 
 export interface CustomVerificationCheck {
   /** Stable id, prefixed `custom_` so it never collides with a
@@ -37,12 +31,12 @@ export interface CustomVerificationCheck {
   createdAt: string;
 }
 
-const STORAGE_KEY = "lattice.verification-checks.v1";
+const STORAGE_MIRROR_KEY = "lattice.mirror.customChecks.v1";
 
 function readStoredChecks(): CustomVerificationCheck[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_MIRROR_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (
@@ -66,11 +60,21 @@ function readStoredChecks(): CustomVerificationCheck[] {
 function writeStoredChecks(checks: CustomVerificationCheck[]): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(checks));
+    window.localStorage.setItem(STORAGE_MIRROR_KEY, JSON.stringify(checks));
   } catch {
-    // Quota exceeded / private mode — silent. The UI keeps working
-    // in-memory; the change just won't survive a refresh.
+    // best-effort
   }
+}
+
+function asCustomChecks(value: unknown): CustomVerificationCheck[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (x): x is CustomVerificationCheck =>
+      x !== null &&
+      typeof x === "object" &&
+      typeof (x as CustomVerificationCheck).id === "string" &&
+      typeof (x as CustomVerificationCheck).label === "string",
+  );
 }
 
 // Slugify a label into an id-safe fragment: lowercase, replace
@@ -126,9 +130,10 @@ interface UseCustomVerificationChecksResult {
 }
 
 export function useCustomVerificationChecks(): UseCustomVerificationChecksResult {
-  // Hydrate from localStorage once on mount. We deliberately don't
-  // keep a useEffect sync on every render — the hook is the single
-  // writer and it persists after every mutation.
+  const prefQuery = useUserPreference();
+  const savePref = useSaveUserPreference();
+  // Synchronous seed from the localStorage mirror so the page boots
+  // before the cloud query resolves.
   const [customChecks, setCustomChecks] = useState<CustomVerificationCheck[]>(
     () => readStoredChecks(),
   );
@@ -138,17 +143,29 @@ export function useCustomVerificationChecks(): UseCustomVerificationChecksResult
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onStorage = (e: StorageEvent) => {
-      if (e.key !== STORAGE_KEY) return;
+      if (e.key !== STORAGE_MIRROR_KEY) return;
       setCustomChecks(readStoredChecks());
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const persist = useCallback((next: CustomVerificationCheck[]) => {
-    setCustomChecks(next);
-    writeStoredChecks(next);
-  }, []);
+  // Replace local state + mirror once the cloud query resolves.
+  useEffect(() => {
+    if (!prefQuery.data) return;
+    const fromCloud = asCustomChecks(prefQuery.data.customChecks);
+    setCustomChecks(fromCloud);
+    writeStoredChecks(fromCloud);
+  }, [prefQuery.data]);
+
+  const persist = useCallback(
+    (next: CustomVerificationCheck[]) => {
+      setCustomChecks(next);
+      writeStoredChecks(next);
+      void savePref.mutateAsync({ customChecks: next as unknown[] });
+    },
+    [savePref],
+  );
 
   const addCustomCheck = useCallback(
     (input: { label: string; description: string; recommended: boolean }) => {
