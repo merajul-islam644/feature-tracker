@@ -26,7 +26,7 @@ export function SecretsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-foreground">
-          {t("nav.issueTracker.secrets", "Verification Secrets")}
+          {t("nav.issueTracker.secrets", "Secrets")}
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {t(

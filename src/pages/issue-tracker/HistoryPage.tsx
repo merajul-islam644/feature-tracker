@@ -14,7 +14,7 @@ export function HistoryPage() {
         <h1 className="text-xl font-semibold text-foreground">
           {t(
             "issueTracker.history.title",
-            "Run History",
+            "History",
           )}
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
