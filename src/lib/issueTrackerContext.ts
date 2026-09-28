@@ -28,6 +28,12 @@ import { verificationChecks } from "@/data/issueTrackerConstants";
 
 export interface IssueTrackerContextSnapshot {
   generatedAt: string;
+  // Active project env — what (projectId, envSlug) pair the Issue
+  // Tracker is currently scoped to. Empty when the user is outside a
+  // project env route. Lets the assistant say "you're looking at the dev
+  // env" without having to ask, and explains why a target/secret the
+  // user mentioned isn't visible in the panel (different env).
+  activeEnv: { projectId: string; envSlug: string } | null;
   // Projects the signed-in user owns (compact). The assistant can create,
   // edit and delete projects via chat tools, so it needs the real ids to
   // resolve "rename the Blocks-Logic project" — same resolve-from-state
@@ -127,8 +133,22 @@ export function buildIssueTrackerContext(input: {
   filters: IssueFilters;
   projects?: Project[];
   customChecks?: CustomVerificationCheck[];
+  // (projectId, envSlug) the Issue Tracker is currently scoped to. The
+  // snapshot reports it so the assistant can speak about the user's
+  // current scope without asking. Null = outside a project env.
+  activeEnv?: { projectId: string; envSlug: string } | null;
 }): IssueTrackerContextSnapshot {
-  const { targets, secrets, issues, scope, run, filters, projects, customChecks = [] } = input;
+  const {
+    targets,
+    secrets,
+    issues,
+    scope,
+    run,
+    filters,
+    projects,
+    activeEnv = null,
+    customChecks = [],
+  } = input;
   // Merge built-in + custom labels so the AI can answer "what does
   // this scope do?" for any id the user has enabled, including
   // custom_*. Built-in wins on collision (shouldn't happen — custom
@@ -157,6 +177,7 @@ export function buildIssueTrackerContext(input: {
 
   return {
     generatedAt: new Date().toISOString(),
+    activeEnv: activeEnv ?? null,
     projects: (projects ?? []).slice(0, 30).map((p) => ({
       id: p.id,
       name: p.name,

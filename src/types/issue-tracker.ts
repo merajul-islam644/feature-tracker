@@ -84,6 +84,13 @@ export interface VerificationCheck {
 
 export interface VerificationTarget {
   id: string;
+  // Per-environment scoping: every target now belongs to a specific
+  // project env (projectId + envSlug). Set at creation time from the
+  // active env context; legacy rows without these fields are
+  // dropped from the UI per the scoping policy — see Phase 2 of the
+  // Issue Tracker scoping change.
+  projectId: string;
+  envSlug: string;
   applicationName: string;
   url: string;
   environment: TargetEnvironment;
@@ -103,6 +110,12 @@ export interface VerificationTarget {
 
 export interface Secret {
   id: string;
+  // Per-environment scoping: every secret now belongs to a specific
+  // project env (projectId + envSlug). Set at creation time from the
+  // active env context; legacy rows without these fields are
+  // dropped from the UI per the scoping policy.
+  projectId: string;
+  envSlug: string;
   name: string;
   email: string;
   // Masked display string only. The real value lives in component state for
@@ -169,8 +182,16 @@ export interface Issue {
    *  issue. Undefined/empty = unapproved — only approved issues are
    *  assignable to developers. */
   approvedById?: string;
-  // Future-ready linking into existing Project/Feature/Flow hierarchy
-  projectId?: string;
+  // Per-environment scoping: every issue now belongs to a specific
+  // project env (projectId + envSlug). Set at detection time by the
+  // verification agent; legacy rows without these fields are dropped
+  // from the UI per the scoping policy.
+  projectId: string;
+  envSlug: string;
+  // Future-ready linking into existing Project/Feature/Flow hierarchy.
+  // Distinct from `projectId` above: `projectId` is the env-scope key,
+  // `featureId` / `flowId` are domain-level drill-downs the user can
+  // attach manually once they triage an issue.
   featureId?: string;
   flowId?: string;
 }

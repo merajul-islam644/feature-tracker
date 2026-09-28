@@ -5,6 +5,7 @@ import { AppSidebar } from "./AppSidebar";
 import { Topbar } from "./Topbar";
 import { Toaster } from "@/components/ui/sonner";
 import { IssueTrackerStoreProvider } from "@/hooks/issueTrackerStore";
+import { ActiveEnvProvider } from "@/contexts/ActiveEnvContext";
 import { GlobalChatAssistant } from "@/components/issue-tracker/GlobalChatAssistant";
 import { IncomingCallDialog } from "@/components/team-chat/IncomingCallDialog";
 import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
@@ -24,6 +25,14 @@ export function AppLayout() {
   const [testModalOpen, setTestModalOpen] = useAnnouncementsAutoOpen();
 
   return (
+    // ActiveEnvProvider wraps IssueTrackerStoreProvider because the
+    // store's hook (useIssueTracker) reads `useActiveEnv()` during
+    // render. If they were swapped, the hook would throw on the very
+    // first render since the provider's value is null and its consumer
+    // is the one supplying that value's reader. The env context itself
+    // only requires anything-renders-inside, so placing it outermost
+    // here at the layout root works for the whole authenticated tree.
+    <ActiveEnvProvider>
     <IssueTrackerStoreProvider>
       <TooltipProvider delayDuration={150}>
         <SidebarProvider>
@@ -61,5 +70,6 @@ export function AppLayout() {
         </SidebarProvider>
       </TooltipProvider>
     </IssueTrackerStoreProvider>
+    </ActiveEnvProvider>
   );
 }

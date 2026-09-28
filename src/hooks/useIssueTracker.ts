@@ -28,6 +28,7 @@ import { issueTrackerApi } from "@/services/issueTrackerApi";
 import { mockInitialChat, idleRun, verificationChecks } from "@/data/issueTrackerConstants";
 import { useToast } from "@/hooks/useToast";
 import { useAuth } from "@/hooks/useAuth";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
 import {
   fetchProjectContents,
   useAppendChatMessage,
@@ -312,6 +313,13 @@ function readStoredDevice(): "desktop" | "mobile" | "tablet" {
 export function useIssueTracker() {
   const toast = useToast();
   const { currentUser } = useAuth();
+  // Active env from the URL — only set when the user is on
+  // `/projects/:projectId/:envSlug`. Issue Tracker hooks read their data
+  // through this. When null (e.g. user is on /issue-tracker/targets but
+  // hasn't visited a project env yet) the chat-driven mutations below
+  // refuse to act rather than stamp an empty envSlug and silently
+  // mis-file the row.
+  const activeEnv = useActiveEnv();
 
   // Per-user session storage key. Survives refreshes so the user lands back
   // in the conversation they were in. Keyed by user id so a sign-out /
@@ -586,21 +594,13 @@ export function useIssueTracker() {
     ],
   );
 
-  // Surface a single error toast when any of the three core queries fail.
-  // Without this aggregation a transient network blip on one collection
-  // could scroll three separate toasts past the user.
-  useEffect(() => {
-    if (
-      targetsQuery.error ||
-      secretsQuery.error ||
-      issuesQuery.error
-    ) {
-      toast.error("Unable to load Issue Tracker data.");
-    }
-    // We intentionally key on the queries themselves — toasts firing on
-    // every render would be the wrong semantic.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetsQuery.error, secretsQuery.error, issuesQuery.error]);
+  // No aggregate error toast here. The three core queries
+  // (targets / secrets / issues) are scoped to the active project
+  // env, and on Issue Tracker pages the per-page error rendering
+  // surfaces `targetsQuery.error` / `secretsQuery.error` /
+  // `issuesQuery.error` directly. A redundant toast in the corner
+  // obscures more than it helps — the user can already see the
+  // failure state on the page they're looking at.
 
   // Reset the hydration flag whenever the active session changes — the
   // effect below then re-pulls the messages for the new session.
@@ -655,8 +655,21 @@ export function useIssueTracker() {
   // ──────────────────────────────────────────────────────────────────────────
   const addTarget = useCallback(
     async (payload: { url: string; applicationName?: string; credentialId?: string | null }) => {
+      // Issue Tracker is env-scoped — refuse to act outside an active
+      // project env. Stamping an empty envSlug would silently mis-file
+      // the row (the schema sets both fields to requiredOn: "Both"), and
+      // the user's URL would be invisible the next time they visited
+      // this project.
+      if (!activeEnv) {
+        toast.error(
+          "Open a project's environment before adding URLs to the Issue Tracker.",
+        );
+        throw new Error("add_failed_no_env");
+      }
       try {
         const created = await createTarget.mutateAsync({
+          projectId: activeEnv.projectId,
+          envSlug: activeEnv.envSlug,
           url: payload.url,
           applicationName:
             payload.applicationName ?? deriveNameFromUrl(payload.url),
@@ -677,7 +690,7 @@ export function useIssueTracker() {
         throw new Error("add_failed");
       }
     },
-    [createTarget, toast],
+    [createTarget, toast, activeEnv],
   );
 
   const removeTarget = useCallback(
@@ -755,8 +768,18 @@ export function useIssueTracker() {
       // requested target is PATCHed independently.
       targetIds?: string[];
     }) => {
+      // Env-scoped: refuse outside an active project env (same reason as
+      // `addTarget`).
+      if (!activeEnv) {
+        toast.error(
+          "Open a project's environment before adding credentials.",
+        );
+        throw new Error("add_failed_no_env");
+      }
       try {
         const created = await createSecret.mutateAsync({
+          projectId: activeEnv.projectId,
+          envSlug: activeEnv.envSlug,
           name: payload.name,
           email: payload.email,
           // Mask before persisting — the cloud only ever stores the
@@ -830,7 +853,7 @@ export function useIssueTracker() {
         throw new Error("add_failed");
       }
     },
-    [createSecret, toast, targets, updateTarget],
+    [createSecret, toast, targets, updateTarget, activeEnv],
   );
 
   const deleteSecretFn = useCallback(
@@ -1459,6 +1482,7 @@ export function useIssueTracker() {
           fresh,
           setRun,
           persistDetectedIssue,
+          { projectId: activeEnv?.projectId ?? "", envSlug: activeEnv?.envSlug ?? "" },
           () => {
             mockCancelRef.current = null;
             toast.success("Verification complete.");
@@ -1702,6 +1726,7 @@ export function useIssueTracker() {
         run,
         filters,
         projects,
+        activeEnv,
       });
       // Give the model the last browser tool results — the AI call is
       // stateless per message, so this memory is the only way it can
@@ -2025,8 +2050,16 @@ export function useIssueTracker() {
           const environment: TargetEnvironment =
             (tool.input.environment as TargetEnvironment | undefined) ??
             "production";
+          // Env-scoped: refuse outside an active project env. Mirror of the
+          // hook-level `addTarget` check so the chat tool can't stamp an
+          // empty envSlug (which would silently mis-file the row).
+          if (!activeEnv) {
+            return "Skipped — open a project's environment before adding Issue Tracker targets.";
+          }
           try {
             await createTarget.mutateAsync({
+              projectId: activeEnv.projectId,
+              envSlug: activeEnv.envSlug,
               applicationName,
               url: parsed.toString(),
               environment,
@@ -2561,8 +2594,17 @@ export function useIssueTracker() {
           const credentialId =
             exactTwin?.credentialId ??
             (distinctCreds.size === 1 ? [...distinctCreds][0] : null);
+          // Synthetic in-memory target for a one-off live verify — never
+          // persisted to Blocks, but VerificationTarget.projectId /
+          // envSlug are required fields, so stamp them from the active
+          // env. When the chat tool fires outside an env (shouldn't be
+          // possible because the sidebar hides Issue Tracker entry
+          // points then) fall back to empty strings: the row is
+          // throwaway so a mis-file here is invisible.
           const synthetic: VerificationTarget = {
             id: liveId,
+            projectId: activeEnv?.projectId ?? "",
+            envSlug: activeEnv?.envSlug ?? "",
             applicationName: parsed.hostname.replace(/^www\./, ""),
             url: parsed.toString(),
             environment: "production",
@@ -2609,6 +2651,7 @@ export function useIssueTracker() {
                 fresh,
                 setRun,
                 persistDetectedIssue,
+                { projectId: activeEnv?.projectId ?? "", envSlug: activeEnv?.envSlug ?? "" },
                 () => {
                   mockCancelRef.current = null;
                   toast.success("Verification complete.");
@@ -3212,10 +3255,20 @@ type PersistDetectedIssue = (
   runId: string,
 ) => Promise<void>;
 
+// Env scope stamped onto the synthetic issue `driveMockRun` discovers
+// late in the run. Empty strings when the mock fires outside a project
+// env (defensive — the chat-path refuses to start a verification
+// without an active env, but the mock path is reachable for tests).
+interface DriveMockScope {
+  projectId: string;
+  envSlug: string;
+}
+
 function driveMockRun(
   initial: VerificationRun,
   setRun: React.Dispatch<React.SetStateAction<VerificationRun>>,
   persistDetectedIssue: PersistDetectedIssue,
+  scope: DriveMockScope,
   onDone: () => void,
 ): () => void {
   let snapshot = initial;
@@ -3289,6 +3342,11 @@ function driveMockRun(
         ? `ISSUE-${firstApp.targetId}-${Date.now().toString(36)}`
         : `ISSUE-${String(Math.floor(Math.random() * 9000) + 1000)}`,
       title: "Newly discovered: console error on initial paint",
+      // Per-environment scoping — required fields on the Issue row.
+      // Stamped from the active env so the new finding lands in the
+      // same scoped view the user is browsing on the Issue Tracker.
+      projectId: scope.projectId,
+      envSlug: scope.envSlug,
       applicationName: firstApp?.applicationName ?? "Unverified application",
       url: firstApp?.targetId
         ? ""

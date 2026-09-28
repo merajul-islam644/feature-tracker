@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Plus, GitBranch, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import {
   useProjectFlows,
 } from "@/lib/blocks/hooks";
 import { useIsRole } from "@/hooks/useAuth";
+import { useActiveEnvContext } from "@/contexts/ActiveEnvContext";
 import { useT } from "@/lib/blocks/i18n";
 import {
   CANONICAL_ENV_SLUGS,
@@ -187,6 +188,35 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
   const flowsQuery = useProjectFlows(projectId);
   const t = useT();
   const navigate = useNavigate();
+  // Mirror the URL-resolved (projectId, envSlug) into the Issue Tracker
+  // env context so the Targets/Secrets/Issues hooks can scope their reads
+  // and mutations. We push even when envSlug is missing: the env-less
+  // /projects/:id route counts as "active env context" too (filtered to
+  // legacy rows), because the user is on a project page. Pushing an empty
+  // envSlug would be a per-env-scoping bug — the schema demands a real
+  // slug. Skipping the push leaves the previous env mounted, which is
+  // harmless given the sidebar gates Issue Tracker sub-routes by URL and
+  // the Issue Tracker reads also check the URL via the hook layer.
+  const { setEnv } = useActiveEnvContext();
+  useEffect(() => {
+    // Only stamp when both pieces are present. The legacy env-less
+    // /projects/:id route doesn't push — readers see the previous
+    // value (or null on first load), and the gate in AppSidebar hides
+    // the Issue Tracker menu so the user can't reach Issue Tracker
+    // sub-routes from the env-less landing in the first place.
+    //
+    // Cleanup intentionally does NOT clear the context: the Issue
+    // Tracker sub-routes (`/issue-tracker/*`) live outside this
+    // component tree but still need the env to scope their reads /
+    // mutations. Without this, navigating from a project env into the
+    // Issue Tracker would unmount ProjectDetailPage, drop the env to
+    // null, and trip the `add_failed_no_env` guard at every mutation.
+    // The next time the user enters a project env, the effect
+    // re-runs and overwrites whatever was there.
+    if (projectId && envSlug) {
+      setEnv({ projectId, envSlug });
+    }
+  }, [projectId, envSlug, setEnv]);
   // Role gates for the header CTAs:
   //
   //   * "Add Feature" (just below) is manager-only — the workspace

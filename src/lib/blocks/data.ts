@@ -343,6 +343,11 @@ export interface CloudNotification {
 
 export interface CloudVerificationTarget {
   ItemId: string;
+  // Per-environment scoping — see VerificationTarget (UI type) for the
+  // rationale. Legacy rows absent these fields are dropped by the
+  // filter in `useIssueTracker`.
+  projectId?: string;
+  envSlug?: string;
   applicationName: string;
   url: string;
   environment: string;
@@ -358,6 +363,9 @@ export interface CloudVerificationTarget {
 
 export interface CloudSecret {
   ItemId: string;
+  // Per-environment scoping — see Secret (UI type) for the rationale.
+  projectId?: string;
+  envSlug?: string;
   name: string;
   email: string;
   passwordMasked: string;
@@ -393,6 +401,10 @@ export interface CloudIssue {
   // Tester approval — OIDC sub of the tester who re-tested and approved.
   // Empty while unapproved; absent on rows created before the field existed.
   approvedById?: string;
+  // Per-environment scoping — see Issue (UI type) for the rationale.
+  // Set by the verification agent at detection time.
+  projectId?: string;
+  envSlug?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
@@ -774,6 +786,13 @@ export function toVerificationTarget(
 ): VerificationTarget {
   return {
     id: t.ItemId,
+    // `projectId` / `envSlug` are required at the UI layer for env-
+    // scoped Issue Tracker. Legacy rows missing them are filtered out
+    // by `useIssueTracker` before they reach the UI; the `?? ""`
+    // fallback here just keeps the type-check honest for the rare
+    // unfiltered read.
+    projectId: t.projectId ?? "",
+    envSlug: t.envSlug ?? "",
     applicationName: t.applicationName ?? "",
     url: t.url ?? "",
     environment: narrowOr<TargetEnvironment>(
@@ -795,6 +814,9 @@ export function toVerificationTarget(
 export function toSecret(s: CloudSecret): Secret {
   return {
     id: s.ItemId,
+    // Same scoping story as VerificationTarget above.
+    projectId: s.projectId ?? "",
+    envSlug: s.envSlug ?? "",
     name: s.name ?? "",
     email: s.email ?? "",
     passwordMasked: s.passwordMasked ?? "••••••••••",
@@ -848,6 +870,11 @@ export function toIssue(i: CloudIssue): Issue {
     assignedDeveloperIds: parseJsonArray<string>(i.assignedDeveloperIdsJson),
     // Absent/empty stays undefined so `!!issue.approvedById` gates cleanly.
     approvedById: i.approvedById || undefined,
+    // Per-environment scoping — see VerificationTarget for the same
+    // story. The verification agent stamps these at detection time;
+    // legacy rows without them are dropped by `useIssueTracker`.
+    projectId: i.projectId ?? "",
+    envSlug: i.envSlug ?? "",
   };
 }
 
@@ -1744,6 +1771,13 @@ export const verificationTargetsCollection = blocksClient.data.collection<CloudV
   "VerificationTarget",
   {
     fields: [
+      // Per-environment scoping — MUST stay in the selection: the
+      // env filter in `useIssueTracker` matches loaded rows by
+      // (projectId, envSlug), and a missing column here maps to
+      // `undefined` on every row, so every row would silently drop
+      // out of the scoped view.
+      "projectId",
+      "envSlug",
       "applicationName",
       "url",
       "environment",
@@ -1762,6 +1796,9 @@ export const secretsCollection = blocksClient.data.collection<CloudSecret>(
   "Secret",
   {
     fields: [
+      // Per-environment scoping — same rule as VerificationTarget.
+      "projectId",
+      "envSlug",
       "name",
       "email",
       "passwordMasked",
@@ -1799,6 +1836,9 @@ export const issuesCollection = blocksClient.data.collection<CloudIssue>(
       "seenInRunIdsJson",
       "assignedDeveloperIdsJson",
       "approvedById",
+      // Per-environment scoping — same rule as VerificationTarget.
+      "projectId",
+      "envSlug",
       "CreatedBy",
       "CreatedDate",
       "LastUpdatedBy",

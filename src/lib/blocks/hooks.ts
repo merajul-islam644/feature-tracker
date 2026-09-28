@@ -21,6 +21,7 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
 import { blocksClient } from "./client";
 import {
   createdByFilter,
@@ -4785,19 +4786,36 @@ export function useRenameProjectEnv(): UseMutationResult<
 // page is the only consumer, and coupling its updates to dashboard totals
 // would force unnecessary refetches on every change.
 
-// Read every configured URL for the signed-in user. Sort by
-// `LastUpdatedDate` desc so the most recently touched targets surface
-// first — the `UrlInput` panel shows what the user just edited at the top
-// of the list. Matches the Project listing's sort choice.
+// Read every configured URL for the signed-in user, scoped to the
+// active project env. Sort by `LastUpdatedDate` desc so the most
+// recently touched targets surface first — the `UrlInput` panel shows
+// what the user just edited at the top of the list. Matches the
+// Project listing's sort choice.
+//
+// Env scoping: a target row carries `projectId` + `envSlug` at write
+// time (see `useCreateVerificationTarget`). When the user is not on
+// a project env route the query is disabled so we don't leak rows
+// from other envs into the panel. Outside an env the sidebar hides
+// Issue Tracker entry points anyway, so this state is only briefly
+// observable during the transition between routes.
 export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const activeEnv = useActiveEnv();
   return useQuery({
-    queryKey: queryKeys.issueTrackerTargets(userId),
-    enabled: Boolean(userId),
+    queryKey: [
+      ...queryKeys.issueTrackerTargets(userId),
+      activeEnv?.projectId ?? "",
+      activeEnv?.envSlug ?? "",
+    ],
+    enabled: Boolean(userId && activeEnv),
     queryFn: async () => {
       const raw = await verificationTargetsCollection.list({
-        filter: createdByFilter(userId),
+        filter: {
+          ...createdByFilter(userId),
+          projectId: activeEnv!.projectId,
+          envSlug: activeEnv!.envSlug,
+        },
         pageNo: 1,
         pageSize: 200,
         sort: { LastUpdatedDate: -1 },
@@ -4809,19 +4827,29 @@ export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
   });
 }
 
-// Read every credential row for the signed-in user. The page never needs
-// the real password — `passwordMasked` rides alone on the wire, the form
-// holds the value during the active session and clears on unmount (see
-// the form's local-state treatment + spec section 12.3).
+// Read every credential row for the signed-in user, scoped to the
+// active project env. The page never needs the real password —
+// `passwordMasked` rides alone on the wire, the form holds the value
+// during the active session and clears on unmount (see the form's
+// local-state treatment + spec section 12.3).
 export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const activeEnv = useActiveEnv();
   return useQuery({
-    queryKey: queryKeys.issueTrackerSecrets(userId),
-    enabled: Boolean(userId),
+    queryKey: [
+      ...queryKeys.issueTrackerSecrets(userId),
+      activeEnv?.projectId ?? "",
+      activeEnv?.envSlug ?? "",
+    ],
+    enabled: Boolean(userId && activeEnv),
     queryFn: async () => {
       const raw = await secretsCollection.list({
-        filter: createdByFilter(userId),
+        filter: {
+          ...createdByFilter(userId),
+          projectId: activeEnv!.projectId,
+          envSlug: activeEnv!.envSlug,
+        },
         pageNo: 1,
         pageSize: 200,
         sort: { CreatedDate: -1 },
@@ -4869,18 +4897,33 @@ export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
   // Only these two roles need the cross-user fetch; manager keeps the
   // tight wire filter.
   const fetchUnscoped = isTester || isDeveloper;
+  // Env scoping — same shape as targets / secrets: an Issue row carries
+  // its own projectId / envSlug, so the filter sits on top of the wire
+  // fetch whether it's scoped by CreatedBy or unscoped. Disabled
+  // outside an env context.
+  const activeEnv = useActiveEnv();
   return useQuery({
-    queryKey: [...queryKeys.issueTrackerIssues(userId), roles.join(",")],
-    enabled: Boolean(userId),
+    queryKey: [
+      ...queryKeys.issueTrackerIssues(userId),
+      roles.join(","),
+      activeEnv?.projectId ?? "",
+      activeEnv?.envSlug ?? "",
+    ],
+    enabled: Boolean(userId && activeEnv),
     queryFn: async () => {
+      const envFilter = {
+        projectId: activeEnv!.projectId,
+        envSlug: activeEnv!.envSlug,
+      };
       const raw = fetchUnscoped
         ? await issuesCollection.list({
+            filter: envFilter,
             pageNo: 1,
             pageSize: 200,
             sort: { detectedAt: -1 },
           })
         : await issuesCollection.list({
-            filter: createdByFilter(userId),
+            filter: { ...createdByFilter(userId), ...envFilter },
             pageNo: 1,
             pageSize: 200,
             sort: { detectedAt: -1 },
@@ -4914,12 +4957,17 @@ export function useCreateVerificationTarget(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // Per-env scoping — the caller (useIssueTracker.addTarget / chat tool)
+  // supplies projectId + envSlug with the payload, so the create site
+  // has nothing else to do.
   return useMutation({
     mutationFn: async (input) => {
       // Only forward fields that have values. Empty strings against
       // `requiredOn: 0` fields are rejected by some gateway versions
       // — better to omit than to send `""` for a brand-new row.
       const created = await verificationTargetsCollection.create({
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         applicationName: input.applicationName,
         url: input.url,
         environment: input.environment,
@@ -5066,7 +5114,13 @@ export function useUpdateVerificationTarget(): UseMutationResult<
 export function useCreateSecret(): UseMutationResult<
   Secret,
   Error,
-  { name: string; email: string; passwordMasked: string }
+  {
+    name: string;
+    email: string;
+    passwordMasked: string;
+    projectId: string;
+    envSlug: string;
+  }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
@@ -5074,6 +5128,8 @@ export function useCreateSecret(): UseMutationResult<
   return useMutation({
     mutationFn: async (input) => {
       const created = await secretsCollection.create({
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         name: input.name,
         email: input.email,
         passwordMasked: input.passwordMasked,
@@ -5085,6 +5141,8 @@ export function useCreateSecret(): UseMutationResult<
       const now = new Date().toISOString();
       const item = {
         ItemId: itemId,
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         name: input.name,
         email: input.email,
         passwordMasked: input.passwordMasked,
@@ -5181,6 +5239,12 @@ export function useCreateIssue(): UseMutationResult<
   return useMutation({
     mutationFn: async (input) => {
       const created = await issuesCollection.create({
+        // Per-environment scoping — included on every persisted Issue.
+        // Callers must stamp these from the active env context (the chat
+        // + mock paths do so); a missing envSlug would be filtered out by
+        // the scoped read, so the row would silently disappear.
+        projectId: input.projectId,
+        envSlug: input.envSlug,
         title: input.title,
         applicationName: input.applicationName,
         url: input.url,
