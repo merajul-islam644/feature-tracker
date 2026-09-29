@@ -4576,14 +4576,28 @@ export function useCloneFeature(): UseMutationResult<
 }
 
 // Flow-side counterpart of `useCloneFeature`. Promotes a single flow to
-// a sibling env (stg / prod / uat) by creating a new record with
-// `clonedFromFlowId` pointing back at the root dev source. Source row
-// stays in place; sibling appears in the target env. The source row's
-// `FlowEnvWorkflow` chain picks up a persistent "promoted to {env}"
-// tick because `useClonedFlowEnvs` now finds the new sibling via
-// `clonedFromFlowId`.
+// a sibling env (stg / prod / uat) by:
+//   1. Resolving the target-env feature — looking up the source feature's
+//      existing sibling in the target env (`clonedFromFeatureId ===
+//      sourceFeature.id && envSlug === targetEnvSlug`); if none exists,
+//      cascade-creating a sibling feature that mirrors
+//      `useCloneFeature`'s sibling-create payload (title, projectId,
+//      status, envSlug, clonedFromFeatureId, plus developerIds / qaIds /
+//      githubLink when non-empty).
+//   2. Creating a new flow row under that target-env feature with
+//      `clonedFromFlowId` pointing back at the root dev source.
 //
-// `clonedFromFlowId` semantics — mirrors the feature-side "all
+// Why a feature cascade is required — the env-scoped pages filter
+// features by `envSlug` via `useProjectFeatures`; the cloned flow has
+// to live under a feature in the target env, otherwise the target
+// env's page (filtered by envSlug) can't render it. The source feature
+// only appears on the source env's page, so without the cascade the
+// clone would either be invisible (no home on the target env's page)
+// or appear as a duplicate in the source feature on the source env's
+// page (since `useFeatureFlows` returns flows by featureId alone, not
+// filtered by envSlug).
+//
+// `clonedFromFlowId` flat-link to root — mirrors the feature-side "all
 // descendants link to the root source" convention. If `flow` IS the
 // dev source (`flow.clonedFromFlowId === undefined`), the new clone's
 // `clonedFromFlowId` is set to `flow.id` (the root). If `flow` is
@@ -4597,15 +4611,16 @@ export function useCloneFeature(): UseMutationResult<
 // `clonedFromFlowId` points at the stg clone, not the root. Flat-link
 // to the root keeps the env-set accurate.
 //
-// Independent of the feature's env chain — per the user's request,
-// each flow row's environment workflow operates on the flow alone,
-// without requiring its parent feature to be promoted to the target
-// env. The mutation does NOT cascade (no feature auto-create, no
-// other-flow auto-clone); only the one flow is duplicated. The
-// "feature has been promoted" check is intentionally absent — a
-// manager promoting a single dev flow to stg shouldn't require
-// promoting the whole feature first. The row-level chain diagram on
-// each flow is the source of truth.
+// Per-flow independence — per the user's request, each flow row's
+// environment workflow operates on the flow alone, without requiring
+// its parent feature to be promoted to the target env FIRST. The
+// cascade here is structural (a sibling feature is needed so the
+// cloned flow has a home on the target env's page), not a per-flow
+// propagation: no other-flow auto-clone, no flow-list cascade —
+// only the one flow being promoted is duplicated. The "feature has
+// been promoted" check is intentionally absent — a manager promoting
+// a single dev flow to stg shouldn't require promoting the whole
+// feature first.
 //
 // Manager-only — see the role gate below. Tester / developer roles get
 // the read-only `FlowEnvWorkflow` mirror in `FlowItem.tsx` instead.
@@ -4669,17 +4684,103 @@ export function useCloneFlow(): UseMutationResult<
       // top of this hook for why we don't chain link-by-link.
       const rootSourceId = flow.clonedFromFlowId ?? flow.id;
 
+      // Resolve the target-env sibling feature. The cloned flow has
+      // to live under a feature in the target env, otherwise the
+      // env-scoped page (filtered by `envSlug` on
+      // `useProjectFeatures`) can't render it — the source feature
+      // only appears on the source env's page. We cascade-create a
+      // sibling feature if one doesn't already exist; this mirrors
+      // `useCloneFeature`'s feature-side cascade, but stops at the
+      // feature boundary (no other-flow auto-clone — that's the
+      // per-flow independence the user asked for).
+      //
+      // Look up the source feature's existing sibling in the target
+      // env. The `clonedFromFeatureId` filter is the same link
+      // `useClonedFeatureEnvs` uses; the additional `envSlug` filter
+      // narrows the candidate set to the row we'd attach the cloned
+      // flow to. Wrapped in try/catch + a defensive page-size bound
+      // — a feature typically has ≤3 siblings (stg/prod/uat), so a
+      // page size of 10 is generous headroom without pulling the
+      // whole feature set.
+      const siblingsRaw = await featuresCollection.list({
+        filter: {
+          clonedFromFeatureId: flow.featureId,
+          envSlug: targetEnvSlug,
+        },
+        pageNo: 1,
+        pageSize: 10,
+      });
+      const existingSibling = unwrapPaged<{ ItemId: string }>(siblingsRaw)
+        .items[0];
+
+      // Read the source feature for the sibling-create payload. The
+      // Feature schema forwards `title`, `developerIds`, `qaIds`,
+      // and `githubLink` from the source — the destination env
+      // inherits the same team ownership and code-link as the
+      // source. Mirrors `useCloneFeature`'s sibling-create payload
+      // verbatim. Done after the sibling lookup so an existing
+      // sibling short-circuits this read entirely (avoids a wasted
+      // fetch on the common case of "promoting more flows after
+      // the feature is already promoted").
+      let targetFeatureId: string;
+      if (existingSibling) {
+        targetFeatureId = existingSibling.ItemId;
+      } else {
+        const sourceFeatureRaw = await featuresCollection.get(flow.featureId);
+        const sourceFeature = unwrapPaged<CloudFeature>(sourceFeatureRaw)
+          .items[0];
+        if (!sourceFeature) {
+          throw new Error(
+            `Cannot promote flow "${flow.name}" — parent feature (${flow.featureId}) could not be loaded.`,
+          );
+        }
+        const siblingCreatePayload: Record<string, unknown> = {
+          title: sourceFeature.title,
+          projectId: sourceFeature.projectId,
+          status: "backlog",
+          envSlug: targetEnvSlug,
+          clonedFromFeatureId: sourceFeature.ItemId,
+        };
+        if (Array.isArray(sourceFeature.developerIds)) {
+          siblingCreatePayload.developerIds = sourceFeature.developerIds;
+        }
+        if (Array.isArray(sourceFeature.qaIds)) {
+          siblingCreatePayload.qaIds = sourceFeature.qaIds;
+        }
+        if (
+          typeof sourceFeature.githubLink === "string" &&
+          sourceFeature.githubLink.trim() !== ""
+        ) {
+          siblingCreatePayload.githubLink = sourceFeature.githubLink.trim();
+        }
+        const createdSibling = (await featuresCollection.create(
+          siblingCreatePayload,
+        )) as unknown;
+        const newSiblingId = extractInsertedItemId(
+          createdSibling,
+          "insertFeature",
+        );
+        if (!newSiblingId) {
+          throw new Error(
+            "Could not create sibling feature for flow clone — no itemId in response.",
+          );
+        }
+        targetFeatureId = newSiblingId;
+      }
+
       // Build the clone-record payload. The Flow schema marks
-      // `title` and `featureId` as required; `status` is forwarded
-      // verbatim from the source so the audit trail of "passed in
-      // <source env>" stays attached to the cloned flow (the tester
-      // re-runs in the target env and updates). Optional content
-      // fields (`description` / `steps` / `stack`) are forwarded
-      // only when non-empty so the schema's `requiredOn: 0` rule
-      // isn't tripped.
+      // `title` and `featureId` as required; `featureId` is the
+      // target-env sibling feature (existing or just-created) so the
+      // cloned flow renders under that feature on the target env's
+      // page. `status` is forwarded verbatim from the source so the
+      // audit trail of "passed in <source env>" stays attached to
+      // the cloned flow (the tester re-runs in the target env and
+      // updates). Optional content fields (`description` / `steps` /
+      // `stack`) are forwarded only when non-empty so the schema's
+      // `requiredOn: 0` rule isn't tripped.
       const createPayload: Record<string, unknown> = {
         title: flow.name,
-        featureId: flow.featureId,
+        featureId: targetFeatureId,
         status: flow.status ?? "draft",
         envSlug: targetEnvSlug,
         clonedFromFlowId: rootSourceId,
@@ -4707,17 +4808,17 @@ export function useCloneFlow(): UseMutationResult<
       }
       // We don't have the cloud's full row on hand (the create
       // response only carries the new id), so build a `Flow`-shaped
-      // return from the source's metadata + the new envSlug + the
-      // sibling id. Downstream callers (`onSuccess`) only need the
-      // id + name + projectId + envSlug + featureId to construct
-      // the notification payload, and TanStack Query will refetch
-      // the row's full content from `["flows", userId, featureId]`
-      // once we invalidate it.
+      // return from the source's metadata + the new envSlug +
+      // sibling featureId + the sibling id. Downstream callers
+      // (`onSuccess`) only need the id + name + projectId + envSlug
+      // + featureId to construct the notification payload, and
+      // TanStack Query will refetch the row's full content from
+      // `["flows", userId, featureId]` once we invalidate it.
       const now = new Date().toISOString();
       const synthetic = {
         ItemId: siblingId,
         title: flow.name,
-        featureId: flow.featureId,
+        featureId: targetFeatureId,
         envSlug: targetEnvSlug,
         status: flow.status ?? "draft",
         description: flow.description,
@@ -4730,20 +4831,32 @@ export function useCloneFlow(): UseMutationResult<
     },
     onSuccess: (_sibling, vars) => {
       // Refresh every cached view of this project's flows + the
-      // clonedEnvs lookup the `FlowEnvWorkflow` mirror uses. The
-      // prefix match covers:
+      // clonedEnvs lookups the workflow mirrors use. The prefix
+      // matches cover:
       //   * `["flows", userId, featureId]` — the row's own flow
       //     list (re-renders the source row + any sibling rows
-      //     under the same feature);
+      //     under the same feature). Invalidated for BOTH the
+      //     source feature (so the source row's chain re-renders
+      //     against the now-non-empty clonedEnvs set) AND the
+      //     target-env feature (so the target env's page picks up
+      //     the cloned flow on the next render);
       //   * `["flows", userId, "clonedEnvs", flowId]` — the
       //     `useClonedFlowEnvs` lookup the source row's
       //     `FlowEnvWorkflow` mirror uses to paint the persistent
-      //     "promoted to {env}" tick.
+      //     "promoted to {env}" tick;
+      //   * `["features", userId, projectId, ...]` — the project-
+      //     scoped feature list, so the target env's page picks up
+      //     the new sibling feature on next render (only created if
+      //     no sibling existed — covered by the prefix match either
+      //     way, the env-scoped subkey just becomes a hit).
       qc.invalidateQueries({
         queryKey: ["flows", userId, vars.flow.featureId],
       });
       qc.invalidateQueries({
         queryKey: ["flows", userId, "clonedEnvs", vars.flow.clonedFromFlowId ?? vars.flow.id],
+      });
+      qc.invalidateQueries({
+        queryKey: ["features", userId, vars.flow.projectId],
       });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
