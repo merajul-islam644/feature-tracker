@@ -185,7 +185,7 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
   // page (no envSlug), the hook returns every feature for the project,
   // including legacy records without an envSlug — see hooks.ts.
   const featuresQuery = useProjectFeatures(projectId, envSlug);
-  const flowsQuery = useProjectFlows(projectId);
+  const flowsQuery = useProjectFlows(projectId, envSlug);
   const t = useT();
   const navigate = useNavigate();
   // Mirror the URL-resolved (projectId, envSlug) into the Issue Tracker

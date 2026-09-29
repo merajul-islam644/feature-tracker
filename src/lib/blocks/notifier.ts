@@ -1022,6 +1022,15 @@ export function useNotificationInbox() {
   useEffect(() => {
     if (!userId) return;
     const id = window.setInterval(() => {
+      // Skip while the tab is hidden — the user isn't watching the bell
+      // and the eventual-consistency / cooldown defenses still apply on
+      // the first tick after refocus. Saves ~12 calls/minute when the
+      // app is parked in a background tab. (For comparison: the
+      // announcements / call-signals pollers keep firing in background
+      // because their UX is supposed to surface to the user even when
+      // they aren't looking — a notification badge / auto-open dialog
+      // when refocusing. The inbox bell doesn't have that property.)
+      if (typeof document !== "undefined" && document.hidden) return;
       if (
         markReadMutation.isPending ||
         markAllReadMutation.isPending
