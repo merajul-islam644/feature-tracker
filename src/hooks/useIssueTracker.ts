@@ -70,6 +70,7 @@ import {
   setBinding,
   writeMirrorBindings,
   removeBinding,
+  bindingsEqual,
 } from "@/lib/issueTrackerBindings";
 import { chatTools, browserToolSummary } from "@/lib/chatTools";
 import type {
@@ -460,8 +461,23 @@ export function useIssueTracker() {
   const saveCloudBindings = useSaveSecretBindings();
   useEffect(() => {
     if (cloudBindings.data && activeEnv) {
-      writeMirrorBindings(activeEnv, cloudBindings.data.bindings);
-      setBindingVersion((v) => v + 1);
+      const cloudValue = cloudBindings.data.bindings;
+      // Only sync when the cloud row actually disagrees with the local
+      // mirror. A round-trip (cloud -> mirror -> cloud write via the
+      // effect below) advances `LastUpdatedDate`, so `useSecretBindings`
+      // resolves with NEW data even when the bindings themselves are
+      // identical — bumping `bindingVersion` on every resolve fires the
+      // cloud-write effect at :490, which calls `saveCloudBindings`,
+      // which invalidates `useSecretBindings`, which refetches with
+      // another fresh `LastUpdatedDate`, which fires this effect again.
+      // That's the binding feedback loop (~36 wasted gateway calls on
+      // first mount). `bindingsEqual` ignores target-id ordering so the
+      // write-back effect doesn't trip on a benign reorder either.
+      const mirrorValue = readBindings(activeEnv);
+      if (!bindingsEqual(mirrorValue, cloudValue)) {
+        writeMirrorBindings(activeEnv, cloudValue);
+        setBindingVersion((v) => v + 1);
+      }
     }
     // We deliberately ignore bindingVersion in the deps — only the
     // cloud value should trigger the sync, not the local writes.
@@ -2534,7 +2550,7 @@ export function useIssueTracker() {
           const p = projectId ? projects.find((x) => x.id === projectId) : undefined;
           if (!p) return `Skipped — project ${projectId ?? "(none)"} not found.`;
           try {
-            const { features, flows } = await fetchProjectContents(projectId!);
+            const { features, flows } = await fetchProjectContents(projectId!, activeEnv?.envSlug);
             if (features.length === 0) {
               return `Project "${p.name}" has no features yet (create one with create_feature).`;
             }
@@ -2590,7 +2606,7 @@ export function useIssueTracker() {
             return "Skipped — projectId, the feature (id or name) and the new name are required.";
           }
           try {
-            const { features } = await fetchProjectContents(projectId);
+            const { features } = await fetchProjectContents(projectId, activeEnv?.envSlug);
             const f = featureId
               ? features.find((x) => x.id === featureId)
               : matchUnique(features, featureName!);
@@ -2612,7 +2628,7 @@ export function useIssueTracker() {
             return "Skipped — projectId and the feature (id or name) are required.";
           }
           try {
-            const { features } = await fetchProjectContents(projectId);
+            const { features } = await fetchProjectContents(projectId, activeEnv?.envSlug);
             const f = featureId
               ? features.find((x) => x.id === featureId)
               : matchUnique(features, featureName!);
@@ -2638,7 +2654,7 @@ export function useIssueTracker() {
             ? (tool.input.steps as string[]).map((s) => String(s).trim()).filter(Boolean)
             : undefined;
           try {
-            const { features } = await fetchProjectContents(projectId);
+            const { features } = await fetchProjectContents(projectId, activeEnv?.envSlug);
             const f = featureId
               ? features.find((x) => x.id === featureId)
               : matchUnique(features, featureName!);
@@ -2671,7 +2687,7 @@ export function useIssueTracker() {
           const status = (tool.input.status as string | undefined)?.trim();
           if (!name && !status) return "Skipped — nothing to change.";
           try {
-            const { flows } = await fetchProjectContents(projectId);
+            const { flows } = await fetchProjectContents(projectId, activeEnv?.envSlug);
             const fl = flowId
               ? flows.find((x) => x.id === flowId)
               : matchUnique(flows, flowName!);
@@ -2710,7 +2726,7 @@ export function useIssueTracker() {
             return "Skipped — projectId and the flow (id or name) are required.";
           }
           try {
-            const { flows } = await fetchProjectContents(projectId);
+            const { flows } = await fetchProjectContents(projectId, activeEnv?.envSlug);
             const fl = flowId
               ? flows.find((x) => x.id === flowId)
               : matchUnique(flows, flowName!);

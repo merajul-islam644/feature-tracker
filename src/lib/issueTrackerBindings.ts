@@ -118,6 +118,36 @@ export function writeMirrorBindings(
   writeMirror(all);
 }
 
+// Stable equality for two binding maps. Order within the target-id arrays
+// is ignored — `["t1","t2"]` and `["t2","t1"]` describe the same binding
+// and would otherwise make the cloud-sync effect at `useIssueTracker.ts:461`
+// bump `bindingVersion` on every round-trip, which re-fires the cloud
+// write effect at `:490`, which invalidates `useSecretBindings`, which
+// refetches with a fresh `LastUpdatedDate`, which fires `:461` again —
+// the binding feedback loop. See the verification report from 2026-09-29.
+//
+// Returns true when both maps have the same secretIds, each with the
+// same target-id set (order-independent). Empty vs missing is treated as
+// equal — `readBindings` always returns `{}` for an unknown scope, so an
+// empty cloud row and an absent local row are the same state.
+export function bindingsEqual(a: SecretBindings, b: SecretBindings): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const k of aKeys) {
+    if (!(k in b)) return false;
+    const aIds = a[k];
+    const bIds = b[k];
+    if (!Array.isArray(aIds) || !Array.isArray(bIds)) return false;
+    if (aIds.length !== bIds.length) return false;
+    const aSet = new Set(aIds);
+    for (const id of bIds) {
+      if (!aSet.has(id)) return false;
+    }
+  }
+  return true;
+}
+
 export function setBinding(
   scope: { projectId: string; envSlug: string } | null | undefined,
   secretId: string,

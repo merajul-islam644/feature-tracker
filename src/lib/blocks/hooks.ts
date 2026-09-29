@@ -409,6 +409,13 @@ export function useProjects(): UseQueryResult<Project[]> {
   return useQuery({
     queryKey: queryKeys.projects(userId),
     enabled: Boolean(userId),
+    // 60 s matches `useAliveScope` — they cover the same row set with
+    // different page sizes, so a single stale window keeps the two
+    // calls in lockstep (one read goes fresh, then the next read in
+    // either hook is a cache hit until 60 s elapse). Project
+    // create/update/delete mutations invalidate the key directly, so
+    // the user always sees fresh state after a write.
+    staleTime: 60_000,
     queryFn: async () => {
       // Workspace-wide listing — testers need to browse every project in
       // the workspace (read-only). Mutating hooks still gate on `isTester`
@@ -558,8 +565,17 @@ export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
       if (!scope) return [];
       if (scope.projectIds.size === 0) return [];
       const featuresRaw = await featuresCollection.list({
+        // Candidate pool: 200 most-recent features, narrowed client-side
+        // to `scope.projectIds` (alive projects). Lowered from 1000 to
+        // 200 — a typical workspace has well under 200 features; the
+        // dashboard "Recent Features" card only displays `limit` rows
+        // (default 5), so 200 candidates gives ample headroom without
+        // pulling a thousand-row response just to discard 99.5% of it.
+        // Going wider would mask genuine "the user's recent N is not
+        // in the first 200" bugs by silently truncating — same
+        // rationale as the previous 1000 bound.
         pageNo: 1,
-        pageSize: 1000,
+        pageSize: 200,
         sort: { CreatedDate: -1 },
       });
       return unwrapPaged<unknown>(featuresRaw).items
@@ -588,15 +604,18 @@ export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
       // assertion would otherwise leak through.
       if (!scope) return [];
       if (scope.featureIds.size === 0) return [];
-      // pageSize 1000 covers typical workspaces — same bound as
-      // `useProjectFlows`. Going wider would mask genuine "the user's
-      // recent N is not in the first 1000" bugs by silently truncating.
+      // pageSize 200 mirrors `useRecentFeatures` — the dashboard
+      // "Recent Flows" card only displays `limit` rows (default 5),
+      // so a 200-row candidate pool gives ample headroom for typical
+      // workspaces while cutting the response payload by ~80% from
+      // the previous 1000. Going wider would mask genuine "the user's
+      // recent N is not in the first 200" bugs by silently truncating.
       const flowsRaw = await flowsCollection.list({
         // Workspace-wide read: dropped `createdByFilter(userId)` so a
         // tester can see recent workspace flows. Narrowed client-side to
         // `scope.featureIds` (alive features in alive projects) below.
         pageNo: 1,
-        pageSize: 1000,
+        pageSize: 200,
         sort: { CreatedDate: -1 },
       });
       return unwrapPaged<unknown>(flowsRaw).items
@@ -642,16 +661,22 @@ export function useWorkspaceTotals(): UseQueryResult<{
         featuresCollection.list({
           // Workspace-wide read: dropped `createdByFilter(userId)` so a
           // tester can see totals across the workspace. Narrowed client-
-          // side to `scope.projectIds` (alive projects) below.
+          // side to `scope.projectIds` (alive projects) below. pageSize
+          // 200 is a soft cap on how many rows we scan for the dashboard
+          // stat card — typical workspaces fit comfortably; huge ones
+          // silently cap (the stat then undercounts but the page still
+          // renders). Going to 1000 made the response ~5× heavier for a
+          // card that only displays two integers.
           pageNo: 1,
-          pageSize: 1000,
+          pageSize: 200,
         }),
         flowsCollection.list({
           // Workspace-wide read: dropped `createdByFilter(userId)` so a
           // tester can see totals across the workspace. Narrowed client-
-          // side to `scope.projectIds` (alive projects) below.
+          // side to `scope.featureIds` (alive features in alive projects)
+          // below. Same 200 cap rationale as featuresRaw above.
           pageNo: 1,
-          pageSize: 1000,
+          pageSize: 200,
         }),
       ]);
       let features = 0;
@@ -820,8 +845,16 @@ export function useProjectsDevCounts(): UseQueryResult<
         );
       }
       const flowsRaw = await flowsCollection.list({
+        // Workspace-wide read, narrowed to dev-source flows whose
+        // `featureId` is in our dev-feature set (orphans skipped).
+        // pageSize 200 mirrors the totals/recents trim — typical
+        // workspaces fit comfortably; the per-project flow count then
+        // undercounts on huge workspaces rather than pulling a
+        // thousand-row response just to bucket them. The Projects list
+        // renders a feature/flow badge per project, so a soft cap is
+        // acceptable as long as it's documented.
         pageNo: 1,
-        pageSize: 1000,
+        pageSize: 200,
       });
       const flowItems = unwrapPaged<{
         ItemId: string;
@@ -925,14 +958,23 @@ export function useProjectFlows(
 // Plain (non-hook) fetcher for imperative callers — the Issue Tracker chat
 // tool dispatch uses it to list a project's features/flows and resolve ids
 // by name without mounting the project page's hooks. Same two-query shape
-// as `useProjectFlows` (features by projectId, then all flows filtered
-// client-side against that feature-id set) so the results can never drift
-// from what the project page renders.
+// as `useProjectFlows` (features by projectId [+ envSlug], then flows
+// filtered by envSlug + client-side against the feature-id set) so the
+// results can never drift from what the project page renders.
+//
+// `envSlug` is optional: callers that already know the active env pass it
+// to push the filter server-side (saves pulling flows from sibling envs
+// just to discard them client-side). When omitted, falls back to the old
+// workspace-wide read so dashboard / no-active-env callers still work.
 export async function fetchProjectContents(
   projectId: string,
+  envSlug?: string,
 ): Promise<{ features: Feature[]; flows: Flow[] }> {
   const featuresRaw = await featuresCollection.list({
-    filter: { projectId },
+    filter: {
+      projectId,
+      ...(envSlug ? { envSlug } : {}),
+    },
     pageNo: 1,
     pageSize: 500,
   });
@@ -942,6 +984,9 @@ export async function fetchProjectContents(
   if (features.length === 0) return { features, flows: [] };
   const featureIds = new Set(features.map((f) => f.id));
   const flowsRaw = await flowsCollection.list({
+    filter: {
+      ...(envSlug ? { envSlug } : {}),
+    },
     pageNo: 1,
     pageSize: 1000,
   });
@@ -4844,6 +4889,15 @@ export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
       activeEnv?.envSlug ?? "",
     ],
     enabled: Boolean(userId && activeEnv),
+    // The store is mounted once at AppLayout root and the env context
+    // is a long-lived React state. Without `staleTime` the default of 0
+    // ms means every env navigation re-fires all three reads even when
+    // nothing changed (the key carries env, so a fresh entry is
+    // unavoidable on a real env change — but we don't need to refetch
+    // on a 0-ms stale window). 30 s matches the notifier inbox and
+    // keeps the panel responsive after a manual mutation, which
+    // invalidates the key anyway.
+    staleTime: 30_000,
     queryFn: async () => {
       const raw = await verificationTargetsCollection.list({
         filter: {
@@ -4878,6 +4932,10 @@ export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
       activeEnv?.envSlug ?? "",
     ],
     enabled: Boolean(userId && activeEnv),
+    // See `useIssueTrackerTargets` — same rationale. The 30 s window
+    // matches the mutation invalidation latency for create/delete
+    // events on this collection.
+    staleTime: 30_000,
     queryFn: async () => {
       const raw = await secretsCollection.list({
         filter: {
@@ -4945,6 +5003,13 @@ export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
       activeEnv?.envSlug ?? "",
     ],
     enabled: Boolean(userId && activeEnv),
+    // See `useIssueTrackerTargets` — same rationale. The IssueTracker
+    // is the only screen that benefits from a fresher-than-30s view,
+    // and it's mounted under the same provider as the rest of the
+    // Issue Tracker hooks, so the panel-level mutation invalidation
+    // (`queryKeys.issueTrackerIssues(userId)`) still flips the cache
+    // the moment a row is added or a status changes.
+    staleTime: 30_000,
     queryFn: async () => {
       const envFilter = {
         projectId: activeEnv!.projectId,
@@ -5830,6 +5895,18 @@ export function useSecretBindings(
     // Bindings are small and rarely change; cache warm across navigations
     // so the dropdown doesn't re-fetch on every SecretCard open.
     staleTime: 5 * 60_000,
+    // The `blx_SecretBindings` schema is part of the deployment-gap set
+    // documented in `.env` (4 of 21 collections not yet pushed to the
+    // gateway). When the schema is missing the gateway returns HTTP 400,
+    // which would otherwise be retried 3× by TanStack Query's default
+    // retry policy AND logged to console.error on every mount. We already
+    // keep the localStorage mirror in `issueTrackerBindings.ts` as the
+    // source of truth — `useIssueTracker` reads it directly — so swallowing
+    // the cloud read and returning the empty row is the right behaviour:
+    // the consumer falls back to the mirror, the app keeps working, and
+    // the console stays clean. Logged as a warning so the missing-schema
+    // case is still debuggable when the rules.json deployment lands.
+    retry: false,
     queryFn: async () => {
       if (!scope) {
         return {
@@ -5840,13 +5917,33 @@ export function useSecretBindings(
           updatedBy: null,
         };
       }
-      const raw = await secretBindingsCollection.list({
-        filter: { projectId: scope.projectId, envSlug: scope.envSlug },
-        pageNo: 1,
-        pageSize: 1,
-      });
-      const row = unwrapPaged<CloudSecretBinding>(raw).items[0];
-      if (!row) {
+      try {
+        const raw = await secretBindingsCollection.list({
+          filter: { projectId: scope.projectId, envSlug: scope.envSlug },
+          pageNo: 1,
+          pageSize: 1,
+        });
+        const row = unwrapPaged<CloudSecretBinding>(raw).items[0];
+        if (!row) {
+          return {
+            id: "",
+            projectId: scope.projectId,
+            envSlug: scope.envSlug,
+            bindings: {},
+            updatedBy: null,
+          };
+        }
+        return toSecretBinding(row);
+      } catch (err) {
+        // See the `retry: false` comment above for context — the
+        // consumer reads the localStorage mirror in `issueTrackerBindings.ts`
+        // and treats the empty row as "no cloud data yet, use mirror".
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useSecretBindings] cloud read failed; falling back to localStorage mirror",
+            { scope: `${scope.projectId}/${scope.envSlug}`, err },
+          );
+        }
         return {
           id: "",
           projectId: scope.projectId,
@@ -5855,7 +5952,6 @@ export function useSecretBindings(
           updatedBy: null,
         };
       }
-      return toSecretBinding(row);
     },
   });
 }
@@ -5935,26 +6031,46 @@ export function useUserPreference(): UseQueryResult<UserPreference> {
     enabled: Boolean(userId),
     // Preferences rarely change; keep warm across navigations.
     staleTime: 5 * 60_000,
+    // `blx_UserPreferences` is part of the deployment-gap set documented
+    // in `.env`. When the schema is missing the gateway returns HTTP 400.
+    // Each consumer (`useCustomVerificationChecks`, `RepoBrowserPage`,
+    // `useIssueTracker`) already seeds its own localStorage mirror
+    // (`lattice.verification-checks.v1`, repo-browser path mirror, GitHub
+    // PAT mirror, etc.) and only promotes the cloud value once
+    // `prefQuery.data` resolves — so a missing-schema error simply means
+    // the mirror keeps being the source of truth, which is the desired
+    // behaviour. Same retry-off / warn-once policy as
+    // `useSecretBindings`.
+    retry: false,
     queryFn: async () => {
-      const raw = await userPreferencesCollection.list({
-        filter: { userId },
-        pageNo: 1,
-        pageSize: 1,
-      });
-      const row = unwrapPaged<CloudUserPreference>(raw).items[0];
-      if (!row) {
-        return {
-          id: "",
-          userId,
-          scope: "",
-          device: "",
-          activeSession: "",
-          customChecks: [],
-          repoBrowserPath: "",
-          githubCredentialId: "",
-        };
+      const empty = {
+        id: "",
+        userId,
+        scope: "",
+        device: "",
+        activeSession: "",
+        customChecks: [],
+        repoBrowserPath: "",
+        githubCredentialId: "",
+      };
+      try {
+        const raw = await userPreferencesCollection.list({
+          filter: { userId },
+          pageNo: 1,
+          pageSize: 1,
+        });
+        const row = unwrapPaged<CloudUserPreference>(raw).items[0];
+        if (!row) return empty;
+        return toUserPreference(row);
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useUserPreference] cloud read failed; consumers will use their localStorage mirror",
+            { userId, err },
+          );
+        }
+        return empty;
       }
-      return toUserPreference(row);
     },
   });
 }
@@ -6030,17 +6146,38 @@ export function useHiddenAnnouncements(): UseQueryResult<Set<string>> {
     enabled: Boolean(userId),
     // Inbox rarely changes; keep warm across navigations.
     staleTime: 5 * 60_000,
+    // `blx_HiddenAnnouncements` is part of the deployment-gap set
+    // documented in `.env`. The single consumer (`useHiddenAnnouncementIds`
+    // in `hiddenAnnouncements.ts`) already keeps a per-user localStorage
+    // mirror under `lattice.mirror.hiddenAnnouncements.v1:<userId>` and
+    // renders from it while `cloud.data` is `undefined`. Returning an
+    // empty `Set` on cloud failure means "no cloud state known, use the
+    // mirror" — the panel still hides the announcements the user has
+    // hidden before, and a new hide/unhide write won't persist until the
+    // schema is deployed. Same retry-off policy as the other
+    // deployment-gap hooks.
+    retry: false,
     queryFn: async () => {
-      const raw = await hiddenAnnouncementsCollection.list({
-        filter: { userId },
-        pageNo: 1,
-        pageSize: 200,
-        sort: { CreatedDate: -1 },
-      });
-      const ids = unwrapPaged<CloudHiddenAnnouncement>(raw).items.map(
-        (r) => r.announcementId,
-      );
-      return new Set(ids);
+      try {
+        const raw = await hiddenAnnouncementsCollection.list({
+          filter: { userId },
+          pageNo: 1,
+          pageSize: 200,
+          sort: { CreatedDate: -1 },
+        });
+        const ids = unwrapPaged<CloudHiddenAnnouncement>(raw).items.map(
+          (r) => r.announcementId,
+        );
+        return new Set(ids);
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useHiddenAnnouncements] cloud read failed; panel will use localStorage mirror",
+            { userId, err },
+          );
+        }
+        return new Set<string>();
+      }
     },
   });
 }
@@ -6118,17 +6255,36 @@ export function useUserNote(
     enabled: Boolean(userId),
     // Notepad rarely changes; keep warm across navigations.
     staleTime: 5 * 60_000,
+    // `blx_UserNotes` is part of the deployment-gap set documented in
+    // `.env`. The notepad pages (`/notepad/text`, `/notepad/excel`) read
+    // AND write synchronously through `loadTextPads` / `saveTextPads` /
+    // `loadExcelPads` / `saveExcelPads` in `src/lib/notepad/storage.ts`
+    // against the `lattice.mirror.notepad.{text,excel}.v1` localStorage
+    // keys. The cloud hook only seeds the mirror once and pushes writes
+    // back via `useNotepadSync` — when the cloud read fails we return the
+    // empty row and the mirror keeps being the source of truth. Same
+    // retry-off / warn-once policy as the other deployment-gap hooks.
+    retry: false,
     queryFn: async () => {
-      const raw = await userNotesCollection.list({
-        filter: { userId, padType },
-        pageNo: 1,
-        pageSize: 1,
-      });
-      const row = unwrapPaged<CloudUserNote>(raw).items[0];
-      if (!row) {
-        return { id: "", userId, padType, rows: [], updatedAt: "" };
+      const empty = { id: "", userId, padType, rows: [], updatedAt: "" };
+      try {
+        const raw = await userNotesCollection.list({
+          filter: { userId, padType },
+          pageNo: 1,
+          pageSize: 1,
+        });
+        const row = unwrapPaged<CloudUserNote>(raw).items[0];
+        if (!row) return empty;
+        return toUserNote(row);
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useUserNote] cloud read failed; notepad will use localStorage mirror",
+            { userId, padType, err },
+          );
+        }
+        return empty;
       }
-      return toUserNote(row);
     },
   });
 }
