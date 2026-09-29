@@ -267,6 +267,59 @@ export function useClonedFeatureEnvs(
   });
 }
 
+// Flow-side counterpart of `useClonedFeatureEnvs`. Returns the set of
+// `envSlug` values where this source flow already has a sibling record
+// (records with `clonedFromFlowId === flowId`). Used by the flow row's
+// read-only environment workflow diagram to mark each sibling env as
+// "cloned" vs "available".
+//
+// Like the feature variant, we deliberately do NOT apply
+// `createdByFilter(userId)` — a sibling flow can legitimately be
+// created by another team member (e.g. a colleague cloned the flow
+// earlier) and the diagram still needs to show that env as "cloned".
+//
+// Independent of the feature's env chain — per the user's request, each
+// flow row's environment workflow is independent of its parent
+// feature's workflow. Promoting a flow to stg / prod / uat doesn't
+// require the feature to be promoted to that env first; the flow
+// carries its own `clonedFromFlowId` link that the read-only mirror
+// picks up. Filter on `clonedFromFlowId` only — every clone (direct
+// or transitive, e.g. prod clone of a stg clone) is stamped with
+// `clonedFromFlowId === <root dev source flow id>` by
+// `useCloneFlow`, mirroring the feature cascade's "all descendants
+// link to the root source" convention. This keeps the env set
+// accurate regardless of which env the manager clicked from.
+export function useClonedFlowEnvs(
+  flowId: string | undefined,
+): UseQueryResult<Set<string>> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    // Per-flow key. The root source flow's "clonedEnvs" set drives the
+    // persistent marker on its row; siblings in stg / prod / uat each
+    // have their OWN (empty) lookup, which renders the standard
+    // "available" pill on every sibling row's chain — by design, since
+    // the sibling already IS in that env (its source chain rendered on
+    // the row whose `flow.id` matches `flow.clonedFromFlowId === undef`).
+    // The "_none" sentinel keeps the key stable when the flow is
+    // unmounted.
+    queryKey: ["flows", userId, "clonedEnvs", flowId ?? "_none"] as const,
+    enabled: Boolean(userId && flowId),
+    queryFn: async () => {
+      if (!flowId) return new Set<string>();
+      const raw = await flowsCollection.list({
+        filter: { clonedFromFlowId: flowId },
+        pageNo: 1,
+        pageSize: 50,
+      });
+      const slugs = unwrapPaged<{ envSlug?: string }>(raw).items
+        .map((f) => f.envSlug)
+        .filter((s): s is string => typeof s === "string" && s.length > 0);
+      return new Set(slugs);
+    },
+  });
+}
+
 async function findSiblingFeatures(
   sourceFeatureId: string,
   _projectId: string,
@@ -4516,6 +4569,211 @@ export function useCloneFeature(): UseMutationResult<
       });
       // Silence unused-param linter — onSuccess exists so callers
       // can `await` the cloned Feature; the row invalidations above
+      // don't read it directly.
+      void _sibling;
+    },
+  });
+}
+
+// Flow-side counterpart of `useCloneFeature`. Promotes a single flow to
+// a sibling env (stg / prod / uat) by creating a new record with
+// `clonedFromFlowId` pointing back at the root dev source. Source row
+// stays in place; sibling appears in the target env. The source row's
+// `FlowEnvWorkflow` chain picks up a persistent "promoted to {env}"
+// tick because `useClonedFlowEnvs` now finds the new sibling via
+// `clonedFromFlowId`.
+//
+// `clonedFromFlowId` semantics — mirrors the feature-side "all
+// descendants link to the root source" convention. If `flow` IS the
+// dev source (`flow.clonedFromFlowId === undefined`), the new clone's
+// `clonedFromFlowId` is set to `flow.id` (the root). If `flow` is
+// itself a clone (`flow.clonedFromFlowId` is set to the root), the
+// new clone's `clonedFromFlowId` is set to the SAME root id — NOT to
+// `flow.id`. Reason: the root source's `useClonedFlowEnvs` lookup
+// (`filter: { clonedFromFlowId: <root id> }`) must find every
+// descendant regardless of which env chain step created it. If we
+// chained link-by-link (stg → prod's `clonedFromFlowId = stg.id`),
+// the root lookup would miss the prod clone because the prod row's
+// `clonedFromFlowId` points at the stg clone, not the root. Flat-link
+// to the root keeps the env-set accurate.
+//
+// Independent of the feature's env chain — per the user's request,
+// each flow row's environment workflow operates on the flow alone,
+// without requiring its parent feature to be promoted to the target
+// env. The mutation does NOT cascade (no feature auto-create, no
+// other-flow auto-clone); only the one flow is duplicated. The
+// "feature has been promoted" check is intentionally absent — a
+// manager promoting a single dev flow to stg shouldn't require
+// promoting the whole feature first. The row-level chain diagram on
+// each flow is the source of truth.
+//
+// Manager-only — see the role gate below. Tester / developer roles get
+// the read-only `FlowEnvWorkflow` mirror in `FlowItem.tsx` instead.
+export function useCloneFlow(): UseMutationResult<
+  Flow,
+  Error,
+  { flow: Flow; targetEnvSlug: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  // Manager-only action. Promoting a flow across environments is part
+  // of the manager's lifecycle workflow (the manager owns the env
+  // chain and carries flows up as QA signs off), so only managers are
+  // allowed to call this mutation. Testers and developers see the
+  // read-only `FlowEnvWorkflow` mirror in `FlowItem.tsx` and the env
+  // pills are non-interactive on their session; this throw catches
+  // programmatic / stale-modal callers that bypass that UI gate.
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
+  return useMutation({
+    mutationFn: async ({ flow, targetEnvSlug }) => {
+      if (!isManager) {
+        throw new Error(
+          "Only managers can promote flows across environments.",
+        );
+      }
+      // Precondition — the source flow must be in "passed" status.
+      // The team's promotion contract: a flow is promotion-ready only
+      // when QA has signed off (status === "passed"). Any non-passed
+      // status (`failed`, `pending`, `draft`, `investigating`,
+      // `pause`) is a block — either because the work is unfinished
+      // (draft / pending / investigating / pause) or because it has
+      // hit a regression (failed).
+      //
+      // The manager-interactive `ManagerFlowEnvWorkflow` UI also gates
+      // on this — but instead of just disabling the pill, the
+      // manager clicks through and the mutation throws here, which
+      // surfaces as an error toast. Simpler than the feature row's
+      // `BlockPromoteModal` because the flow row's precondition is
+      // single-dimensional (just the flow's own status); the modal's
+      // multi-flow explanation doesn't apply.
+      //
+      // CRITICAL ordering — this check MUST run before
+      // `flowsCollection.create()` below. The sibling create is
+      // visible immediately on the destination env (TanStack Query
+      // invalidation in onSuccess refetches), so if we created the
+      // sibling first and THEN threw on the precondition, the user
+      // would see the error toast AND the sibling would already be
+      // in the next env. Lifting the check above the create makes
+      // the precondition a hard gate: when it fails, no sibling row
+      // is ever written.
+      if (flow.status !== "passed") {
+        throw new Error(
+          `Cannot promote flow "${flow.name}" — it is not in "Passed" status. Mark the flow as Passed before promoting.`,
+        );
+      }
+
+      // `clonedFromFlowId` flat-link to root. If `flow` is the dev
+      // source, point at itself; if `flow` is itself a clone, point
+      // at the same root it was linked from. See the comment at the
+      // top of this hook for why we don't chain link-by-link.
+      const rootSourceId = flow.clonedFromFlowId ?? flow.id;
+
+      // Build the clone-record payload. The Flow schema marks
+      // `title` and `featureId` as required; `status` is forwarded
+      // verbatim from the source so the audit trail of "passed in
+      // <source env>" stays attached to the cloned flow (the tester
+      // re-runs in the target env and updates). Optional content
+      // fields (`description` / `steps` / `stack`) are forwarded
+      // only when non-empty so the schema's `requiredOn: 0` rule
+      // isn't tripped.
+      const createPayload: Record<string, unknown> = {
+        title: flow.name,
+        featureId: flow.featureId,
+        status: flow.status ?? "draft",
+        envSlug: targetEnvSlug,
+        clonedFromFlowId: rootSourceId,
+      };
+      if (typeof flow.description === "string" && flow.description.trim() !== "") {
+        createPayload.description = flow.description;
+      }
+      if (Array.isArray(flow.steps) && flow.steps.length > 0) {
+        createPayload.steps = flow.steps;
+      }
+      if (typeof flow.stack === "string") {
+        createPayload.stack = flow.stack;
+      }
+      const created = (await flowsCollection.create(
+        createPayload,
+      )) as unknown;
+      // Mirror `useCloneFeature` — use the helper to pull the new
+      // sibling's `ItemId` reliably across the gateway's response
+      // envelopes.
+      const siblingId = extractInsertedItemId(created, "insertFlow");
+      if (!siblingId) {
+        throw new Error(
+          "Could not create flow clone — no itemId in response.",
+        );
+      }
+      // We don't have the cloud's full row on hand (the create
+      // response only carries the new id), so build a `Flow`-shaped
+      // return from the source's metadata + the new envSlug + the
+      // sibling id. Downstream callers (`onSuccess`) only need the
+      // id + name + projectId + envSlug + featureId to construct
+      // the notification payload, and TanStack Query will refetch
+      // the row's full content from `["flows", userId, featureId]`
+      // once we invalidate it.
+      const now = new Date().toISOString();
+      const synthetic = {
+        ItemId: siblingId,
+        title: flow.name,
+        featureId: flow.featureId,
+        envSlug: targetEnvSlug,
+        status: flow.status ?? "draft",
+        description: flow.description,
+        steps: flow.steps,
+        stack: flow.stack,
+        CreatedDate: now,
+        LastUpdatedDate: now,
+      };
+      return toFlow(synthetic, flow.projectId);
+    },
+    onSuccess: (_sibling, vars) => {
+      // Refresh every cached view of this project's flows + the
+      // clonedEnvs lookup the `FlowEnvWorkflow` mirror uses. The
+      // prefix match covers:
+      //   * `["flows", userId, featureId]` — the row's own flow
+      //     list (re-renders the source row + any sibling rows
+      //     under the same feature);
+      //   * `["flows", userId, "clonedEnvs", flowId]` — the
+      //     `useClonedFlowEnvs` lookup the source row's
+      //     `FlowEnvWorkflow` mirror uses to paint the persistent
+      //     "promoted to {env}" tick.
+      qc.invalidateQueries({
+        queryKey: ["flows", userId, vars.flow.featureId],
+      });
+      qc.invalidateQueries({
+        queryKey: ["flows", userId, "clonedEnvs", vars.flow.clonedFromFlowId ?? vars.flow.id],
+      });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Notify testers + developers on cross-env flow promotion.
+      // `context: "flow"` makes the body builder render the flow-
+      // shaped sentence. `value` carries the source flow id (the
+      // sibling has a fresh id and isn't tracked yet by the inbox
+      // subscription filter); `flowName` carries the source's
+      // pre-promote name; `envSlug` is the destination env the
+      // manager picked from the chip.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      const project = projects?.find((p) => p.id === vars.flow.projectId);
+      void notifyRole(["tester", "developer"], {
+        context: "flow",
+        actionName: "promoted",
+        value: vars.flow.id,
+        projectId: vars.flow.projectId,
+        projectName: project?.name,
+        flowName: vars.flow.name,
+        envSlug: vars.targetEnvSlug,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
+      // Silence unused-param linter — onSuccess exists so callers
+      // can `await` the cloned Flow; the row invalidations above
       // don't read it directly.
       void _sibling;
     },
