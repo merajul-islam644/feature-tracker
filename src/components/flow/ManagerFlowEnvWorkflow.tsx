@@ -42,15 +42,22 @@
 //                           env as cloned.
 //
 //   * Blocked (status !== "passed")
-//                         — same outlined "available" look so the
-//                           pill stays clickable. Click surfaces
-//                           an error toast (the mutation throws
-//                           when the precondition fails). The
-//                           flow row's precondition is single-
-//                           dimensional — just the flow's own
-//                           status — so we skip the feature row's
-//                           multi-flow BlockPromoteModal and rely
-//                           on the toast for the explanation.
+//                         — disabled, cursor-not-allowed. The
+//                           flow row's gate is strict: only a
+//                           manager with the flow in "passed"
+//                           status can clone it to another env
+//                           (`useCloneFlow` throws otherwise).
+//                           The pill is rendered inert rather
+//                           than clickable-with-toast so the
+//                           manager reads the unavailability
+//                           from the visual itself, not by
+//                           clicking. The mutation's
+//                           precondition check is
+//                           defense-in-depth against
+//                           programmatic callers that bypass
+//                           the UI gate.
+//
+// Visuals (Node / Arrow / STATE_CLASSES / keyframes) live in
 //
 //   * Available           — outlined, yellow text, no tick, no
 //                           animation, clickable. Default sibling
@@ -101,6 +108,12 @@ export function ManagerFlowEnvWorkflow({
   // === "passed"). Any non-passed status (`failed`, `pending`,
   // `draft`, `investigating`, `pause`) is a block — either because
   // the work is unfinished or because it has hit a regression.
+  // Per the user's request: only a manager with a "passed" flow
+  // can clone it into another env — this is enforced both here
+  // (UI gate: blocked pills render disabled) and in
+  // `useCloneFlow`'s mutationFn (server-side check: throws with a
+  // clear message, which is the defense-in-depth against
+  // programmatic callers that bypass the UI).
   //
   // This is intentionally simpler than the feature row's gate
   // (which checks "every source-env flow is passed") because the
@@ -110,12 +123,15 @@ export function ManagerFlowEnvWorkflow({
   // enforcement. We don't double-count or re-check the sibling
   // flows here.
   //
-  // Unlike `ManagerFeatureEnvWorkflow`, the blocked pill stays
-  // clickable so the click surfaces the mutation's error toast —
-  // which gives the manager the actionable message ("Mark the
-  // flow as Passed before promoting"). The feature row uses a
-  // modal because the block reason can be multi-flow; the flow
-  // row's reason is one boolean, so a toast is enough.
+  // Unlike `ManagerFeatureEnvWorkflow`, blocked pills render
+  // **inert** (disabled + cursor-not-allowed) rather than
+  // clickable-with-error-toast — a manager reading the chain
+  // should see at a glance that this env is unavailable, not have
+  // to click to discover the reason. The feature row keeps
+  // blocked pills clickable because the block reason is multi-flow
+  // and the click opens a request-to-QA modal; the flow row's
+  // single-dimension precondition is clear from the tooltip
+  // alone.
   const isBlocked = flow.status !== "passed";
 
   const handleClone = (slug: string) => {
@@ -194,8 +210,8 @@ export function ManagerFlowEnvWorkflow({
           //
           // NOTE: a *blocked* pill stays in the regular
           // "available" visual — we don't repaint it red. The
-          // block reason surfaces in the tooltip + the error toast
-          // on click, not in the pill chrome. Keeping the same
+          // block reason surfaces in the tooltip only (the pill
+          // is disabled so it can't be clicked); keeping the same
           // yellow outline makes the chain look uniform and avoids
           // introducing a new visual state for the primitive
           // (which would cascade through `FlowEnvWorkflow`'s
@@ -211,7 +227,7 @@ export function ManagerFlowEnvWorkflow({
           const pillTitle = isBlocked
             ? t(
                 "envWorkflow.flowNotPassedBlocked",
-                'Cannot promote "{flow}" — not in Passed status (click for details)',
+                'Cannot promote "{flow}" — flow is not in Passed status',
                 { flow: flow.name },
               )
             : isAlreadyCloned
@@ -233,25 +249,42 @@ export function ManagerFlowEnvWorkflow({
                 state={showReady ? "cloned" : "available"}
                 title={pillTitle}
                 // Disabled when:
-                //   * already cloned (would create a duplicate
-                //     sibling record)
-                //   * pending (this pill is the in-flight target
-                //     of an active click)
+                //   * precondition fails (status !== "passed") —
+                //     the manager cannot clone a non-passed flow
+                //     into another env. Defense-in-depth: the
+                //     mutation's `mutationFn` also throws on this
+                //     precondition so a programmatic / stale-UI
+                //     caller can't bypass the gate by manipulating
+                //     the disabled prop in devtools.
+                //   * already cloned — would create a duplicate
+                //     sibling record
+                //   * pending — this pill is the in-flight target
+                //     of an active click
                 //
-                // Blocked pills are NOT disabled — clicking them
-                // surfaces the mutation's error toast (the
-                // mutation throws when status !== passed). The
-                // feature row uses a BlockPromoteModal for the
-                // multi-flow case; the flow row's single-dimension
-                // precondition gets the lighter toast UX.
-                disabled={isAlreadyCloned || isThisPending}
+                // The blocked state is intentionally inert (no
+                // click handler, cursor-not-allowed, opacity drop)
+                // rather than triggering an error toast on click —
+                // a manager reading the chain should see at a
+                // glance that this env is unavailable, not have to
+                // click to discover the reason. The feature row
+                // keeps blocked pills clickable because the block
+                // reason is multi-flow and needs a request modal;
+                // the flow row's single-dimension precondition
+                // (status === "passed") is clear from the tooltip
+                // alone.
+                disabled={isBlocked || isAlreadyCloned || isThisPending}
                 pending={isThisPending}
-                onClick={(event) => {
-                  // Buttons inside a workflow don't bubble so the
-                  // parent row click handler doesn't fire.
-                  event.stopPropagation();
-                  handleClone(env.slug);
-                }}
+                onClick={
+                  isBlocked
+                    ? undefined
+                    : (event) => {
+                        // Buttons inside a workflow don't bubble
+                        // so the parent row click handler doesn't
+                        // fire.
+                        event.stopPropagation();
+                        handleClone(env.slug);
+                      }
+                }
               />
             </Fragment>
           );
