@@ -329,12 +329,20 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
               {/* Pencil trigger for the inline env rename modal. Same
                   visual treatment as the kebab trigger on ProjectCard,
                   scaled down (`h-7 w-7`) to fit alongside the header
-                  chip without crowding it. Disabled when no env is
-                  mounted (the env-less /projects/:id landing) — there
-                  is nothing meaningful to rename in that case. Hidden
-                  entirely for non-managers; `useRenameProjectEnv`
-                  throws the same error if reached another way. */}
-              {isManager && (
+                  chip without crowding it. Hidden entirely outside the
+                  dev environment page — non-dev envs (uat, prod,
+                  custom, etc.) are read-only views of what was
+                  authored in dev, and the per-env display label is
+                  set on the dev page via this modal. The undefined
+                  envSlug case is the legacy /projects/:id landing —
+                  treat as dev so the pencil still shows there. Also
+                  hidden for non-managers; `useRenameProjectEnv`
+                  throws the same error if reached another way. The
+                  `envSlug === undefined || envSlug === "dev"` check
+                  mirrors the Add Feature / Add Flow gate a few lines
+                  below, so all "dev-only" authoring affordances stay
+                  consistent. */}
+              {isManager && (envSlug === undefined || envSlug === "dev") && (
                 <button
                   type="button"
                   onClick={() => setRenameEnvOpen(true)}
