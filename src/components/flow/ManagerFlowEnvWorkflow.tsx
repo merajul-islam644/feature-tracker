@@ -80,6 +80,7 @@ import {
   EnvNode,
   EnvArrow,
   EnvWorkflowStyles,
+  passedEnvSet,
 } from "@/components/flow/EnvWorkflowPrimitives";
 
 interface ManagerFlowEnvWorkflowProps {
@@ -101,6 +102,16 @@ export function ManagerFlowEnvWorkflow({
   // pill.
   const clonedEnvsQuery = useClonedFlowEnvs(flow.id);
   const clonedEnvs = clonedEnvsQuery.data ?? new Set<string>();
+  // Lineage path — see `FlowEnvWorkflow.tsx` for the rationale. Same
+  // helper, same purpose: this manager-interactive variant mounts
+  // on the dev source only (`flow.clonedFromFlowId` is unset per
+  // the gate in `FlowItem.tsx`), so `pathEnvs` here is always
+  // `{dev}` and never contributes to the visual. We still compute
+  // it so the animation rule is the same as the read-only mirror —
+  // one rule, four call sites — and so future gates (e.g.
+  // re-promoting an already-cloned sibling) don't silently revert
+  // the animation.
+  const pathEnvs = passedEnvSet(flow.envSlug);
 
   // Precondition gate — the flow itself must be in "passed"
   // status. The team's promotion contract is explicit: a flow is
@@ -193,20 +204,30 @@ export function ManagerFlowEnvWorkflow({
 
         {SIBLING_ENVS.map((env) => {
           const isAlreadyCloned = clonedEnvs.has(env.slug);
+          // On the manager-interactive variant the gate at
+          // `FlowItem.tsx` only mounts this component on dev-source
+          // flows (no `clonedFromFlowId`), so `pathEnvs` is always
+          // `{dev}` and `isInPath` is never true for a sibling
+          // slug. We keep the check anyway so the rule mirrors the
+          // read-only `FlowEnvWorkflow` exactly — one animation
+          // rule across all four components.
+          const isInPath = pathEnvs.has(env.slug);
           const isThisPending =
             cloneFlow.isPending &&
             cloneFlow.variables?.flow.id === flow.id &&
             cloneFlow.variables?.targetEnvSlug === env.slug;
           // `showReady` flips this pill to the "cloned" visual
           // (Check + animated arrow) when this env already has a
-          // sibling (persistent marker) OR this pill is the
-          // in-flight target of an active click. Order of the OR
-          // matters for the `isThisPending` branch: the in-flight
-          // visual takes precedence over the "already cloned"
-          // visual on the same pill because pending is a transient
-          // state that resolves into "already cloned" once the
-          // mutation lands and `useClonedFlowEnvs` reports the new
-          // sibling.
+          // sibling (persistent marker), this pill is the in-flight
+          // target of an active click, OR the row's lineage has
+          // passed through this env (the `isInPath` branch — no-op
+          // on the dev source but kept for parity with
+          // `FlowEnvWorkflow`). Order of the OR matters for the
+          // `isThisPending` branch: the in-flight visual takes
+          // precedence over the "already cloned" visual on the same
+          // pill because pending is a transient state that
+          // resolves into "already cloned" once the mutation lands
+          // and `useClonedFlowEnvs` reports the new sibling.
           //
           // NOTE: a *blocked* pill stays in the regular
           // "available" visual — we don't repaint it red. The
@@ -216,7 +237,7 @@ export function ManagerFlowEnvWorkflow({
           // introducing a new visual state for the primitive
           // (which would cascade through `FlowEnvWorkflow`'s
           // read-only mirror too).
-          const showReady = isAlreadyCloned || isThisPending;
+          const showReady = isAlreadyCloned || isThisPending || isInPath;
           // Tooltip precedence (most actionable first):
           //   1. precondition fails (status !== passed)
           //      → "Can't promote — flow not Passed"

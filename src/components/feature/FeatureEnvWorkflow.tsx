@@ -15,14 +15,18 @@
 // cross-env state.
 //
 // Visual state per sibling pill:
-//   * `useClonedFeatureEnvs` returns an env in its set  → "cloned"
-//     visual (Check + animated arrow) persistently — the user's
-//     "show the animation + tick always after clicking"
-//     requirement. Means the source row has a sibling record in
-//     that env (created by a previous `useCloneFeature` call).
-//   * set is empty for that env                     → "available"
-//     visual (outlined, no tick, no animation) —
-//     clickable only in the interactive variant.
+//   * `useClonedFeatureEnvs` returns an env in its set, OR the env
+//     is in this row's lineage path (source env → current env,
+//     inclusive) → "cloned" visual (Check + animated arrow)
+//     persistently. Means either (a) the source has a sibling
+//     record in this env OR (b) this row's lineage has travelled
+//     through this env on the way to its current env (e.g. on a
+//     row in Prod, both Stg and Prod paint "cloned" even though
+//     the Prod-clone has no children of its own).
+//   * otherwise                                      → "available"
+//     visual (outlined, no tick, no animation) — the env is
+//     beyond where this row's lineage has reached (e.g. UAT on a
+//     Prod-clone row).
 //
 // The dev-source pill stays filled (golden bg, dark text) on every
 // row regardless of role / clone state — it's the row's own env.
@@ -43,6 +47,7 @@ import {
   EnvNode,
   EnvArrow,
   EnvWorkflowStyles,
+  passedEnvSet,
 } from "@/components/flow/EnvWorkflowPrimitives";
 
 interface FeatureEnvWorkflowProps {
@@ -68,6 +73,14 @@ export function FeatureEnvWorkflow({ feature }: FeatureEnvWorkflowProps) {
     feature.projectId,
   );
   const clonedEnvs = clonedEnvsQuery.data ?? new Set<string>();
+  // Lineage path — see `FlowEnvWorkflow.tsx` for the rationale.
+  // For a feature in Prod the path is {dev, stg, prod}, so the
+  // Stg pill animates + paints the "cloned" visual even though the
+  // Prod-clone feature has no children of its own (its
+  // `clonedFromFeatureId` points at the Stg-clone, not the Dev
+  // source, so the `useClonedFeatureEnvs(feature.id, ...)` lookup
+  // returns an empty set on a Prod-clone row).
+  const pathEnvs = passedEnvSet(feature.envSlug);
 
   return (
     <>
@@ -97,34 +110,57 @@ export function FeatureEnvWorkflow({ feature }: FeatureEnvWorkflowProps) {
           // pill (and the read-only mirror stays calm until the
           // query resolves).
           const isPromoted = clonedEnvs.has(env.slug);
+          // `isInPath` is true when this env sits on the row's
+          // lineage path from source (Dev) up to its current env.
+          // For a Prod-clone row this lights up both Stg and Prod
+          // pills; for a Dev-source row it contributes nothing
+          // extra (the source's path is just {dev}).
+          const isInPath = pathEnvs.has(env.slug);
           // The arrow leading INTO this env animates when EITHER:
-          //   (a) there is a sibling record in this env (the existing
-          //       "I promoted there" marker), OR
-          //   (b) this env IS the current feature's env (the
-          //       "this is where I live" marker — shows the upstream
-          //       connection from dev / stg / prod on every env page
-          //       even when the user hasn't promoted further yet).
-          // Without (b), the chain on stg / prod / uat pages renders
-          // completely static unless the feature has siblings in
-          // higher envs — the user reported that as a bug because
-          // they wanted the marching-dash effect visible regardless
-          // of which env page they're on.
-          const isCurrentEnv = env.slug === feature.envSlug;
-          const animateArrow = isPromoted || isCurrentEnv;
+          //   (a) there is a sibling record in this env (the
+          //       existing "I promoted there" marker), OR
+          //   (b) this env IS on the row's lineage path (Dev → …
+          //       → this row's current env, inclusive). (b)
+          //       subsumes the older "current env" check because
+          //       the current env is always in the path — it also
+          //       lights up every earlier env on the same row.
+          // The user wanted the marching-dash animation to reflect
+          // "all the envs this feature has passed" — without (b),
+          // the chain on a Prod-clone row only animated the
+          // Stg→Prod arrow even though the row's lineage travelled
+          // through Stg first.
+          const animateArrow = isPromoted || isInPath;
           return (
             <Fragment key={env.slug}>
               <EnvArrow animate={animateArrow} />
               <EnvNode
                 label={env.label}
-                state={isPromoted ? "cloned" : "available"}
+                // Pill state mirrors the animation: "cloned" visual
+                // (Check + filled outline) when this env is in the
+                // row's lineage path OR already has a sibling. On a
+                // Prod-clone row, this paints Stg with a tick
+                // (matching the animated arrow) — without it the
+                // arrow animates into a plain "available" pill,
+                // which reads as inconsistent.
+                state={isInPath ? "cloned" : "available"}
                 title={
+                  // Title precedence: explicit "promoted to" wins
+                  // over the generic "in path" copy so the source-
+                  // row tooltips stay unchanged from before this
+                  // change.
                   isPromoted
                     ? t(
                         "envWorkflow.promotedTo",
                         "Promoted to {env}",
                         { env: env.label },
                       )
-                    : undefined
+                    : isInPath
+                      ? t(
+                          "envWorkflow.inEnv",
+                          "In {env}",
+                          { env: env.label },
+                        )
+                      : undefined
                 }
                 interactive={false}
               />

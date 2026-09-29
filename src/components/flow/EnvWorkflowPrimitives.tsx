@@ -27,6 +27,38 @@ export const SIBLING_ENVS = [
   { slug: "uat", label: "UAT" },
 ] as const;
 
+// Canonical chain order from source to terminal env. Used by
+// `passedEnvSet` below to derive the "envs this row has passed
+// through" set — i.e. the lineage path from Dev up to and including
+// the row's current env. The set drives the marching-dash arrow on
+// every row regardless of `clonedEnvs`, so a row in Prod animates
+// BOTH the Dev→Stg and Stg→Prod arrows (because its lineage has
+// travelled through Dev and Stg to reach Prod) even though the
+// Prod-clone has no children of its own.
+const CHAIN_ORDER = ["dev", "stg", "prod", "uat"] as const;
+
+// Returns the set of env slugs from `dev` up to and including
+// `currentEnvSlug`, in canonical promote order. For a row whose
+// envSlug is missing / unknown, defaults to `["dev"]` so the chain
+// renders the same way it did before this helper existed (Dev
+// source only — no sibling arrows should animate).
+//
+// Why this exists in the primitives file rather than in each
+// component: the four chain components (FeatureEnvWorkflow,
+// ManagerFeatureEnvWorkflow, FlowEnvWorkflow,
+// ManagerFlowEnvWorkflow) all derive the same path set from the
+// row's `envSlug`. Sharing the helper keeps the chain order in a
+// single place — adding a new env (e.g. `pre-prod`) only requires
+// touching this file.
+export function passedEnvSet(currentEnvSlug: string | undefined): Set<string> {
+  if (!currentEnvSlug) return new Set(["dev"]);
+  const idx = CHAIN_ORDER.indexOf(
+    currentEnvSlug as (typeof CHAIN_ORDER)[number],
+  );
+  if (idx < 0) return new Set([currentEnvSlug]);
+  return new Set(CHAIN_ORDER.slice(0, idx + 1));
+}
+
 // Palette + base cursor per state. Every state carries `cursor-default`
 // in the base set because the underlying <button> element has a
 // browser-default `cursor: pointer` that would otherwise leak through
