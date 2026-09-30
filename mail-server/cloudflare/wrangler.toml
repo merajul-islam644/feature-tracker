@@ -1,0 +1,12 @@
+# Sketch for `npx wrangler deploy` from this directory.
+# The account/domain binding happens when you run `wrangler login` +
+# `wrangler deploy` — Email Routing rules are attached in the dashboard
+# (Email Routing → Routes → send to Worker) or via the API.
+
+name = "lattice-inbound-mail"
+main = "email-worker.js"
+compatibility_date = "2026-01-01"
+
+# Secrets (never inline here):
+#   npx wrangler secret put INBOUND_URL
+#   npx wrangler secret put INBOUND_SECRET

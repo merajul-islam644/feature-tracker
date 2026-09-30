@@ -1,0 +1,40 @@
+{
+  "collectionName": "blx_MailAddresses",
+  "fields": [
+    {
+      "name": "address",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "The per-user inbound email address (lowercase local part + inbound domain). The mail-server resolves an arriving message's To against this column to find the owner. Uniqueness is enforced by the app's query-then-create registration, not by a gateway constraint.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Lattice uid of the address owner. The receiver copies this into MailMessage.userId so the mail lands in the right inbox.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "userName",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name of the owner at registration time — operational debugging aid for the mailbox registry.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "MailAddress",
+  "schemaType": 1
+}
