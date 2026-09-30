@@ -13,6 +13,7 @@ import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
 import { VerificationScope } from "@/components/issue-tracker/VerificationScope";
 import { verificationChecks } from "@/data/issueTrackerConstants";
 import { useCustomVerificationChecks } from "@/hooks/useCustomVerificationChecks";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
 export function ScopePage() {
@@ -35,6 +36,8 @@ export function ScopePage() {
 
   return (
     <div className="space-y-6">
+      <BackToProjectsLink />
+
       <div>
         <h1 className="text-xl font-semibold text-foreground">
           {t("nav.issueTracker.scope", "Scopes")}

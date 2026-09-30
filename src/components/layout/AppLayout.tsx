@@ -9,6 +9,7 @@ import { ActiveEnvProvider } from "@/contexts/ActiveEnvContext";
 import { GlobalChatAssistant } from "@/components/issue-tracker/GlobalChatAssistant";
 import { IncomingCallDialog } from "@/components/team-chat/IncomingCallDialog";
 import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
+import { EnvSync } from "./EnvSync";
 import { useAnnouncementsAutoOpen } from "@/lib/blocks/hooks";
 
 export function AppLayout() {
@@ -34,6 +35,14 @@ export function AppLayout() {
     // here at the layout root works for the whole authenticated tree.
     <ActiveEnvProvider>
     <IssueTrackerStoreProvider>
+      {/* URL → ActiveEnv sync. Renders no UI — just stamps the URL's
+          (projectId, envSlug) pair into the ActiveEnv context on every
+          navigation, including the 4-segment Issue Tracker sub-routes
+          that don't mount ProjectDetailPage. Without this, a user
+          landing directly on /projects/<id>/dev/targets after the
+          mirror last held `stg` would see the wrong-env target list and
+          silently edit the wrong row. */}
+      <EnvSync />
       <TooltipProvider delayDuration={150}>
         <SidebarProvider>
           <AppSidebar />

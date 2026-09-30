@@ -3,6 +3,7 @@
 // state, so the page is effectively just a wrapper.
 
 import { RunHistory } from "@/components/issue-tracker/RunHistory";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
 export function HistoryPage() {
@@ -10,6 +11,8 @@ export function HistoryPage() {
 
   return (
     <div className="space-y-6">
+      <BackToProjectsLink />
+
       <div>
         <h1 className="text-xl font-semibold text-foreground">
           {t(

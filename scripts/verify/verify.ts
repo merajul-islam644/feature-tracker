@@ -468,7 +468,9 @@ function normalizeIssueTitle(title: string): string {
   return title.toLowerCase().replace(/\d+/g, "#").trim();
 }
 
-function computeIssueFingerprint(issue: Pick<IssueTemplate, "url" | "category" | "title">): string {
+function computeIssueFingerprint(
+  issue: Pick<IssueTemplate, "url" | "category" | "title">,
+): string {
   const composite = `${normalizeIssueUrl(issue.url)}|${issue.category}|${normalizeIssueTitle(issue.title)}`;
   // FNV-1a 32-bit
   let hash = 0x811c9dc5;
@@ -541,7 +543,10 @@ type RunSummary = {
 // user's browser cookie store at run-time via ./grab-token.mjs.
 const REQUIRED_KEYS = [
   ["VITE_BLOCKS_API_URL", "Blocks Data API base URL"],
-  ["VITE_BLOCKS_OIDC_URL", "OIDC discovery URL (.well-known/openid-configuration)"],
+  [
+    "VITE_BLOCKS_OIDC_URL",
+    "OIDC discovery URL (.well-known/openid-configuration)",
+  ],
   ["VITE_BLOCKS_OIDC_CLIENT_ID", "OIDC client id"],
   ["VITE_BLOCKS_KEY", "Blocks tenant key (xBlocksKey header)"],
 ] as const;
@@ -569,7 +574,9 @@ async function main(): Promise<void> {
   // Read the same VITE_BLOCKS_* names the app uses (see src/lib/blocks/config.ts).
   // The VITE_ prefix is a Vite convention; in Node we read the env var names
   // verbatim. Adjust if you've renamed them.
-  const values = Object.fromEntries(REQUIRED_KEYS.map(([k]) => [k, process.env[k]]));
+  const values = Object.fromEntries(
+    REQUIRED_KEYS.map(([k]) => [k, process.env[k]]),
+  );
   const missing = REQUIRED_KEYS.map(([k]) => k).filter((k) => !values[k]);
 
   if (missing.length > 0) {
@@ -639,7 +646,9 @@ async function main(): Promise<void> {
   const detectedAt = new Date().toISOString();
   const verificationRunId = `chat-${detectedAt.replace(/[:.]/g, "-")}`;
 
-  console.log(`Filing ${ISSUES_TO_FILE.length} issue(s) to ${values.VITE_BLOCKS_API_URL}`);
+  console.log(
+    `Filing ${ISSUES_TO_FILE.length} issue(s) to ${values.VITE_BLOCKS_API_URL}`,
+  );
   console.log(`verificationRunId: ${verificationRunId}\n`);
 
   const results: RunSummary["results"] = [];
@@ -681,7 +690,12 @@ async function main(): Promise<void> {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`✗ Failed: ${issue.title}`);
       console.error(`  reason: ${message}\n`);
-      results.push({ title: issue.title, fingerprint, itemId: null, error: message });
+      results.push({
+        title: issue.title,
+        fingerprint,
+        itemId: null,
+        error: message,
+      });
     }
   }
 
@@ -692,14 +706,19 @@ async function main(): Promise<void> {
   const path = await import("node:path");
   const { fileURLToPath } = await import("node:url");
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const summaryPath = path.join(here, `verify-summary-${verificationRunId}.json`);
+  const summaryPath = path.join(
+    here,
+    `verify-summary-${verificationRunId}.json`,
+  );
   const summary: RunSummary = { runId: verificationRunId, results };
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
   console.log(`\nSummary written to ${summaryPath}`);
 
   const failures = results.filter((r) => !r.itemId).length;
   if (failures > 0) {
-    console.error(`\n${failures} of ${results.length} issue(s) failed to insert.`);
+    console.error(
+      `\n${failures} of ${results.length} issue(s) failed to insert.`,
+    );
     process.exit(1);
   }
   console.log(`\nDone — ${results.length} issue(s) filed.`);

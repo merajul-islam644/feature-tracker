@@ -148,7 +148,11 @@ function extractInsertedItemId(
 // Normalise to a flat `{ items, totalCount }`.
 function unwrapPaged<T>(raw: unknown): { items: T[]; totalCount: number } {
   const r = raw as
-    | { data?: Record<string, { items?: T[]; totalCount?: number }> | { items?: T[]; totalCount?: number } }
+    | {
+        data?:
+          | Record<string, { items?: T[]; totalCount?: number }>
+          | { items?: T[]; totalCount?: number };
+      }
     | { items?: T[]; totalCount?: number }
     | undefined;
   const dataLayer = (r && "data" in r ? r.data : r) as
@@ -162,7 +166,9 @@ function unwrapPaged<T>(raw: unknown): { items: T[]; totalCount: number } {
     } else {
       // `dataLayer` is `{ get<Plural>: { items, totalCount } }` — pick the
       // first object value that actually carries the paged payload.
-      for (const v of Object.values(dataLayer as Record<string, { items?: T[]; totalCount?: number }>)) {
+      for (const v of Object.values(
+        dataLayer as Record<string, { items?: T[]; totalCount?: number }>,
+      )) {
         if (v && typeof v === "object" && ("items" in v || "totalCount" in v)) {
           paged = v;
           break;
@@ -191,7 +197,15 @@ async function findSiblingFlows(
   sourceFlowId: string,
   _projectId: string,
   _userId: string,
-): Promise<{ id: string; featureId: string; status: string; envSlug?: string; clonedFromFlowId?: string }[]> {
+): Promise<
+  {
+    id: string;
+    featureId: string;
+    status: string;
+    envSlug?: string;
+    clonedFromFlowId?: string;
+  }[]
+> {
   // Filter on `clonedFromFlowId` only — the source `ItemId` is a unique
   // GUID, so it's a sufficient key by itself. Earlier versions also
   // passed `createdByFilter(userId)` and `projectId`, but the gateway
@@ -259,8 +273,61 @@ export function useClonedFeatureEnvs(
         pageNo: 1,
         pageSize: 50,
       });
-      const slugs = unwrapPaged<{ envSlug?: string }>(raw).items
-        .map((f) => f.envSlug)
+      const slugs = unwrapPaged<{ envSlug?: string }>(raw)
+        .items.map((f) => f.envSlug)
+        .filter((s): s is string => typeof s === "string" && s.length > 0);
+      return new Set(slugs);
+    },
+  });
+}
+
+// Flow-side counterpart of `useClonedFeatureEnvs`. Returns the set of
+// `envSlug` values where this source flow already has a sibling record
+// (records with `clonedFromFlowId === flowId`). Used by the flow row's
+// read-only environment workflow diagram to mark each sibling env as
+// "cloned" vs "available".
+//
+// Like the feature variant, we deliberately do NOT apply
+// `createdByFilter(userId)` — a sibling flow can legitimately be
+// created by another team member (e.g. a colleague cloned the flow
+// earlier) and the diagram still needs to show that env as "cloned".
+//
+// Independent of the feature's env chain — per the user's request, each
+// flow row's environment workflow is independent of its parent
+// feature's workflow. Promoting a flow to stg / prod / uat doesn't
+// require the feature to be promoted to that env first; the flow
+// carries its own `clonedFromFlowId` link that the read-only mirror
+// picks up. Filter on `clonedFromFlowId` only — every clone (direct
+// or transitive, e.g. prod clone of a stg clone) is stamped with
+// `clonedFromFlowId === <root dev source flow id>` by
+// `useCloneFlow`, mirroring the feature cascade's "all descendants
+// link to the root source" convention. This keeps the env set
+// accurate regardless of which env the manager clicked from.
+export function useClonedFlowEnvs(
+  flowId: string | undefined,
+): UseQueryResult<Set<string>> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    // Per-flow key. The root source flow's "clonedEnvs" set drives the
+    // persistent marker on its row; siblings in stg / prod / uat each
+    // have their OWN (empty) lookup, which renders the standard
+    // "available" pill on every sibling row's chain — by design, since
+    // the sibling already IS in that env (its source chain rendered on
+    // the row whose `flow.id` matches `flow.clonedFromFlowId === undef`).
+    // The "_none" sentinel keeps the key stable when the flow is
+    // unmounted.
+    queryKey: ["flows", userId, "clonedEnvs", flowId ?? "_none"] as const,
+    enabled: Boolean(userId && flowId),
+    queryFn: async () => {
+      if (!flowId) return new Set<string>();
+      const raw = await flowsCollection.list({
+        filter: { clonedFromFlowId: flowId },
+        pageNo: 1,
+        pageSize: 50,
+      });
+      const slugs = unwrapPaged<{ envSlug?: string }>(raw)
+        .items.map((f) => f.envSlug)
         .filter((s): s is string => typeof s === "string" && s.length > 0);
       return new Set(slugs);
     },
@@ -315,8 +382,7 @@ function isDevSource(envSlug: string | undefined): boolean {
 
 export const queryKeys = {
   projects: (userId: string) => ["projects", userId] as const,
-  project: (userId: string, id: string) =>
-    ["projects", userId, id] as const,
+  project: (userId: string, id: string) => ["projects", userId, id] as const,
   features: (userId: string, projectId: string, envSlug?: string) =>
     ["features", userId, projectId, envSlug ?? "_all"] as const,
   flows: (userId: string, featureId: string) =>
@@ -454,7 +520,13 @@ export function useProject(
       // exist. We deliberately dropped the `CreatedBy` ownership guard:
       // a tester should be able to open a project they didn't author so
       // they can browse it read-only. Mutations still gate on `isTester`.
-      const paged = unwrapPaged<{ ItemId: string; CreatedBy?: string; name: string; CreatedDate: string; LastUpdatedDate: string }>(raw);
+      const paged = unwrapPaged<{
+        ItemId: string;
+        CreatedBy?: string;
+        name: string;
+        CreatedDate: string;
+        LastUpdatedDate: string;
+      }>(raw);
       const p = paged.items[0];
       if (!p) return null;
       return toProject(p as Parameters<typeof toProject>[0]);
@@ -578,15 +650,13 @@ export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
         pageSize: 200,
         sort: { CreatedDate: -1 },
       });
-      return unwrapPaged<unknown>(featuresRaw).items
-        .filter((f) => {
+      return unwrapPaged<unknown>(featuresRaw)
+        .items.filter((f) => {
           const pid = (f as { projectId?: string }).projectId;
           return pid !== undefined && scope.projectIds.has(pid);
         })
         .slice(0, limit)
-        .map((f) =>
-          toFeature(f as Parameters<typeof toFeature>[0], ""),
-        );
+        .map((f) => toFeature(f as Parameters<typeof toFeature>[0], ""));
     },
   });
 }
@@ -618,15 +688,13 @@ export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
         pageSize: 200,
         sort: { CreatedDate: -1 },
       });
-      return unwrapPaged<unknown>(flowsRaw).items
-        .filter((f) => {
+      return unwrapPaged<unknown>(flowsRaw)
+        .items.filter((f) => {
           const fid = (f as { featureId?: string }).featureId;
           return fid !== undefined && scope.featureIds.has(fid);
         })
         .slice(0, limit)
-        .map((f) =>
-          toFlow(f as Parameters<typeof toFlow>[0], ""),
-        );
+        .map((f) => toFlow(f as Parameters<typeof toFlow>[0], ""));
     },
   });
 }
@@ -747,8 +815,8 @@ export function useAliveScope(userId: string): UseQueryResult<{
         pageSize: 500,
       });
       const featureIds = new Set(
-        unwrapPaged<{ ItemId: string }>(featuresRaw).items
-          .filter((f) => {
+        unwrapPaged<{ ItemId: string }>(featuresRaw)
+          .items.filter((f) => {
             const pid = (f as { projectId?: string }).projectId;
             return pid !== undefined && projectIds.has(pid);
           })
@@ -943,14 +1011,12 @@ export function useProjectFlows(
         pageNo: 1,
         pageSize: 1000,
       });
-      return unwrapPaged<unknown>(flowsRaw).items
-        .filter((f) => {
+      return unwrapPaged<unknown>(flowsRaw)
+        .items.filter((f) => {
           const fid = (f as { featureId?: string }).featureId;
           return fid !== undefined && featureIds.has(fid);
         })
-        .map((f) =>
-          toFlow(f as Parameters<typeof toFlow>[0], projectId),
-        );
+        .map((f) => toFlow(f as Parameters<typeof toFlow>[0], projectId));
     },
   });
 }
@@ -990,8 +1056,8 @@ export async function fetchProjectContents(
     pageNo: 1,
     pageSize: 1000,
   });
-  const flows = unwrapPaged<unknown>(flowsRaw).items
-    .filter((f) => {
+  const flows = unwrapPaged<unknown>(flowsRaw)
+    .items.filter((f) => {
       const fid = (f as { featureId?: string }).featureId;
       return fid !== undefined && featureIds.has(fid);
     })
@@ -1184,10 +1250,12 @@ export function useRenameChatSession(): UseMutationResult<
       const target = messages.find(
         (m) => (m as { role?: string }).role === "user",
       );
-      if (!target) throw new Error("Cannot rename: no user turn in this session.");
+      if (!target)
+        throw new Error("Cannot rename: no user turn in this session.");
       const id = (target as { ItemId?: string }).ItemId;
       const role = (target as { role?: string }).role ?? "user";
-      const actionsJson = (target as { actionsJson?: string }).actionsJson ?? "";
+      const actionsJson =
+        (target as { actionsJson?: string }).actionsJson ?? "";
       if (!id) throw new Error("Cannot rename: target message missing id.");
       await chatMessagesCollection.update(id, {
         sessionId,
@@ -1239,15 +1307,17 @@ export function useAppendChatMessage(): UseMutationResult<
           LastUpdatedDate: string;
         };
       };
-      const item = created.data ?? (created as unknown as {
-        ItemId: string;
-        sessionId: string;
-        role: string;
-        content: string;
-        actionsJson?: string;
-        CreatedDate: string;
-        LastUpdatedDate: string;
-      });
+      const item =
+        created.data ??
+        (created as unknown as {
+          ItemId: string;
+          sessionId: string;
+          role: string;
+          content: string;
+          actionsJson?: string;
+          CreatedDate: string;
+          LastUpdatedDate: string;
+        });
       return toChatMessage(item as Parameters<typeof toChatMessage>[0]);
     },
     onSuccess: (_msg, vars) => {
@@ -1300,7 +1370,9 @@ export function useDirectMessages(): UseQueryResult<DirectMessage[]> {
       ]) {
         merged.set(raw.ItemId, toDirectMessage(raw));
       }
-      return [...merged.values()].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
+      return [...merged.values()].sort((a, b) =>
+        a.sentAt.localeCompare(b.sentAt),
+      );
     },
   });
 }
@@ -1535,7 +1607,12 @@ export function useDeleteDirectMessage(): UseMutationResult<
 export function useToggleDirectMessageReaction(): UseMutationResult<
   void,
   Error,
-  { id: string; senderId: string; recipientId: string; reactions: { userId: string; emoji: string }[] }
+  {
+    id: string;
+    senderId: string;
+    recipientId: string;
+    reactions: { userId: string; emoji: string }[];
+  }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
@@ -1659,9 +1736,7 @@ function formatCallDuration(sec: number): string {
   const m = Math.floor((safe % 3600) / 60);
   const s = safe % 60;
   const pad = (n: number) => n.toString().padStart(2, "0");
-  return h > 0
-    ? `${h}:${pad(m)}:${pad(s)}`
-    : `${m}:${pad(s)}`;
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 // --- WebRTC call signaling ---------------------------------------------------
@@ -1696,7 +1771,11 @@ export function useActiveCallSignal(
     enabled: Boolean(userId && counterpartId),
     refetchInterval: (query) => {
       const data = query.state.data as CallSignal | null | undefined;
-      const live = data && data.status !== "ended" && data.status !== "declined" && data.status !== "missed";
+      const live =
+        data &&
+        data.status !== "ended" &&
+        data.status !== "declined" &&
+        data.status !== "missed";
       return live ? 2_000 : 5_000;
     },
     queryFn: async () => {
@@ -1731,7 +1810,10 @@ export function useActiveCallSignal(
         b.updatedAt.localeCompare(a.updatedAt),
       );
       const live = all.find(
-        (s) => s.status !== "ended" && s.status !== "declined" && s.status !== "missed",
+        (s) =>
+          s.status !== "ended" &&
+          s.status !== "declined" &&
+          s.status !== "missed",
       );
       if (live) return live;
       return all[0] ?? null;
@@ -1923,7 +2005,13 @@ export function useAcceptCall(): UseMutationResult<
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
   return useMutation({
-    mutationFn: async ({ signalId, callerId, recipientId, kind, sdpAnswer }) => {
+    mutationFn: async ({
+      signalId,
+      callerId,
+      recipientId,
+      kind,
+      sdpAnswer,
+    }) => {
       const updated = (await callSignalsCollection.update(signalId, {
         callerId,
         recipientId,
@@ -1989,7 +2077,13 @@ export function useEndCall(): UseMutationResult<
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
   return useMutation({
-    mutationFn: async ({ signalId, callerId, recipientId, kind, reason = "hangup" }) => {
+    mutationFn: async ({
+      signalId,
+      callerId,
+      recipientId,
+      kind,
+      reason = "hangup",
+    }) => {
       const now = new Date().toISOString();
       await callSignalsCollection.update(signalId, {
         callerId,
@@ -2026,7 +2120,13 @@ export function useAppendIceCandidates(): UseMutationResult<
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
   return useMutation({
-    mutationFn: async ({ signalId, callerId, recipientId, kind, newCandidates }) => {
+    mutationFn: async ({
+      signalId,
+      callerId,
+      recipientId,
+      kind,
+      newCandidates,
+    }) => {
       if (newCandidates.length === 0) return;
       // Read the latest blob so the merge dedupes against both sides' latest.
       const fresh = await callSignalsCollection.list({
@@ -2043,9 +2143,7 @@ export function useAppendIceCandidates(): UseMutationResult<
           if (Array.isArray(parsed)) {
             merged = parsed.filter(
               (c): c is CallSignalIceCandidate =>
-                c &&
-                typeof c === "object" &&
-                typeof c.candidate === "string",
+                c && typeof c === "object" && typeof c.candidate === "string",
             );
           }
         } catch {
@@ -2484,10 +2582,7 @@ export function useAddFlowCommentReply(): UseMutationResult<
         qc,
       }).catch((err) => {
         // eslint-disable-next-line no-console
-        console.warn(
-          "[useAddFlowCommentReply] reply notification failed",
-          err,
-        );
+        console.warn("[useAddFlowCommentReply] reply notification failed", err);
       });
     },
   });
@@ -2578,10 +2673,7 @@ async function notifyCommentReply(args: {
     });
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn(
-      "[notifyCommentReply] failed to write notification row",
-      err,
-    );
+    console.warn("[notifyCommentReply] failed to write notification row", err);
   }
 }
 
@@ -2616,9 +2708,7 @@ function findProjectInCache(
   qc: ReturnType<typeof useQueryClient>,
   projectId: string,
 ): Project | undefined {
-  const caches = qc
-    .getQueryCache()
-    .findAll({ queryKey: ["projects"] });
+  const caches = qc.getQueryCache().findAll({ queryKey: ["projects"] });
   for (const entry of caches) {
     const rows = qc.getQueryData<Project[]>(entry.queryKey);
     if (!Array.isArray(rows)) continue;
@@ -2809,9 +2899,7 @@ export function useUpdateTestCase(): UseMutationResult<
           : {}),
         ...(patch.order !== undefined ? { order: patch.order } : {}),
         ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
-      } as Partial<CloudTestCase>)) as
-        | { data?: CloudTestCase }
-        | CloudTestCase;
+      } as Partial<CloudTestCase>)) as { data?: CloudTestCase } | CloudTestCase;
       const item =
         "data" in updated && updated.data
           ? updated.data
@@ -3021,9 +3109,7 @@ export function useAnnouncementsAutoOpen(): [
     // First successful capture: snapshot every (id → postedAt) currently
     // visible and bail. Pre-existing rows are not considered fresh.
     if (seenRef.current === null) {
-      seenRef.current = new Map(
-        announcements.map((a) => [a.id, a.postedAt]),
-      );
+      seenRef.current = new Map(announcements.map((a) => [a.id, a.postedAt]));
       lastUserIdRef.current = userId;
       return;
     }
@@ -3032,9 +3118,7 @@ export function useAnnouncementsAutoOpen(): [
     // new session against the previous one (sign-out/sign-in cycle,
     // or tab left open while another user signed in elsewhere).
     if (lastUserIdRef.current !== userId) {
-      seenRef.current = new Map(
-        announcements.map((a) => [a.id, a.postedAt]),
-      );
+      seenRef.current = new Map(announcements.map((a) => [a.id, a.postedAt]));
       lastUserIdRef.current = userId;
       return;
     }
@@ -3142,9 +3226,7 @@ export function useCreateProject(): UseMutationResult<
       const key = queryKeys.projects(userId);
       qc.setQueryData<Project[]>(key, (prev) => {
         if (!prev) return [project];
-        return prev.map((p) =>
-          p.id === ctx.placeholderId ? project : p,
-        );
+        return prev.map((p) => (p.id === ctx.placeholderId ? project : p));
       });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
@@ -3206,9 +3288,7 @@ export function useCreateProject(): UseMutationResult<
       // `toProject` produces a complete Project record.
       const itemId = extractInsertedItemId(created, "insertProject");
       if (!itemId) {
-        throw new Error(
-          "Could not create project — no itemId in response.",
-        );
+        throw new Error("Could not create project — no itemId in response.");
       }
       const now = new Date().toISOString();
       const item = {
@@ -3303,9 +3383,7 @@ export function useCreateFeature(): UseMutationResult<
       // comment for why the old `created.data ?? ...` cast was wrong.
       const itemId = extractInsertedItemId(created, "insertFeature");
       if (!itemId) {
-        throw new Error(
-          "Could not create feature — no itemId in response.",
-        );
+        throw new Error("Could not create feature — no itemId in response.");
       }
       const now = new Date().toISOString();
       const item = {
@@ -3322,9 +3400,10 @@ export function useCreateFeature(): UseMutationResult<
         // Same echo for githubLink — `toFeature` normalizes empty
         // strings to `undefined`, so `input.githubLink` undefined
         // here is fine; the drawer just won't render the row.
-        githubLink: input.githubLink && input.githubLink.trim() !== ""
-          ? input.githubLink.trim()
-          : undefined,
+        githubLink:
+          input.githubLink && input.githubLink.trim() !== ""
+            ? input.githubLink.trim()
+            : undefined,
         CreatedDate: now,
         LastUpdatedDate: now,
       };
@@ -3348,9 +3427,7 @@ export function useCreateFeature(): UseMutationResult<
       // the subscription-filter `value` so future reads can pivot on
       // it. Same fire-and-forget discipline as `useCreateProject` — a
       // notifier hiccup never blocks the create.
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === vars.projectId);
       void notifyAssignedFeature({
         featureId: feature.id,
@@ -3430,7 +3507,9 @@ export function useCreateFlow(): UseMutationResult<
       return toFlow(item, input.projectId);
     },
     onSuccess: (flow, vars) => {
-      qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
+      qc.invalidateQueries({
+        queryKey: queryKeys.flows(userId, vars.featureId),
+      });
       // Mirror useCreateFeature: invalidate every project-scoped
       // feature/flow cache so the `/projects` page card counts (which
       // key off `useProjectFeatures` / `useProjectFlows`) refresh in
@@ -3441,9 +3520,7 @@ export function useCreateFlow(): UseMutationResult<
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === vars.projectId);
       // Broadcast to manager + developer roles (NOT tester) — the
       // user request dated 2026-09-27 was explicit: when a tester
@@ -3505,9 +3582,7 @@ export function useDeleteProject(): UseMutationResult<void, Error, string> {
       // Capture the name before cache invalidation drops the row. The
       // list is the source of truth — a single project may be in many
       // query caches but the list always has it.
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === projectId);
       // Broadcast to tester + developer (the actor-exclusion filter
       // drops the actor's own uid regardless of role — see
@@ -3605,9 +3680,11 @@ export function useUpdateFeature(): UseMutationResult<
         }
       }
 
-      const updated = (await featuresCollection.update(id, cloudPatch)) as {
-        data?: CloudFeature;
-      } | CloudFeature;
+      const updated = (await featuresCollection.update(id, cloudPatch)) as
+        | {
+            data?: CloudFeature;
+          }
+        | CloudFeature;
       const raw =
         "data" in updated && updated.data
           ? updated.data
@@ -3698,9 +3775,7 @@ export function useDeleteFeature(): UseMutationResult<
         userId,
         vars.projectId,
       ]);
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === vars.projectId);
       const feature = features?.find((f) => f.id === vars.id);
       void notifyRole(["tester", "developer"], {
@@ -3803,9 +3878,11 @@ export function useUpdateFlow(): UseMutationResult<
         }
       }
 
-      const updated = (await flowsCollection.update(id, cloudPatch)) as {
-        data?: CloudFlow;
-      } | CloudFlow;
+      const updated = (await flowsCollection.update(id, cloudPatch)) as
+        | {
+            data?: CloudFlow;
+          }
+        | CloudFlow;
       const raw =
         "data" in updated && updated.data
           ? updated.data
@@ -3813,7 +3890,9 @@ export function useUpdateFlow(): UseMutationResult<
       return toFlow(raw as Parameters<typeof toFlow>[0], "");
     },
     onSuccess: (flow, vars) => {
-      qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
+      qc.invalidateQueries({
+        queryKey: queryKeys.flows(userId, vars.featureId),
+      });
       // Invalidate every sibling feature's flow cache too. The source
       // rename only refreshed `vars.featureId`; sibling feature caches
       // (e.g. the matching uat feature) would otherwise keep showing
@@ -3831,9 +3910,7 @@ export function useUpdateFlow(): UseMutationResult<
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
       if (vars.patch.name !== undefined) {
-        const projects = qc.getQueryData<Project[]>(
-          queryKeys.projects(userId),
-        );
+        const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
         const project = projects?.find((p) => p.id === vars.projectId);
         void notifyRole(["tester", "developer"], {
           context: "flow",
@@ -3897,7 +3974,9 @@ export function useDeleteFlow(): UseMutationResult<
       await flowsCollection.delete(id);
     },
     onSuccess: (_result, vars) => {
-      qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
+      qc.invalidateQueries({
+        queryKey: queryKeys.flows(userId, vars.featureId),
+      });
       for (const fid of siblingFeatureIds) {
         qc.invalidateQueries({ queryKey: queryKeys.flows(userId, fid) });
       }
@@ -3913,9 +3992,7 @@ export function useDeleteFlow(): UseMutationResult<
       const flows = qc.getQueryData<Flow[]>(
         queryKeys.flows(userId, vars.featureId),
       );
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const flow = flows?.find((f) => f.id === vars.id);
       const project = projects?.find((p) => p.id === vars.projectId);
       void notifyRole(["tester", "developer"], {
@@ -3981,7 +4058,9 @@ export function useUpdateFlowStatus(): UseMutationResult<
       return toFlow(raw as Parameters<typeof toFlow>[0], "");
     },
     onSuccess: (_flow, vars) => {
-      qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
+      qc.invalidateQueries({
+        queryKey: queryKeys.flows(userId, vars.featureId),
+      });
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
@@ -3991,9 +4070,7 @@ export function useUpdateFlowStatus(): UseMutationResult<
       // `vars.status` is the new value the cloud echoed back; `vars.name`
       // is the flow title. Project name comes from the projects cache
       // — we read it before invalidation runs in the next mutation.
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === vars.projectId);
       void notifyRole(["tester", "developer"], {
         context: "flow",
@@ -4053,7 +4130,9 @@ export function useUpdateFlowStack(): UseMutationResult<
       return toFlow(raw as Parameters<typeof toFlow>[0], "");
     },
     onSuccess: (_flow, vars) => {
-      qc.invalidateQueries({ queryKey: queryKeys.flows(userId, vars.featureId) });
+      qc.invalidateQueries({
+        queryKey: queryKeys.flows(userId, vars.featureId),
+      });
       qc.invalidateQueries({ queryKey: ["features", userId, vars.projectId] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
 
@@ -4061,9 +4140,7 @@ export function useUpdateFlowStack(): UseMutationResult<
       // the status notification above; the `stack` field replaces
       // `status` in the payload and the body builder picks it up
       // because we discriminate on `actionName`.
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === vars.projectId);
       void notifyRole(["tester", "developer"], {
         context: "flow",
@@ -4131,14 +4208,17 @@ export function useUpdateProject(): UseMutationResult<
         cloudPatch.customEnvs = JSON.stringify(patch.customEnvs);
       }
       if (patch.envLabelOverrides) {
-        cloudPatch.envLabelOverrides = JSON.stringify(
-          patch.envLabelOverrides,
-        );
+        cloudPatch.envLabelOverrides = JSON.stringify(patch.envLabelOverrides);
       }
-      const updated = (await projectsCollection.update(id, cloudPatch)) as {
-        data?: CloudProject;
-      } | CloudProject;
-      const raw = "data" in updated && updated.data ? updated.data : (updated as CloudProject);
+      const updated = (await projectsCollection.update(id, cloudPatch)) as
+        | {
+            data?: CloudProject;
+          }
+        | CloudProject;
+      const raw =
+        "data" in updated && updated.data
+          ? updated.data
+          : (updated as CloudProject);
       return toProject(raw as Parameters<typeof toProject>[0]);
     },
     onSuccess: (project, vars) => {
@@ -4346,9 +4426,7 @@ export function useCloneFeature(): UseMutationResult<
           "Cannot promote feature — this feature has no flows. Add at least one flow under the feature before promoting.",
         );
       }
-      const nonPassedFlows = sourceFlows.filter(
-        (f) => f.status !== "passed",
-      );
+      const nonPassedFlows = sourceFlows.filter((f) => f.status !== "passed");
       if (nonPassedFlows.length > 0) {
         const blockingNames = nonPassedFlows
           .map((f) => f.title ?? "(untitled)")
@@ -4496,9 +4574,7 @@ export function useCloneFeature(): UseMutationResult<
       // subscription filter); `featureName` carries the source's
       // pre-promote name; `envSlug` is the destination env the
       // manager picked from the chip.
-      const projects = qc.getQueryData<Project[]>(
-        queryKeys.projects(userId),
-      );
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
       const project = projects?.find((p) => p.id === vars.feature.projectId);
       void notifyRole(["tester", "developer"], {
         context: "feature",
@@ -4516,6 +4592,324 @@ export function useCloneFeature(): UseMutationResult<
       });
       // Silence unused-param linter — onSuccess exists so callers
       // can `await` the cloned Feature; the row invalidations above
+      // don't read it directly.
+      void _sibling;
+    },
+  });
+}
+
+// Flow-side counterpart of `useCloneFeature`. Promotes a single flow to
+// a sibling env (stg / prod / uat) by:
+//   1. Resolving the target-env feature — looking up the source feature's
+//      existing sibling in the target env (`clonedFromFeatureId ===
+//      sourceFeature.id && envSlug === targetEnvSlug`); if none exists,
+//      cascade-creating a sibling feature that mirrors
+//      `useCloneFeature`'s sibling-create payload (title, projectId,
+//      status, envSlug, clonedFromFeatureId, plus developerIds / qaIds /
+//      githubLink when non-empty).
+//   2. Creating a new flow row under that target-env feature with
+//      `clonedFromFlowId` pointing back at the root dev source.
+//
+// Why a feature cascade is required — the env-scoped pages filter
+// features by `envSlug` via `useProjectFeatures`; the cloned flow has
+// to live under a feature in the target env, otherwise the target
+// env's page (filtered by envSlug) can't render it. The source feature
+// only appears on the source env's page, so without the cascade the
+// clone would either be invisible (no home on the target env's page)
+// or appear as a duplicate in the source feature on the source env's
+// page (since `useFeatureFlows` returns flows by featureId alone, not
+// filtered by envSlug).
+//
+// `clonedFromFlowId` flat-link to root — mirrors the feature-side "all
+// descendants link to the root source" convention. If `flow` IS the
+// dev source (`flow.clonedFromFlowId === undefined`), the new clone's
+// `clonedFromFlowId` is set to `flow.id` (the root). If `flow` is
+// itself a clone (`flow.clonedFromFlowId` is set to the root), the
+// new clone's `clonedFromFlowId` is set to the SAME root id — NOT to
+// `flow.id`. Reason: the root source's `useClonedFlowEnvs` lookup
+// (`filter: { clonedFromFlowId: <root id> }`) must find every
+// descendant regardless of which env chain step created it. If we
+// chained link-by-link (stg → prod's `clonedFromFlowId = stg.id`),
+// the root lookup would miss the prod clone because the prod row's
+// `clonedFromFlowId` points at the stg clone, not the root. Flat-link
+// to the root keeps the env-set accurate.
+//
+// Per-flow independence — per the user's request, each flow row's
+// environment workflow operates on the flow alone, without requiring
+// its parent feature to be promoted to the target env FIRST. The
+// cascade here is structural (a sibling feature is needed so the
+// cloned flow has a home on the target env's page), not a per-flow
+// propagation: no other-flow auto-clone, no flow-list cascade —
+// only the one flow being promoted is duplicated. The "feature has
+// been promoted" check is intentionally absent — a manager promoting
+// a single dev flow to stg shouldn't require promoting the whole
+// feature first.
+//
+// Manager-only — see the role gate below. Tester / developer roles get
+// the read-only `FlowEnvWorkflow` mirror in `FlowItem.tsx` instead.
+export function useCloneFlow(): UseMutationResult<
+  Flow,
+  Error,
+  { flow: Flow; targetEnvSlug: string }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  // Manager-only action. Promoting a flow across environments is part
+  // of the manager's lifecycle workflow (the manager owns the env
+  // chain and carries flows up as QA signs off), so only managers are
+  // allowed to call this mutation. Testers and developers see the
+  // read-only `FlowEnvWorkflow` mirror in `FlowItem.tsx` and the env
+  // pills are non-interactive on their session; this throw catches
+  // programmatic / stale-modal callers that bypass that UI gate.
+  const isManager = currentUser?.roles?.includes("manager") ?? false;
+  return useMutation({
+    mutationFn: async ({ flow, targetEnvSlug }) => {
+      if (!isManager) {
+        throw new Error("Only managers can promote flows across environments.");
+      }
+      // Precondition — the source flow must be in "passed" status.
+      // The team's promotion contract: a flow is promotion-ready only
+      // when QA has signed off (status === "passed"). Any non-passed
+      // status (`failed`, `pending`, `draft`, `investigating`,
+      // `pause`) is a block — either because the work is unfinished
+      // (draft / pending / investigating / pause) or because it has
+      // hit a regression (failed).
+      //
+      // The manager-interactive `ManagerFlowEnvWorkflow` UI also gates
+      // on this — but instead of just disabling the pill, the
+      // manager clicks through and the mutation throws here, which
+      // surfaces as an error toast. Simpler than the feature row's
+      // `BlockPromoteModal` because the flow row's precondition is
+      // single-dimensional (just the flow's own status); the modal's
+      // multi-flow explanation doesn't apply.
+      //
+      // CRITICAL ordering — this check MUST run before
+      // `flowsCollection.create()` below. The sibling create is
+      // visible immediately on the destination env (TanStack Query
+      // invalidation in onSuccess refetches), so if we created the
+      // sibling first and THEN threw on the precondition, the user
+      // would see the error toast AND the sibling would already be
+      // in the next env. Lifting the check above the create makes
+      // the precondition a hard gate: when it fails, no sibling row
+      // is ever written.
+      if (flow.status !== "passed") {
+        throw new Error(
+          `Cannot promote flow "${flow.name}" — it is not in "Passed" status. Mark the flow as Passed before promoting.`,
+        );
+      }
+
+      // `clonedFromFlowId` flat-link to root. If `flow` is the dev
+      // source, point at itself; if `flow` is itself a clone, point
+      // at the same root it was linked from. See the comment at the
+      // top of this hook for why we don't chain link-by-link.
+      const rootSourceId = flow.clonedFromFlowId ?? flow.id;
+
+      // Resolve the target-env sibling feature. The cloned flow has
+      // to live under a feature in the target env, otherwise the
+      // env-scoped page (filtered by `envSlug` on
+      // `useProjectFeatures`) can't render it — the source feature
+      // only appears on the source env's page. We cascade-create a
+      // sibling feature if one doesn't already exist; this mirrors
+      // `useCloneFeature`'s feature-side cascade, but stops at the
+      // feature boundary (no other-flow auto-clone — that's the
+      // per-flow independence the user asked for).
+      //
+      // Look up the source feature's existing sibling in the target
+      // env. The `clonedFromFeatureId` filter is the same link
+      // `useClonedFeatureEnvs` uses; the additional `envSlug` filter
+      // narrows the candidate set to the row we'd attach the cloned
+      // flow to. Wrapped in try/catch + a defensive page-size bound
+      // — a feature typically has ≤3 siblings (stg/prod/uat), so a
+      // page size of 10 is generous headroom without pulling the
+      // whole feature set.
+      const siblingsRaw = await featuresCollection.list({
+        filter: {
+          clonedFromFeatureId: flow.featureId,
+          envSlug: targetEnvSlug,
+        },
+        pageNo: 1,
+        pageSize: 10,
+      });
+      const existingSibling = unwrapPaged<{ ItemId: string }>(siblingsRaw)
+        .items[0];
+
+      // Read the source feature for the sibling-create payload. The
+      // Feature schema forwards `title`, `developerIds`, `qaIds`,
+      // and `githubLink` from the source — the destination env
+      // inherits the same team ownership and code-link as the
+      // source. Mirrors `useCloneFeature`'s sibling-create payload
+      // verbatim. Done after the sibling lookup so an existing
+      // sibling short-circuits this read entirely (avoids a wasted
+      // fetch on the common case of "promoting more flows after
+      // the feature is already promoted").
+      let targetFeatureId: string;
+      if (existingSibling) {
+        targetFeatureId = existingSibling.ItemId;
+      } else {
+        const sourceFeatureRaw = await featuresCollection.get(flow.featureId);
+        const sourceFeature =
+          unwrapPaged<CloudFeature>(sourceFeatureRaw).items[0];
+        if (!sourceFeature) {
+          throw new Error(
+            `Cannot promote flow "${flow.name}" — parent feature (${flow.featureId}) could not be loaded.`,
+          );
+        }
+        const siblingCreatePayload: Record<string, unknown> = {
+          title: sourceFeature.title,
+          projectId: sourceFeature.projectId,
+          status: "backlog",
+          envSlug: targetEnvSlug,
+          clonedFromFeatureId: sourceFeature.ItemId,
+        };
+        if (Array.isArray(sourceFeature.developerIds)) {
+          siblingCreatePayload.developerIds = sourceFeature.developerIds;
+        }
+        if (Array.isArray(sourceFeature.qaIds)) {
+          siblingCreatePayload.qaIds = sourceFeature.qaIds;
+        }
+        if (
+          typeof sourceFeature.githubLink === "string" &&
+          sourceFeature.githubLink.trim() !== ""
+        ) {
+          siblingCreatePayload.githubLink = sourceFeature.githubLink.trim();
+        }
+        const createdSibling = (await featuresCollection.create(
+          siblingCreatePayload,
+        )) as unknown;
+        const newSiblingId = extractInsertedItemId(
+          createdSibling,
+          "insertFeature",
+        );
+        if (!newSiblingId) {
+          throw new Error(
+            "Could not create sibling feature for flow clone — no itemId in response.",
+          );
+        }
+        targetFeatureId = newSiblingId;
+      }
+
+      // Build the clone-record payload. The Flow schema marks
+      // `title` and `featureId` as required; `featureId` is the
+      // target-env sibling feature (existing or just-created) so the
+      // cloned flow renders under that feature on the target env's
+      // page. `status` is forwarded verbatim from the source so the
+      // audit trail of "passed in <source env>" stays attached to
+      // the cloned flow (the tester re-runs in the target env and
+      // updates). Optional content fields (`description` / `steps` /
+      // `stack`) are forwarded only when non-empty so the schema's
+      // `requiredOn: 0` rule isn't tripped.
+      const createPayload: Record<string, unknown> = {
+        title: flow.name,
+        featureId: targetFeatureId,
+        status: flow.status ?? "draft",
+        envSlug: targetEnvSlug,
+        clonedFromFlowId: rootSourceId,
+      };
+      if (
+        typeof flow.description === "string" &&
+        flow.description.trim() !== ""
+      ) {
+        createPayload.description = flow.description;
+      }
+      if (Array.isArray(flow.steps) && flow.steps.length > 0) {
+        createPayload.steps = flow.steps;
+      }
+      if (typeof flow.stack === "string") {
+        createPayload.stack = flow.stack;
+      }
+      const created = (await flowsCollection.create(createPayload)) as unknown;
+      // Mirror `useCloneFeature` — use the helper to pull the new
+      // sibling's `ItemId` reliably across the gateway's response
+      // envelopes.
+      const siblingId = extractInsertedItemId(created, "insertFlow");
+      if (!siblingId) {
+        throw new Error("Could not create flow clone — no itemId in response.");
+      }
+      // We don't have the cloud's full row on hand (the create
+      // response only carries the new id), so build a `Flow`-shaped
+      // return from the source's metadata + the new envSlug +
+      // sibling featureId + the sibling id. Downstream callers
+      // (`onSuccess`) only need the id + name + projectId + envSlug
+      // + featureId to construct the notification payload, and
+      // TanStack Query will refetch the row's full content from
+      // `["flows", userId, featureId]` once we invalidate it.
+      const now = new Date().toISOString();
+      const synthetic = {
+        ItemId: siblingId,
+        title: flow.name,
+        featureId: targetFeatureId,
+        envSlug: targetEnvSlug,
+        status: flow.status ?? "draft",
+        description: flow.description,
+        steps: flow.steps,
+        stack: flow.stack,
+        CreatedDate: now,
+        LastUpdatedDate: now,
+      };
+      return toFlow(synthetic, flow.projectId);
+    },
+    onSuccess: (_sibling, vars) => {
+      // Refresh every cached view of this project's flows + the
+      // clonedEnvs lookups the workflow mirrors use. The prefix
+      // matches cover:
+      //   * `["flows", userId, featureId]` — the row's own flow
+      //     list (re-renders the source row + any sibling rows
+      //     under the same feature). Invalidated for BOTH the
+      //     source feature (so the source row's chain re-renders
+      //     against the now-non-empty clonedEnvs set) AND the
+      //     target-env feature (so the target env's page picks up
+      //     the cloned flow on the next render);
+      //   * `["flows", userId, "clonedEnvs", flowId]` — the
+      //     `useClonedFlowEnvs` lookup the source row's
+      //     `FlowEnvWorkflow` mirror uses to paint the persistent
+      //     "promoted to {env}" tick;
+      //   * `["features", userId, projectId, ...]` — the project-
+      //     scoped feature list, so the target env's page picks up
+      //     the new sibling feature on next render (only created if
+      //     no sibling existed — covered by the prefix match either
+      //     way, the env-scoped subkey just becomes a hit).
+      qc.invalidateQueries({
+        queryKey: ["flows", userId, vars.flow.featureId],
+      });
+      qc.invalidateQueries({
+        queryKey: [
+          "flows",
+          userId,
+          "clonedEnvs",
+          vars.flow.clonedFromFlowId ?? vars.flow.id,
+        ],
+      });
+      qc.invalidateQueries({
+        queryKey: ["features", userId, vars.flow.projectId],
+      });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+
+      // Notify testers + developers on cross-env flow promotion.
+      // `context: "flow"` makes the body builder render the flow-
+      // shaped sentence. `value` carries the source flow id (the
+      // sibling has a fresh id and isn't tracked yet by the inbox
+      // subscription filter); `flowName` carries the source's
+      // pre-promote name; `envSlug` is the destination env the
+      // manager picked from the chip.
+      const projects = qc.getQueryData<Project[]>(queryKeys.projects(userId));
+      const project = projects?.find((p) => p.id === vars.flow.projectId);
+      void notifyRole(["tester", "developer"], {
+        context: "flow",
+        actionName: "promoted",
+        value: vars.flow.id,
+        projectId: vars.flow.projectId,
+        projectName: project?.name,
+        flowName: vars.flow.name,
+        envSlug: vars.targetEnvSlug,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
+      // Silence unused-param linter — onSuccess exists so callers
+      // can `await` the cloned Flow; the row invalidations above
       // don't read it directly.
       void _sibling;
     },
@@ -5035,7 +5429,9 @@ export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
       const assignedToMe = rows.filter((i) =>
         (i.assignedDeveloperIds ?? []).includes(userId),
       );
-      return isTester ? assignedToMe : assignedToMe.filter((i) => !!i.approvedById);
+      return isTester
+        ? assignedToMe
+        : assignedToMe.filter((i) => !!i.approvedById);
     },
   });
 }
@@ -5076,15 +5472,11 @@ export function useCreateVerificationTarget(): UseMutationResult<
         // String. Coerce before sending so the cloud gets a real value
         // (the schema marks it `requiredOn: 3`).
         enabled: input.enabled ? "true" : "false",
-        ...(input.credentialId
-          ? { credentialId: input.credentialId }
-          : {}),
+        ...(input.credentialId ? { credentialId: input.credentialId } : {}),
         ...(input.lastVerifiedAt
           ? { lastVerifiedAt: input.lastVerifiedAt }
           : {}),
-        ...(input.lastStatus
-          ? { lastStatus: input.lastStatus }
-          : {}),
+        ...(input.lastStatus ? { lastStatus: input.lastStatus } : {}),
       });
       const itemId = extractInsertedItemId(created, "insertVerificationTarget");
       if (!itemId) {
@@ -5100,7 +5492,9 @@ export function useCreateVerificationTarget(): UseMutationResult<
         CreatedDate: now,
         LastUpdatedDate: now,
       };
-      return toVerificationTarget(item as Parameters<typeof toVerificationTarget>[0]);
+      return toVerificationTarget(
+        item as Parameters<typeof toVerificationTarget>[0],
+      );
     },
     onSuccess: () => {
       qc.invalidateQueries({
@@ -5135,10 +5529,12 @@ export function useDeleteVerificationTarget(): UseMutationResult<
 
 // Partial update — callers pass only the fields they're changing. The hook
 // echoes the unchanged required fields so the gateway accepts the partial
-// PATCH (the cloud schema marks `applicationName`, `url`, `environment`,
-// and `enabled` as `requiredOn: 3` — required on every update too, not
-// just on insert). Status flips from the verification panel use the same
-// hook with `{ lastStatus, lastVerifiedAt }`.
+// PATCH. The VerificationTarget schema marks `applicationName`, `url`,
+// `environment`, `enabled`, `projectId`, and `envSlug` as `requiredOn: 3`
+// — required on every update too, not just on insert — so the gateway
+// rejects a PATCH that drops any of them. We read the row first, echo all
+// six back, then let `patch` override the editable ones. Status flips from
+// the verification panel use the same hook with `{ lastStatus, lastVerifiedAt }`.
 export function useUpdateVerificationTarget(): UseMutationResult<
   VerificationTarget,
   Error,
@@ -5149,17 +5545,20 @@ export function useUpdateVerificationTarget(): UseMutationResult<
   const userId = currentUser?.id ?? "";
   return useMutation({
     mutationFn: async ({ id, patch }) => {
-      // The VerificationTarget schema marks applicationName, url,
-      // environment, and enabled as `requiredOn: 3`, so every PATCH must
-      // include them or the gateway rejects with VALIDATION_ERROR. Read
-      // the row first and echo the stored values back, then let `patch`
-      // override them — same pattern `useUpdateIssueStatus` uses. The
+      // Every PATCH must carry the six `requiredOn: 3` fields. Read the
+      // row first and echo the stored values back, then let `patch`
+      // override the editable ones (`applicationName`, `url`, `environment`,
+      // `enabled`) — same pattern `useUpdateIssueStatus` uses. The
       // optional fields (credentialId / lastVerifiedAt / lastStatus) go
       // straight from the patch, falling back to "" so a clear value
       // doesn't accidentally keep a stale string in the cloud.
+      // `projectId` and `envSlug` are immutable per row — we never let
+      // `patch` override them; the row's own values are the source of truth.
       const rawExisting = await verificationTargetsCollection.get(id);
       const existing = unwrapPaged<{
         ItemId: string;
+        projectId: string;
+        envSlug: string;
         applicationName: string;
         url: string;
         environment: string;
@@ -5169,7 +5568,10 @@ export function useUpdateVerificationTarget(): UseMutationResult<
         lastStatus?: string;
       }>(rawExisting).items[0];
       const update: Record<string, unknown> = {
-        applicationName: patch.applicationName ?? existing?.applicationName ?? "",
+        projectId: existing?.projectId ?? "",
+        envSlug: existing?.envSlug ?? "",
+        applicationName:
+          patch.applicationName ?? existing?.applicationName ?? "",
         url: patch.url ?? existing?.url ?? "",
         environment: patch.environment ?? existing?.environment ?? "production",
         enabled:
@@ -5191,9 +5593,11 @@ export function useUpdateVerificationTarget(): UseMutationResult<
       const updated = (await verificationTargetsCollection.update(
         id,
         update,
-      )) as {
-        data?: Parameters<typeof toVerificationTarget>[0];
-      } | Parameters<typeof toVerificationTarget>[0];
+      )) as
+        | {
+            data?: Parameters<typeof toVerificationTarget>[0];
+          }
+        | Parameters<typeof toVerificationTarget>[0];
       const raw =
         "data" in updated && updated.data
           ? updated.data
@@ -5276,14 +5680,17 @@ export function useDeleteSecret(): UseMutationResult<void, Error, string> {
 }
 
 // Edit the credential label + login email. The Secret schema marks
-// `name`, `email`, and `passwordMasked` as `requiredOn: 3`, so every PATCH
-// must echo all three back. The password is intentionally NOT editable
-// from this hook — per spec section 12.3 the real password never reaches
-// the cloud during the frontend phase, only the masked display string. If
-// a credential's password needs to change, the user must delete the row
-// and add a fresh one (same flow that exists today). We therefore read the
-// existing row and echo `passwordMasked` back untouched, letting `name`
-// and `email` be overridden by the patch.
+// `name`, `email`, `passwordMasked`, `projectId`, and `envSlug` as
+// `requiredOn: 3`, so every PATCH must echo all five back — the gateway
+// rejects a partial update that drops any of them. The password is
+// intentionally NOT editable from this hook — per spec section 12.3 the
+// real password never reaches the cloud during the frontend phase, only
+// the masked display string. If a credential's password needs to change,
+// the user must delete the row and add a fresh one (same flow that
+// exists today). We therefore read the existing row and echo
+// `passwordMasked` back untouched, letting `name` and `email` be
+// overridden by the patch. `projectId` and `envSlug` are immutable per
+// row — the row's own values are the source of truth.
 export function useUpdateSecret(): UseMutationResult<
   Secret,
   Error,
@@ -5297,19 +5704,25 @@ export function useUpdateSecret(): UseMutationResult<
       const rawExisting = await secretsCollection.get(id);
       const existing = unwrapPaged<{
         ItemId: string;
+        projectId: string;
+        envSlug: string;
         name: string;
         email: string;
         passwordMasked: string;
       }>(rawExisting).items[0];
       const updated = (await secretsCollection.update(id, {
+        projectId: existing?.projectId ?? "",
+        envSlug: existing?.envSlug ?? "",
         name: patch.name ?? existing?.name ?? "",
         email: patch.email ?? existing?.email ?? "",
         // Always echo the stored masked value back — never blank it out,
         // since we don't accept a new password from this codepath.
         passwordMasked: existing?.passwordMasked ?? "",
-      })) as {
-        data?: Parameters<typeof toSecret>[0];
-      } | Parameters<typeof toSecret>[0];
+      })) as
+        | {
+            data?: Parameters<typeof toSecret>[0];
+          }
+        | Parameters<typeof toSecret>[0];
       const raw =
         "data" in updated && updated.data
           ? updated.data
@@ -5365,9 +5778,7 @@ export function useCreateIssue(): UseMutationResult<
         reproductionStepsJson: input.reproductionSteps
           ? JSON.stringify(input.reproductionSteps)
           : "",
-        evidenceJson: input.evidence
-          ? JSON.stringify(input.evidence)
-          : "",
+        evidenceJson: input.evidence ? JSON.stringify(input.evidence) : "",
         detectedAt: input.detectedAt,
         ...(input.verificationRunId !== undefined
           ? { verificationRunId: input.verificationRunId }
@@ -5435,14 +5846,19 @@ export function useUpdateIssueStatus(): UseMutationResult<
   return useMutation({
     mutationFn: async ({ id, status }) => {
       // Echo required fields so the partial PATCH doesn't bounce on
-      // "missing required field" — the Issue schema marks `title`,
-      // `applicationName`, `url`, `category`, `severity`, `status`, and
-      // `detectedAt` as `requiredOn: 3`. We read the row first to keep
-      // the echo honest; without the read the cloud would reject the
-      // call (the gateway echoes won't auto-fill from stored fields).
+      // "missing required field" — the Issue schema marks `projectId`,
+      // `envSlug`, `title`, `applicationName`, `url`, `category`,
+      // `severity`, `status`, and `detectedAt` as `requiredOn: 3`. We read
+      // the row first to keep the echo honest; without the read the cloud
+      // would reject the call (the gateway echoes won't auto-fill from
+      // stored fields). `projectId` and `envSlug` are immutable per row,
+      // so the row's own values are the source of truth — we never let
+      // the patch override them.
       const raw = await issuesCollection.get(id);
       const existing = unwrapPaged<{
         ItemId: string;
+        projectId: string;
+        envSlug: string;
         title: string;
         applicationName: string;
         url: string;
@@ -5451,6 +5867,8 @@ export function useUpdateIssueStatus(): UseMutationResult<
         detectedAt: string;
       }>(raw).items[0];
       const updated = (await issuesCollection.update(id, {
+        projectId: existing?.projectId ?? "",
+        envSlug: existing?.envSlug ?? "",
         title: existing?.title ?? "",
         applicationName: existing?.applicationName ?? "",
         url: existing?.url ?? "",
@@ -5458,9 +5876,11 @@ export function useUpdateIssueStatus(): UseMutationResult<
         severity: existing?.severity ?? "low",
         detectedAt: existing?.detectedAt ?? new Date().toISOString(),
         status,
-      })) as {
-        data?: Parameters<typeof toIssue>[0];
-      } | Parameters<typeof toIssue>[0];
+      })) as
+        | {
+            data?: Parameters<typeof toIssue>[0];
+          }
+        | Parameters<typeof toIssue>[0];
       const data =
         "data" in updated && updated.data
           ? updated.data
@@ -5479,6 +5899,11 @@ export function useUpdateIssueStatus(): UseMutationResult<
 // escalations, reopen-on-regression). Follows the same read-echo contract as
 // `useUpdateIssueStatus`: the cloud PATCH bounces without the requiredOn:3
 // fields present, so we read the row first and echo whatever is stored.
+// The Issue schema marks `projectId` and `envSlug` as `requiredOn: 3` too,
+// alongside `title`, `applicationName`, `url`, `category`, `severity`,
+// `status`, and `detectedAt` — every PATCH must carry all of them, and
+// the env-scoping fields are immutable per row (the row's own values are
+// the source of truth).
 export function useUpdateIssue(): UseMutationResult<
   Issue,
   Error,
@@ -5507,6 +5932,8 @@ export function useUpdateIssue(): UseMutationResult<
       const raw = await issuesCollection.get(id);
       const existing = unwrapPaged<{
         ItemId: string;
+        projectId: string;
+        envSlug: string;
         title: string;
         applicationName: string;
         url: string;
@@ -5526,6 +5953,10 @@ export function useUpdateIssue(): UseMutationResult<
       }
       const updated = (await issuesCollection.update(id, {
         // Required-field echo — always the stored values, never the patch's.
+        // `projectId`/`envSlug` are immutable per row, so we never let the
+        // patch override them; the row's own values win.
+        projectId: existing.projectId,
+        envSlug: existing.envSlug,
         title: existing.title,
         applicationName: existing.applicationName,
         url: existing.url,
@@ -5548,9 +5979,11 @@ export function useUpdateIssue(): UseMutationResult<
           ? JSON.stringify(patch.assignedDeveloperIds)
           : (existing.assignedDeveloperIdsJson ?? "[]"),
         approvedById: patch.approvedById ?? existing.approvedById ?? "",
-      })) as {
-        data?: Parameters<typeof toIssue>[0];
-      } | Parameters<typeof toIssue>[0];
+      })) as
+        | {
+            data?: Parameters<typeof toIssue>[0];
+          }
+        | Parameters<typeof toIssue>[0];
       const data =
         "data" in updated && updated.data
           ? updated.data
@@ -5641,8 +6074,10 @@ export function useUploadProfilePic(): UseMutationResult<
       }
       // Names must be unique within a directory — stamp user + time so a
       // re-upload never collides with the previous picture.
-      const ext = (file.name.split(".").pop() ?? "").toLowerCase() ||
-        file.type.replace("image/", "") || "png";
+      const ext =
+        (file.name.split(".").pop() ?? "").toLowerCase() ||
+        file.type.replace("image/", "") ||
+        "png";
       const fileName = `profile-${userId}-${Date.now()}.${ext}`;
 
       // Two-step cloud upload: presign (creates the file record), then PUT
@@ -5826,9 +6261,7 @@ export function useSaveUserAvatarConfig(): UseMutationResult<
   return useMutation({
     mutationFn: async (input) => {
       if (!userId) {
-        throw new Error(
-          "You must be signed in to save your personal AI key.",
-        );
+        throw new Error("You must be signed in to save your personal AI key.");
       }
       const listRaw = await userAvatarConfigsCollection.list({
         filter: { userId },
@@ -6005,11 +6438,7 @@ export function useSaveSecretBindings(): UseMutationResult<
     },
     onSuccess: (row) => {
       qc.invalidateQueries({
-        queryKey: queryKeys.secretBindings(
-          userId,
-          row.projectId,
-          row.envSlug,
-        ),
+        queryKey: queryKeys.secretBindings(userId, row.projectId, row.envSlug),
       });
     },
   });
@@ -6479,9 +6908,7 @@ export interface NotepadSyncApi<T> {
   save: (pads: T[]) => void;
 }
 
-export function useNotepadSync<T>(
-  padType: NotepadPadType,
-): NotepadSyncApi<T> {
+export function useNotepadSync<T>(padType: NotepadPadType): NotepadSyncApi<T> {
   const prefQuery = useUserNote(padType);
   const savePref = useSaveUserNote();
   // Seed the localStorage mirror from the cloud row once it resolves,
@@ -6494,10 +6921,7 @@ export function useNotepadSync<T>(
         ? "lattice.mirror.notepad.text.v1"
         : "lattice.mirror.notepad.excel.v1";
     try {
-      window.localStorage.setItem(
-        key,
-        JSON.stringify(prefQuery.data.rows),
-      );
+      window.localStorage.setItem(key, JSON.stringify(prefQuery.data.rows));
     } catch {
       // best-effort
     }
@@ -6575,9 +6999,12 @@ async function mcpListSecrets(): Promise<McpSecretEcho[]> {
   }
 }
 
-async function mcpUpsertSecret(
-  payload: { id?: string; name: string; email: string; password: string },
-): Promise<McpSecretEcho | null> {
+async function mcpUpsertSecret(payload: {
+  id?: string;
+  name: string;
+  email: string;
+  password: string;
+}): Promise<McpSecretEcho | null> {
   try {
     const res = await fetch("/api/secrets", {
       method: "POST",

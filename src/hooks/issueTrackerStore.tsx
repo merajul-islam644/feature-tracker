@@ -9,7 +9,8 @@
 //   * the floating ChatLauncher can live on every page (GlobalChatAssistant)
 //     and drive the SAME conversation the Issue Tracker page sees, and
 //   * a verification run keeps streaming while the user navigates between
-//     pages — leaving /issue-tracker no longer tears the SSE stream down.
+//     pages — leaving /projects/:id/:env/<key> no longer tears the SSE
+//     stream down.
 //
 // Non-consuming pages don't re-render on store changes: `children` arrives
 // as a stable element reference, so React bails out of that subtree when
@@ -23,7 +24,11 @@ export type IssueTrackerStore = ReturnType<typeof useIssueTracker>;
 
 const IssueTrackerStoreContext = createContext<IssueTrackerStore | null>(null);
 
-export function IssueTrackerStoreProvider({ children }: { children: ReactNode }) {
+export function IssueTrackerStoreProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
   const store = useIssueTracker();
   return (
     <IssueTrackerStoreContext.Provider value={store}>

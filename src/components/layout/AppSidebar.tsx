@@ -83,8 +83,17 @@ export function AppSidebar() {
   // matches the same paths the env-context gate cares about.
   const activeEnv = useActiveEnv();
   const envFromUrl = useMemo(() => {
+    // Match the env landing (`/projects/X/Y`), the dedicated
+    // features view (`/projects/X/Y/features`), AND any Issue
+    // Tracker sub-surface (`/projects/X/Y/<key>` where `<key>` is
+    // one of targets/secrets/scope/panel/history/issues) so the
+    // sidebar can build project-scoped URLs from the (projectId,
+    // envSlug) pair on any of those pages — not just the env
+    // landing. The literal `info` segment is excluded (project
+    // metadata, not an env context). The sub-surface segment list
+    // mirrors the six routes declared in `App.tsx`.
     const m = location.pathname.match(
-      /^\/projects\/([^/]+)\/([^/]+)(?:\/features)?\/?$/,
+      /^\/projects\/([^/]+)\/([^/]+)(?:\/(?:features|targets|secrets|scope|panel|history|issues))?\/?$/,
     );
     if (!m) return null;
     if (m[2] === "info") return null;
@@ -92,9 +101,9 @@ export function AppSidebar() {
     // Re-derive on every pathname change.
   }, [location.pathname]);
   // Prefer the URL — it's synchronously available on every render,
-  // including the very first. Fall back to the context for the
-  // Issue Tracker sub-routes where the env is active but the URL
-  // doesn't carry the (projectId, envSlug) pair.
+  // including the very first. Kept as a belt-and-braces fallback
+  // for the brief moment between mount and the first effect on
+  // pages that don't push the URL→context map themselves.
   const effectiveEnv = envFromUrl ?? activeEnv;
 
   type NavItem = {
@@ -139,45 +148,55 @@ export function AppSidebar() {
   // i18n namespace `nav.issueTracker.*`) but the sidebar reflects the
   // user-facing flatten: each surface is its own nav row, top-level,
   // with its own active-state highlight on deep-link.
+  //
+  // URLs are project-scoped (`/projects/<id>/<env>/<key>` — the
+  // `/issue-tracker` segment was removed by user request on
+  // 2026-09-29) so the (projectId, envSlug) pair is in the URL
+  // itself. `to` is built off `effectiveEnv`; off-env the gate hides
+  // these rows before the URLs ever render, so the link target is
+  // always valid.
+  const issueTrackerBase = effectiveEnv
+    ? `/projects/${effectiveEnv.projectId}/${effectiveEnv.envSlug}`
+    : "/projects"; // unreachable (off-env gate hides the rows) but a safe string for type-check
   const issueTrackerSurface: NavItem[] = [
     {
       kind: "link",
-      to: "/issue-tracker/targets",
+      to: `${issueTrackerBase}/targets`,
       label: t("nav.issueTracker.targets", "Targets"),
       icon: Globe,
       envOnly: true,
     },
     {
       kind: "link",
-      to: "/issue-tracker/secrets",
+      to: `${issueTrackerBase}/secrets`,
       label: t("nav.issueTracker.secrets", "Secrets"),
       icon: KeyRound,
       envOnly: true,
     },
     {
       kind: "link",
-      to: "/issue-tracker/scope",
+      to: `${issueTrackerBase}/scope`,
       label: t("nav.issueTracker.scope", "Scopes"),
       icon: ListChecks,
       envOnly: true,
     },
     {
       kind: "link",
-      to: "/issue-tracker/panel",
+      to: `${issueTrackerBase}/panel`,
       label: t("issueTracker.panel.title", "Panel"),
       icon: Activity,
       envOnly: true,
     },
     {
       kind: "link",
-      to: "/issue-tracker/history",
+      to: `${issueTrackerBase}/history`,
       label: t("issueTracker.history.title", "History"),
       icon: History,
       envOnly: true,
     },
     {
       kind: "link",
-      to: "/issue-tracker/issues",
+      to: `${issueTrackerBase}/issues`,
       label: t("issueTracker.issues.title", "Issues"),
       icon: AlertCircle,
       envOnly: true,
@@ -283,7 +302,7 @@ export function AppSidebar() {
   }, [activeEnv, t, featuresLink, issueTrackerSurface]);
 
   // Issue Tracker only exists inside a project environment — clicking
-  // an env chip on a project card lands on `/projects/:id/:envSlug`,
+  // an env chip on a project card lands on `/projects/:id/:envSlug/features`,
   // and that's the only context where its data (targets / secrets /
   // scope / panel / history / issues) is scoped. The sidebar reacts
   // in two directions:
@@ -292,34 +311,35 @@ export function AppSidebar() {
   //     `envOnly` rows hide entirely. Their data hooks refuse to act
   //     outside an env anyway, so leaving them visible would invite
   //     a dead-end click.
-  //   * On-env (the user is inside `/projects/:id/:envSlug` or an
-  //     `/issue-tracker/*` sub-route): the global nav collapses down
-  //     to the env-only surface only. Dashboard / Projects / Message /
+  //   * On-env (the user is inside `/projects/:id/:envSlug` or
+  //     `/projects/:id/:envSlug/features` or any
+  //     `/projects/:id/:envSlug/<key>` Issue Tracker sub-route —
+  //     note the `/issue-tracker` segment was removed from the URL
+  //     on 2026-09-29): the global nav collapses down to the
+  //     env-only surface only. Dashboard / Projects / Message /
   //     Notepad / Members / Settings all bypass the env scope or
   //     duplicate the env-free experience, so showing them alongside
   //     Issue Tracker / Features would be both context-noise and an
   //     invitation to leave the env unintentionally. The brand logo
-  //     at the top of the sidebar (links to /dashboard) stays visible
-  //     as the escape hatch.
+  //     at the top of the sidebar (links to /dashboard) stays
+  //     visible as the escape hatch.
   //
-  // We treat TWO url shapes as "env context active":
-  //   1. `/projects/:id/:envSlug...` — the user is on a project env
-  //      page. The env slug is the path segment count >= 3 (split
-  //      strips the leading slash). The literal `info` segment is
-  //      excluded — `/projects/X/info` is project metadata, not an
-  //      env landing, and should show the global nav.
-  //   2. `/issue-tracker/*` — the user is inside the Issue Tracker
-  //      surface, which is only reachable from an env context.
-  //
-  // Reading straight from the URL avoids a new context provider for
-  // this visibility-only signal; the env slug remains the single
+  // Env-context-active detection — single regex that captures all
+  // on-env shapes:
+  //   1. `/projects/:id/:envSlug` (env landing)
+  //   2. `/projects/:id/:envSlug/features`
+  //   3. `/projects/:id/:envSlug/<issue-tracker-key>`
+  //      where `<issue-tracker-key>` is one of
+  //      targets/secrets/scope/panel/history/issues
+  // The literal `info` segment is excluded — `/projects/X/info` is
+  // project metadata, not an env landing, and should show the global
+  // nav. Reading straight from the URL avoids a new context provider
+  // for this visibility-only signal; the env slug remains the single
   // source of truth.
-  const segments = location.pathname.split("/").filter(Boolean);
   const envContextActive =
-    (location.pathname.startsWith("/projects/") &&
-      segments.length >= 3 &&
-      segments[2] !== "info") ||
-    location.pathname.startsWith("/issue-tracker");
+    /^\/projects\/[^/]+\/(?!info\/)([^/]+)(?:\/(?:features|targets|secrets|scope|panel|history|issues))?\/?$/.test(
+      location.pathname,
+    );
 
   return (
     <Sidebar collapsible="icon" variant="sidebar">

@@ -3,17 +3,26 @@
 // The visible card chrome (border, padding, hover) is owned by the parent
 // `<li>` in `FeatureItem.tsx`, so the kebab menu sits inside the same
 // bordered row. This component only renders the row's content (icon +
-// name + stack chip + status chip + comments chip + relative time) and
-// accepts a `trailing` slot for actions rendered to the right of the
-// meta line.
+// name + env workflow + stack chip + status chip + comments chip +
+// relative time) and accepts a `trailing` slot for actions rendered to
+// the right of the meta line.
 //
-// The EnvWorkflow chain diagram (Dev → Stg → Prod → UAT) was removed
-// from this row per user request — flow promotion is now handled
-// exclusively at the feature level via the manager's
-// `ManagerFeatureEnvWorkflow`. Cross-env flow state still lives on the
-// `flow.envSlug` field (set by the flow-cascade in `useCloneFeature`
-// and read by the env-scoped page filters) but no UI on this row
-// surfaces it.
+// Environment workflow — every flow row renders a Dev → Stg → Prod →
+// UAT chain between the flow name and the Stack chip. Two variants:
+// the manager-interactive `ManagerFlowEnvWorkflow` (dev-source flows
+// the manager can still promote — `flow.envSlug === "dev"`, `isManager`,
+// no `clonedFromFlowId`) and the read-only `FlowEnvWorkflow` mirror
+// (everyone else: testers, developers, and managers on already-cloned
+// sibling rows). Clicking a sibling pill in the interactive variant
+// creates a sibling record via `useCloneFlow`; the source row's mirror
+// then picks up a persistent "promoted to {env}" tick.
+//
+// Per-flow independence — each flow's env workflow operates on the
+// flow alone, without coupling to the parent feature's env chain. A
+// flow can be promoted to stg / prod / uat regardless of where the
+// parent feature sits. The mutation does NOT cascade (no feature auto-
+// create, no other-flow auto-clone); only the one flow is duplicated.
+// See `useCloneFlow` for the full rationale.
 //
 // Chip role gating — only TESTERS can edit the Stack and Status chips.
 // Managers (curators) and developers (feature authors) see the chips
@@ -48,6 +57,8 @@ import type { ReactNode } from "react";
 import { StatusChip } from "./StatusChip";
 import { StackChip } from "./StackChip";
 import { CommentsChip } from "./CommentsChip";
+import { FlowEnvWorkflow } from "./FlowEnvWorkflow";
+import { ManagerFlowEnvWorkflow } from "./ManagerFlowEnvWorkflow";
 import {
   CommentsModal,
   type FlowComment,
@@ -123,6 +134,38 @@ export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
   // wins for the role dimension; either one flips the chip inert.
   const isTester = useIsRole("tester");
   const chipReadOnly = readOnly || !isTester;
+  // Manager gate for the env-workflow variant — mirrors the
+  // role gate on the feature row (`FeatureItem.tsx`):
+  //   * dev env + manager + no `clonedFromFlowId`
+  //                                  → `ManagerFlowEnvWorkflow`
+  //                                    (interactive — manager can
+  //                                    promote this flow to a
+  //                                    sibling env)
+  //   * non-dev env                  → `FlowEnvWorkflow` (read-only
+  //                                    mirror — sibling row's chain
+  //                                    shows where the source flow
+  //                                    has been cloned to)
+  //   * dev env + non-manager /
+  //     dev env + cloned sibling     → `FlowEnvWorkflow` (read-only
+  //                                    mirror — tester / developer
+  //                                    see the chain but can't
+  //                                    click; managers on already-
+  //                                    cloned sibling rows see the
+  //                                    mirror because the source
+  //                                    chain already visualizes the
+  //                                    promotion)
+  //   * flow.envSlug === undefined   → nothing (legacy env-less
+  //                                    page has no row-level env
+  //                                    anchor — same fallback as
+  //                                    the feature row).
+  // The "no `clonedFromFlowId`" clause mirrors the feature row's
+  // gate — a manager on an already-cloned sibling row sees the
+  // mirror, because the source row's chain already visualizes the
+  // promotion and clicking from a sibling would create a "second
+  // sibling of a sibling", which the model flat-links back to the
+  // root anyway, so the clickable affordance lives only on the
+  // root dev source.
+  const isManager = useIsRole("manager");
 
   // Cloud-backed reader — flat rows, joined into threads via
   // `groupNested`. TanStack Query handles staleness, refetch-on-mount,
@@ -171,6 +214,24 @@ export function FlowItem({ flow, readOnly = false, trailing }: FlowItemProps) {
       <span className="flex-1 truncate font-medium text-foreground">
         {flow.name}
       </span>
+      {/* Environment workflow chain — sits between the flow name
+          and the Stack chip so the row reads as: icon → name →
+          env chain → stack → status → comments → time. Two
+          variants mount here (see `isManager` derivation above for
+          the gate): the interactive `ManagerFlowEnvWorkflow` for
+          managers on dev-source flows the user can still promote,
+          and the read-only `FlowEnvWorkflow` mirror for every other
+          case (tester / developer / manager on already-cloned
+          sibling rows). See `useCloneFlow` and `useClonedFlowEnvs`
+          for the mutation + sibling-lookup that drive the visual
+          states. */}
+      {flow.envSlug === "dev" &&
+      isManager &&
+      !flow.clonedFromFlowId ? (
+        <ManagerFlowEnvWorkflow flow={flow} />
+      ) : flow.envSlug !== undefined ? (
+        <FlowEnvWorkflow flow={flow} />
+      ) : null}
       {/* Stack chip — sits to the left of the Status chip. Always
           rendered so the row has stable horizontal layout regardless
           of which values are set. Role-gated: tester-only on top of

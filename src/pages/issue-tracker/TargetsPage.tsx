@@ -1,15 +1,17 @@
 // Verification Targets sub-page (split out from IssueTrackerPage).
 // Hosts only the `<VerificationTargets>` card for now — the rest of the
 // Issue Tracker sections (Secrets / Scope / Panel / Run History / Issues)
-// still live on the parent `/issue-tracker` route. When the user asks
-// to extract the next section, copy this file's recipe: pull the card
-// into its own page, route it under `/issue-tracker/<key>`, and wire
+// also live as sibling pages on `/projects/:projectId/:envSlug/<key>`
+// (same project + env as this page). When the user asks to extract
+// another section, copy this file's recipe: pull the card into its own
+// page, mount it at `/projects/:projectId/:envSlug/<key>`, and wire
 // the matching sidebar sub-item to it.
 
 import { useState } from "react";
 import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
 import { validateUrl } from "@/components/issue-tracker/UrlInput";
 import { VerificationTargets } from "@/components/issue-tracker/VerificationTargets";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
 export function TargetsPage() {
@@ -51,6 +53,8 @@ export function TargetsPage() {
 
   return (
     <div className="space-y-6">
+      <BackToProjectsLink />
+
       <div>
         <h1 className="text-xl font-semibold text-foreground">
           {t("nav.issueTracker.targets", "Targets")}

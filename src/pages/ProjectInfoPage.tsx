@@ -8,11 +8,11 @@
 // page does one feature list query + one flow aggregate query regardless
 // of how many environments the project has.
 
-import { ArrowLeft } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import {
   useProject,
   useProjectFeatures,
@@ -146,15 +146,14 @@ export function ProjectInfoPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <Link
-          to="/projects"
-          className="inline-flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-          {t("projectInfo.backToProject", "Back to project")}
-        </Link>
-      </div>
+      {/* Shared "← Projects" back link — same component used on every
+          page under /projects/:projectId/... so the user sees one
+          consistent affordance regardless of which sub-surface they
+          came from. Previously this page rendered its own variant
+          with text "Back to project" + i18n key `projectInfo.backToProject`,
+          but the user asked (2026-09-29) for "Projects" (plural) on
+          every sub-page — same label as ProjectDetailPage / FeaturesPage. */}
+      <BackToProjectsLink />
 
       <header>
         <h1 className="text-2xl font-semibold text-foreground">

@@ -74,6 +74,7 @@ import {
   EnvNode,
   EnvArrow,
   EnvWorkflowStyles,
+  passedEnvSet,
 } from "@/components/flow/EnvWorkflowPrimitives";
 import { BlockPromoteModal, type BlockReason } from "./BlockPromoteModal";
 
@@ -95,6 +96,15 @@ export function ManagerFeatureEnvWorkflow({
   // source; populated as the manager clicks each sibling pill.
   const clonedEnvsQuery = useClonedFeatureEnvs(feature.id, feature.projectId);
   const clonedEnvs = clonedEnvsQuery.data ?? new Set<string>();
+  // Lineage path — same helper, same rationale as
+  // `FlowEnvWorkflow.tsx`. On this manager-interactive variant the
+  // gate at `FeatureItem.tsx` mounts the component only on dev-
+  // source features (no `clonedFromFeatureId`), so `pathEnvs` is
+  // always `{dev}` and `isInPath` never matches a sibling slug.
+  // Kept anyway so the visual rule is one shared rule across all
+  // four components — the read-only mirrors (FeatureEnvWorkflow,
+  // FlowEnvWorkflow) are where `isInPath` actually animates a pill.
+  const pathEnvs = passedEnvSet(feature.envSlug);
 
   // Project lookup — the block-promote modal uses the project name
   // in the notification body so the QA recipient sees the full
@@ -236,20 +246,30 @@ export function ManagerFeatureEnvWorkflow({
 
         {SIBLING_ENVS.map((env) => {
           const isAlreadyCloned = clonedEnvs.has(env.slug);
+          // See `ManagerFlowEnvWorkflow.tsx` — on this manager-
+          // interactive variant the gate at `FeatureItem.tsx`
+          // restricts the mount to dev-source features (no
+          // `clonedFromFeatureId`), so `pathEnvs` is always `{dev}`
+          // and `isInPath` never matches a sibling slug. Kept for
+          // parity with the read-only `FeatureEnvWorkflow` so all
+          // four components share one animation rule.
+          const isInPath = pathEnvs.has(env.slug);
           const isThisPending =
             cloneFeature.isPending &&
             cloneFeature.variables?.feature.id === feature.id &&
             cloneFeature.variables?.targetEnvSlug === env.slug;
           // `showReady` flips this pill to the "cloned" visual
           // (Check + animated arrow) when this env already has a
-          // sibling (persistent marker) OR this pill is the
-          // in-flight target of an active click. Order of the OR
-          // matters for the `isThisPending` branch: the in-flight
-          // visual takes precedence over the "already cloned"
-          // visual on the same pill because pending is a transient
-          // state that resolves into "already cloned" once the
-          // mutation lands and `useClonedFeatureEnvs` reports the
-          // new sibling.
+          // sibling (persistent marker), this pill is the in-flight
+          // target of an active click, OR the row's lineage has
+          // passed through this env (the `isInPath` branch — no-op
+          // here but kept for parity with `FeatureEnvWorkflow`).
+          // Order of the OR matters for the `isThisPending`
+          // branch: the in-flight visual takes precedence over the
+          // "already cloned" visual on the same pill because
+          // pending is a transient state that resolves into
+          // "already cloned" once the mutation lands and
+          // `useClonedFeatureEnvs` reports the new sibling.
           //
           // NOTE: a *blocked* pill stays in the regular "available"
           // visual — we don't repaint it red. The block reason
@@ -259,7 +279,7 @@ export function ManagerFeatureEnvWorkflow({
           // introducing a new visual state for the primitive
           // (which would cascade through `FeatureEnvWorkflow`'s
           // read-only mirror too).
-          const showReady = isAlreadyCloned || isThisPending;
+          const showReady = isAlreadyCloned || isThisPending || isInPath;
           // Tooltip precedence (most actionable first):
           //   1. precondition fails (no flows OR any not passed)
           //      → "Can't promote — {reason}" so the manager
