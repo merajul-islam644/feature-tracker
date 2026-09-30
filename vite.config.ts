@@ -413,6 +413,67 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
   };
 }
 
+// Server-side proxy for the mail bridge (the "Get Your Email" flow).
+// The browser POSTs to /api/mail-bridge/*; this middleware forwards to
+// the mail-server on :8788 — the same process that receives inbound mail
+// from the Email Worker / tempmail.lol poller. Setting MAIL_BRIDGE_URL
+// to an empty string 503s the proxy and the dialog surfaces its retry
+// affordance — same degrade path as verifyProxy.
+function mailBridgeProxy(env: Record<string, string>): Plugin {
+  const bridgeUrl = (
+    env.MAIL_BRIDGE_URL !== undefined
+      ? env.MAIL_BRIDGE_URL
+      : "http://localhost:8788"
+  ).replace(/\/+$/, "");
+
+  return {
+    name: "feature-tracker:mail-bridge-proxy",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use("/api/mail-bridge", async (req, res) => {
+        if (!bridgeUrl) {
+          res.statusCode = 503;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "bridge_not_configured",
+              message:
+                "MAIL_BRIDGE_URL is not set on the Vite server — the mail bridge is unavailable.",
+            }),
+          );
+          return;
+        }
+        try {
+          // Connect strips the mount prefix, so req.url is e.g. "/register".
+          const upstream = await fetch(
+            `${bridgeUrl}/bridge${req.url ?? "/"}`,
+            {
+              method: req.method,
+              headers: { "content-type": "application/json" },
+              body: req.method === "POST" ? await readBody(req) : undefined,
+            },
+          );
+          res.statusCode = upstream.status;
+          res.setHeader(
+            "content-type",
+            upstream.headers.get("content-type") ?? "application/json",
+          );
+          res.end(await upstream.text());
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "upstream_failure",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      });
+    },
+  };
+}
+
 // Server-side proxy for the Issue Tracker verification endpoints (MCP).
 // Same shape as aiChatProxy: when VERIFY_BACKEND_URL is unset the proxy
 // returns 503, and the client falls back to the in-browser mock so the UI
@@ -1546,6 +1607,7 @@ export default defineConfig(({ mode, command }) => {
     aiChatProxy(env),
     aiAvatarProxy(env),
     verifyProxy(env),
+    mailBridgeProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],
   resolve: {

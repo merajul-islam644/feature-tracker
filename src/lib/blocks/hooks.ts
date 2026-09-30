@@ -47,6 +47,7 @@ import {
   userPreferencesCollection,
   hiddenAnnouncementsCollection,
   userNotesCollection,
+  mailMessagesCollection,
   toAnnouncement,
   toCallSignal,
   toChatMessage,
@@ -55,6 +56,7 @@ import {
   toFlow,
   toFlowCommentRow,
   toIssue,
+  toMailMessage,
   toMemberProjectAssignment,
   toProject,
   toSecret,
@@ -77,6 +79,7 @@ import {
   type CloudFlow,
   type CloudFlowComment,
   type CloudHiddenAnnouncement,
+  type CloudMailMessage,
   type CloudMemberProject,
   type CloudProject,
   type CloudSecretBinding,
@@ -93,6 +96,7 @@ import {
   type FlowStack,
   type FlowStatus,
   type FlowTestStatus,
+  type MailMessage,
   type MemberProjectAssignment,
   type PersistedChatMessage,
   type Project,
@@ -465,6 +469,10 @@ export const queryKeys = {
   // text pad and excel pad caches never collide.
   userNote: (userId: string, padType: string) =>
     ["user-note", userId, padType] as const,
+  // The `/mail` mailbox, keyed per-user. The Sent folder extends this
+  // key with a "sent" segment, so one invalidate on the base key
+  // refetches both folders.
+  mail: (userId: string) => ["mail", userId] as const,
 };
 
 // --- Reads ------------------------------------------------------------------
@@ -7187,6 +7195,350 @@ export function useUploadAiAvatar(): UseMutationResult<
       // prefills the download URL — nothing to do here. Re-invalidate
       // for symmetry in case the inner mutation ever changes shape.
       qc.invalidateQueries({ queryKey: queryKeys.profilePics(userId) });
+    },
+  });
+}
+
+// --- Mail --------------------------------------------------------------------
+//
+// The mailbox behind `/mail`. One cloud row per (sender, recipient)
+// pair; the inbox filters `userId === me`, Sent filters CreatedBy === me
+// (via `createdByFilter`). Until `blx_MailMessages` is pushed to the
+// gateway every cloud call 400s, so every hook below degrades to the
+// `lattice.mirror.mail.v1:<uid>` localStorage mirror — the same
+// swallow-400 / warn-and-degrade policy as `useUserNote` and
+// `useSecretBindings`. Mirror rows are UI-shaped and shared between the
+// two folders by predicate, so a mirror-only send still shows up in the
+// sender's Sent view and the recipient's inbox *on that browser*; the
+// cloud becomes the single source of truth once the schema deploys.
+
+const MAIL_MIRROR_PREFIX = "lattice.mirror.mail.v1";
+
+function mailMirrorKey(userId: string) {
+  return `${MAIL_MIRROR_PREFIX}:${userId}`;
+}
+
+function readMailMirror(userId: string): MailMessage[] {
+  try {
+    const raw = localStorage.getItem(mailMirrorKey(userId));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as MailMessage[]) : [];
+  } catch {
+    // Corrupt or half-written mirror reads as empty — same tolerance
+    // as the notepad mirror.
+    return [];
+  }
+}
+
+function writeMailMirror(userId: string, rows: MailMessage[]) {
+  try {
+    localStorage.setItem(mailMirrorKey(userId), JSON.stringify(rows));
+  } catch {
+    // Quota / private-mode failures are non-fatal: the cloud (once
+    // deployed) stays the only durable store, matching every mirror.
+  }
+}
+
+function localMailId() {
+  return `local_${crypto.randomUUID()}`;
+}
+
+/**
+ * Inbox — every MailMessage addressed to the signed-in user, newest
+ * first. Polls every 15s so externally-sent mail (the mail-server's
+ * inserts) shows up without a manual reload — that path has no client
+ * mutation to invalidate this key, unlike in-app sends. Retry stays off
+ * so an undeployed schema doesn't retry-loop.
+ */
+export function useMailInbox(): UseQueryResult<MailMessage[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: queryKeys.mail(userId),
+    enabled: Boolean(userId),
+    staleTime: 60_000,
+    retry: false,
+    refetchInterval: 15_000,
+    queryFn: async () => {
+      try {
+        const raw = await mailMessagesCollection.list({
+          filter: { userId },
+          pageNo: 1,
+          pageSize: 100,
+          sort: { CreatedDate: -1 },
+        });
+        const rows = unwrapPaged<CloudMailMessage>(raw).items.map(
+          toMailMessage,
+        );
+        return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      } catch (err) {
+        // Deployment gap (schema not pushed) or transient failure —
+        // serve the mirror so the page keeps working.
+        console.warn(
+          "[useMailInbox] cloud read failed; using localStorage mirror",
+          err,
+        );
+        return readMailMirror(userId)
+          .filter((m) => m.userId === userId)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      }
+    },
+  });
+}
+
+/**
+ * Sent — every MailMessage the signed-in user created, newest first.
+ * `createdByFilter` produces the flat `{ CreatedBy: userId }` shape the
+ * gateway accepts (operator objects are silently dropped).
+ */
+export function useSentMail(): UseQueryResult<MailMessage[]> {
+  const { currentUser } = useAuth();
+  const userId = currentUser?.id ?? "";
+  return useQuery({
+    queryKey: [...queryKeys.mail(userId), "sent"] as const,
+    enabled: Boolean(userId),
+    staleTime: 60_000,
+    retry: false,
+    queryFn: async () => {
+      try {
+        const raw = await mailMessagesCollection.list({
+          filter: createdByFilter(userId),
+          pageNo: 1,
+          pageSize: 100,
+          sort: { CreatedDate: -1 },
+        });
+        const rows = unwrapPaged<CloudMailMessage>(raw).items
+          .map(toMailMessage)
+          // Inbound rows are created by the mail-server's service account,
+          // so their CreatedBy is that account — not the sender. Without
+          // this filter every external message would also surface in the
+          // service account user's Sent folder. App-created rows carry a
+          // uid in fromId; inbound rows carry the sender's email (or an
+          // `inbound_` fallback when it was missing).
+          .filter(
+            (m) =>
+              !m.fromId.includes("@") && !m.fromId.startsWith("inbound_"),
+          );
+        return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      } catch (err) {
+        console.warn(
+          "[useSentMail] cloud read failed; using localStorage mirror",
+          err,
+        );
+        return readMailMirror(userId)
+          .filter((m) => m.fromId === userId)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      }
+    },
+  });
+}
+
+export interface SendMailInput {
+  to: Array<{ id: string; name: string; email: string }>;
+  subject: string;
+  body: string;
+}
+
+/**
+ * Compose — one row per recipient (the same denormalized write pattern
+ * as `notifyRole`), so each recipient's inbox filter finds exactly their
+ * copy. If a cloud insert fails (deployment gap) that row and the rest
+ * of the batch go to the mirror instead, so a send never loses content
+ * and the sender's Sent view stays complete.
+ */
+export function useSendMail(): UseMutationResult<
+  MailMessage[],
+  Error,
+  SendMailInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!userId) throw new Error("You must be signed in to send mail.");
+      if (input.to.length === 0)
+        throw new Error("Pick at least one recipient.");
+      const subject = input.subject.trim();
+      if (!subject) throw new Error("Subject can't be empty.");
+      const now = new Date().toISOString();
+      const senderName = currentUser?.name ?? "Unknown sender";
+      const senderEmail = currentUser?.email ?? "";
+      const delivered: MailMessage[] = [];
+      const mirrored: MailMessage[] = [];
+      // Flip to true on the first cloud failure — remaining recipients
+      // skip straight to the mirror instead of per-recipient retries.
+      let cloudBroken = false;
+      for (const recipient of input.to) {
+        const wire = {
+          userId: recipient.id,
+          fromId: userId,
+          fromName: senderName,
+          fromEmail: senderEmail,
+          toName: recipient.name,
+          subject,
+          body: input.body,
+          readAt: "",
+        };
+        const shaped: MailMessage = {
+          id: "",
+          userId: wire.userId,
+          fromId: wire.fromId,
+          fromName: wire.fromName,
+          fromEmail: wire.fromEmail,
+          toName: wire.toName,
+          subject: wire.subject,
+          body: wire.body,
+          readAt: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        if (cloudBroken) {
+          mirrored.push({ ...shaped, id: localMailId() });
+          continue;
+        }
+        try {
+          const resp = (await mailMessagesCollection.create(wire)) as
+            | { data?: CloudMailMessage }
+            | CloudMailMessage;
+          const item = "ItemId" in resp ? resp : (resp.data ?? null);
+          delivered.push({
+            ...shaped,
+            id: item?.ItemId ?? localMailId(),
+            createdAt: item?.CreatedDate ?? now,
+            updatedAt: item?.LastUpdatedDate ?? now,
+          });
+        } catch (err) {
+          cloudBroken = true;
+          console.warn(
+            "[useSendMail] cloud write failed; remaining recipients go to the mirror",
+            err,
+          );
+          mirrored.push({ ...shaped, id: localMailId() });
+        }
+      }
+      if (mirrored.length > 0) {
+        writeMailMirror(userId, [...readMailMirror(userId), ...mirrored]);
+      }
+      return [...delivered, ...mirrored];
+    },
+    onSuccess: () => {
+      // Invalidate the base key so both folders refetch — sent rows
+      // appear immediately, and the recipient sees the message on
+      // their next inbox read.
+      qc.invalidateQueries({ queryKey: queryKeys.mail(userId) });
+    },
+  });
+}
+
+/**
+ * Mark-as-read. Mirror-only rows (`local_` ids) fail the cloud update
+ * and fall through to the mirror map, so cloud and mirrored rows
+ * converge through the same code path.
+ */
+export function useMarkMailRead(): UseMutationResult<void, Error, MailMessage> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (mail) => {
+      if (mail.readAt) return;
+      const readAt = new Date().toISOString();
+      try {
+        await mailMessagesCollection.update(mail.id, { readAt });
+      } catch (err) {
+        console.warn(
+          "[useMarkMailRead] cloud update failed; marking read in the mirror",
+          err,
+        );
+        writeMailMirror(
+          userId,
+          readMailMirror(userId).map((m) =>
+            m.id === mail.id ? { ...m, readAt } : m,
+          ),
+        );
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.mail(userId) });
+    },
+  });
+}
+
+/**
+ * Delete. The gateway has no cascade on MailMessage — each recipient
+ * owns their own copy of the (sender, recipient) pair, so deleting a
+ * row removes it only from the calling user's view.
+ */
+export function useDeleteMail(): UseMutationResult<void, Error, MailMessage> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  return useMutation({
+    mutationFn: async (mail) => {
+      try {
+        await mailMessagesCollection.delete(mail.id);
+      } catch (err) {
+        console.warn(
+          "[useDeleteMail] cloud delete failed; deleting from the mirror",
+          err,
+        );
+        writeMailMirror(
+          userId,
+          readMailMirror(userId).filter((m) => m.id !== mail.id),
+        );
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.mail(userId) });
+    },
+  });
+}
+
+export interface RegisterMailAddressInput {
+  userId: string;
+  userName: string;
+}
+
+/**
+ * Register the signed-in user's inbound mailbox via the mail bridge
+ * (mail-server /bridge/register through the Vite dev proxy). The server
+ * creates (or reuses) a real, routable mail.tm mailbox for the user and
+ * mirrors it into blx_MailAddresses; its response carries the address —
+ * which the app can't derive itself, because the public mail domain is
+ * the bridge's knowledge. Idempotent per userId server-side, so re-open
+ * ing the dialog never creates a second mailbox. No mirror fallback:
+ * an address only routes once the bridge knows it, so failures surface
+ * to the dialog (which shows a retry).
+ */
+export function useRegisterMailAddress(): UseMutationResult<
+  { address: string },
+  Error,
+  RegisterMailAddressInput
+> {
+  return useMutation({
+    mutationFn: async (input) => {
+      const resp = await fetch("/api/mail-bridge/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      const body = (await resp.json().catch(() => ({}))) as {
+        address?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!resp.ok || !body.address) {
+        const offline = resp.status === 502 || resp.status === 503;
+        throw new Error(
+          offline
+            ? "Mail bridge is offline — start mail-server and retry."
+            : (body.error ??
+              `Address registration failed (${resp.status})`),
+        );
+      }
+      return { address: body.address };
     },
   });
 }

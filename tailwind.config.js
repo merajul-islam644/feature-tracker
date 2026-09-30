@@ -286,6 +286,17 @@ export default {
               "0 0 0 4px rgba(99,102,241,0), 0 0 12px 2px rgba(139,92,246,0.10), 0 12px 40px -8px rgba(99,102,241,0.45)",
           },
         },
+        // Radiating signal ping for the sidebar's Mail row — a small
+        // ring that scales up and fades out from the icon's top-left
+        // corner, like a broadcast/sonar pulse. Two rings run staggered
+        // (see the [animation-delay] pair in AppSidebar) so the
+        // emission reads as a continuous wave rather than a single
+        // blip.
+        "signal-wave": {
+          "0%": { opacity: "0.9", transform: "scale(0.35)" },
+          "70%": { opacity: "0.25", transform: "scale(1)" },
+          "100%": { opacity: "0", transform: "scale(1.5)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -304,6 +315,7 @@ export default {
         "dialog-to-right": "dialog-to-right 220ms cubic-bezier(0.4, 0, 1, 1)",
         "progress-pulse": "progress-pulse 1.8s ease-in-out infinite",
         "rotate-stroke": "rotate-stroke 1.2s linear infinite",
+        "signal-wave": "signal-wave 2.2s cubic-bezier(0, 0, 0.2, 1) infinite",
         // 8s — ambient breathing. One beat every 8 seconds; slow
         // enough to feel like the launcher is gently alive rather
         // than pulsing for attention.

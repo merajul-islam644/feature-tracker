@@ -9,6 +9,10 @@ dist-ssr
 .env.production
 .env.staging
 .env.development
+# mail-server bridge state — holds mail.tm account credentials per user
+mail-server/.bridge-accounts.json
+# walker bearer-token cache (live credential)
+.walker-token-cache.json
 .vscode
 .idea
 .DS_Store

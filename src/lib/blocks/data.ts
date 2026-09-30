@@ -1244,6 +1244,67 @@ export function toNotification(c: CloudNotification): Notification {
   };
 }
 
+// --- Mail --------------------------------------------------------------------
+//
+// The in-app mailbox behind `/mail`. One row per (sender, recipient)
+// pair on the `MailMessage` schema (blocks/data/schemas/MailMessage.json):
+// the recipient's inbox filters `userId === me`, the sender's Sent view
+// filters on CreatedBy. Blocks' outbound `mail.send()` has no inbox SDK
+// (mailbox reads are CLI-only — see .codex/skills/blocks-mail), so this
+// custom collection is the message store, justified like the custom
+// Notification schema above.
+
+export interface CloudMailMessage {
+  ItemId: string;
+  /** Recipient user id — the inbox filter target. */
+  userId?: string;
+  /** Sender user id. Duplicates CreatedBy so the Sent folder can filter explicitly. */
+  fromId?: string;
+  fromName?: string;
+  fromEmail?: string;
+  /** Denormalized recipient display name for the sender's Sent folder. */
+  toName?: string;
+  subject?: string;
+  body?: string;
+  /** Empty string while unread; ISO timestamp once marked read. */
+  readAt?: string;
+  CreatedDate: string;
+  LastUpdatedDate?: string;
+  CreatedBy?: string;
+}
+
+export interface MailMessage {
+  id: string;
+  userId: string;
+  fromId: string;
+  fromName: string;
+  fromEmail: string;
+  toName: string;
+  subject: string;
+  body: string;
+  /** Null while unread — same shape as Notification.readAt. */
+  readAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toMailMessage(c: CloudMailMessage): MailMessage {
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    fromId: c.fromId ?? "",
+    fromName: c.fromName ?? "Unknown sender",
+    fromEmail: c.fromEmail ?? "",
+    toName: c.toName ?? "",
+    subject: c.subject ?? "(no subject)",
+    body: c.body ?? "",
+    // Same empty-string-while-unread convention as `toNotification`.
+    readAt: c.readAt ? c.readAt : null,
+    createdAt: c.CreatedDate,
+    updatedAt: c.LastUpdatedDate ?? c.CreatedDate,
+  };
+}
+
 // --- Test cases --------------------------------------------------------------
 //
 // A `TestCase` is a row in the test-case spreadsheet attached to a Feature.
@@ -1919,6 +1980,85 @@ export const announcementsCollection = blocksClient.data.collection<CloudAnnounc
 export const notificationsCollection = blocksClient.data.collection<CloudNotification>("Notification", {
   fields: ["userId", "context", "actionName", "actorId", "value", "actorName", "projectId", "projectName", "featureId", "featureName", "flowId", "flowName", "envSlug", "oldName", "newName", "status", "stack", "readAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
+// `userId` MUST be selected: the inbox read filters on it
+// (`filter: { userId: <me> }`), and the gateway silently drops
+// unselected filter columns — the same lesson as every other
+// per-resource collection above. Until the MailMessage schema is
+// pushed to the gateway every call 400s; the hooks degrade to the
+// `lattice.mirror.mail.v1` localStorage mirror (see `useMailInbox`).
+export const mailMessagesCollection = blocksClient.data.collection<CloudMailMessage>("MailMessage", {
+  fields: ["userId", "fromId", "fromName", "fromEmail", "toName", "subject", "body", "readAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+
+// --- Inbound mail addresses ----------------------------------------------------
+//
+// Per-user inbound addresses behind the "Get Your Email" dialog. One row
+// per user on the `MailAddress` schema (blocks/data/schemas/MailAddress.json):
+// `address → userId`. The mail-server resolves an arriving message's To
+// against this registry and writes the MailMessage with the owner's userId —
+// so anyone a user shares their address with can mail them, and each user's
+// address is theirs alone. A row only exists once the user has opened the
+// dialog once (registration is idempotent query-then-create).
+
+export interface CloudMailAddress {
+  ItemId?: string;
+  address?: string;
+  userId?: string;
+  userName?: string;
+  CreatedDate?: string;
+}
+
+export interface MailAddressRecord {
+  id: string;
+  address: string;
+  userId: string;
+  userName: string;
+}
+
+export function toMailAddress(c: CloudMailAddress): MailAddressRecord | null {
+  if (!c.ItemId || !c.address || !c.userId) return null;
+  return {
+    id: c.ItemId,
+    address: c.address,
+    userId: c.userId,
+    userName: c.userName ?? "",
+  };
+}
+
+// `address` MUST be selected: the mail-server filters the registry on it
+// (`filter: { address: <to> }`), and the gateway silently drops unselected
+// filter columns — the same rule as every collection above.
+export const mailAddressesCollection = blocksClient.data.collection<CloudMailAddress>("MailAddress", {
+  fields: ["address", "userId", "userName", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+});
+
+/** Lowercase, diacritic-free dot-separated slug safe for an email local part. */
+export function mailSlug(input: string): string {
+  const slug = input
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 32);
+  return slug || "user";
+}
+
+/**
+ * The inbound address for a user: `<name>.<first-6-of-uid>@<domain>`.
+ * Deterministic (same user → same address on every device), unique even
+ * between users who share a name, and readable enough to share. The
+ * domain comes from build-time config (`VITE_MAIL_INBOUND_DOMAIN`) — it
+ * must match the domain the Cloudflare Email Routing catch-all serves.
+ */
+export function inboundAddressFor(
+  userId: string | null | undefined,
+  userName: string | null | undefined,
+  domain: string = import.meta.env.VITE_MAIL_INBOUND_DOMAIN ?? "dbeegi.slsblx.com",
+): string | null {
+  if (!userId) return null;
+  return `${mailSlug(userName ?? "")}.${userId.slice(0, 6)}@${domain}`;
+}
 // `flowId` MUST be selected: the read path (`useFlowComments`) filters
 // on it (`filter: { flowId: <id> }`), and the gateway silently drops
 // unselected filter columns — the same lesson as every other

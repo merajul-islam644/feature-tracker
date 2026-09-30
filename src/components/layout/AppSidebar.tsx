@@ -7,6 +7,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   MessageSquare,
+  Mail,
   Settings as SettingsIcon,
   Contact,
   NotebookPen,
@@ -138,6 +139,11 @@ export function AppSidebar() {
     //     highlight;
     //   - everything else uses === pathname match.
     activeMatch?: (pathname: string) => boolean;
+    // Opt-in corner decoration: a radiating signal-wave ping anchored
+    // at the icon's top-left corner (see the `signal-wave` keyframe in
+    // tailwind.config.js). The Mail row uses it so the placeholder
+    // entry feels alive until the real feature lands.
+    signalWave?: boolean;
   };
 
   // Issue Tracker sub-surfaces as flat top-level links. Each row is
@@ -290,6 +296,13 @@ export function AppSidebar() {
       },
       {
         kind: "link" as const,
+        to: "/mail",
+        label: t("nav.mail", "Mail"),
+        icon: Mail,
+        signalWave: true,
+      },
+      {
+        kind: "link" as const,
         to: "/settings",
         label: t("nav.settings", "Settings"),
         icon: SettingsIcon,
@@ -427,21 +440,39 @@ export function AppSidebar() {
                       isActive={isActive}
                     >
                       <NavLink to={item.to}>
-                        <Icon
-                          aria-hidden="true"
-                          // Inactive icons render in a muted version of
-                          // the sidebar foreground — a neutral "default"
-                          // color that doesn't fight the user's chosen
-                          // accent. Active icons flip to the
-                          // contrasting foreground because the active
-                          // button paints its own background in
-                          // `--sidebar-accent`.
-                          className={
-                            isActive
-                              ? "text-sidebar-accent-foreground"
-                              : "text-sidebar-foreground/70"
-                          }
-                        />
+                        <span className="relative inline-flex">
+                          <Icon
+                            aria-hidden="true"
+                            // Inactive icons render in a muted version of
+                            // the sidebar foreground — a neutral "default"
+                            // color that doesn't fight the user's chosen
+                            // accent. Active icons flip to the
+                            // contrasting foreground because the active
+                            // button paints its own background in
+                            // `--sidebar-accent`.
+                            className={
+                              isActive
+                                ? "text-sidebar-accent-foreground"
+                                : "text-sidebar-foreground/70"
+                            }
+                          />
+                          {item.signalWave && (
+                            <span
+                              aria-hidden="true"
+                              className="pointer-events-none absolute -left-1.5 -top-1.5 h-2.5 w-2.5 motion-reduce:hidden"
+                            >
+                              {/* Two staggered rings + a static origin
+                                  dot — the radiating "signal wave".
+                                  Rings scale 0.35→1.5 and fade on the
+                                  `signal-wave` keyframe; the second
+                                  ring trails the first by half a cycle
+                                  so the ping reads continuous. */}
+                              <span className="absolute inset-0 rounded-full border-[1.5px] border-indigo-400 motion-safe:animate-signal-wave" />
+                              <span className="absolute inset-0 rounded-full border-[1.5px] border-indigo-400/70 motion-safe:animate-signal-wave [animation-delay:1.1s]" />
+                              <span className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-500" />
+                            </span>
+                          )}
+                        </span>
                         <span>{item.label}</span>
                       </NavLink>
                     </SidebarMenuButton>
