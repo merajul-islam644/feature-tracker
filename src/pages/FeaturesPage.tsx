@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Plus } from "lucide-react";
+import { useParams } from "react-router-dom";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,6 +8,7 @@ import { ErrorState } from "@/components/ui/error-state";
 import { FeatureList } from "@/components/feature/FeatureList";
 import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useProject, useProjectFeatures } from "@/lib/blocks/hooks";
 import { useIsRole } from "@/hooks/useAuth";
 import { useActiveEnvContext } from "@/contexts/ActiveEnvContext";
@@ -81,23 +82,7 @@ export function FeaturesPage() {
 
   return (
     <div className="space-y-6" key={retryKey}>
-      <div>
-        {/* Back link — mirrors `ProjectInfoPage`:149-157 and
-            `ProjectDetailPage`:282-290. Same hover/focus styling, same
-            i18n key (`projectDetail.backToProjects`) so the user sees
-            one consistent "Projects" affordance across all env-page
-            surfaces. The link routes back to `/projects` (the
-            project list), not the env landing — the user asked for
-            a single canonical "back to projects" button and the env
-            landing isn't a stable parent (envs vary by project). */}
-        <Link
-          to="/projects"
-          className="inline-flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-          {t("projectDetail.backToProjects", "Projects")}
-        </Link>
-      </div>
+      <BackToProjectsLink />
 
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">

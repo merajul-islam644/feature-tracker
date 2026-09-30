@@ -79,35 +79,41 @@ export default function App() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/members" element={<MembersPage />} />
             <Route path="/chat" element={<ChatPage />} />
-            {/* Bare `/issue-tracker` redirects to the panel since the
-                Run verification controls live there; each sub-section
-                has its own route under `/issue-tracker/<key>`. */}
+            {/* Issue Tracker is project+env scoped — every sub-surface
+                lives directly under `/projects/:projectId/:envSlug/<key>`
+                (the `/issue-tracker` segment was removed by user
+                request on 2026-09-29). The 4-segment shape doesn't
+                collide with the 3-segment `/projects/:id/:envSlug`
+                catch-all (env landing) or the 3-segment
+                `/projects/:id/info` (project metadata) — React Router
+                matches the longest prefix, so a custom env named
+                `targets` would still hit ProjectDetailPage via the
+                catch-all while `targets` as a 4th segment routes to
+                TargetsPage. The URL carries the (projectId, envSlug)
+                pair the data hooks need; no reliance on the ActiveEnv
+                mirror for routing. */}
             <Route
-              path="/issue-tracker"
-              element={<Navigate to="/issue-tracker/panel" replace />}
-            />
-            <Route
-              path="/issue-tracker/targets"
+              path="/projects/:projectId/:envSlug/targets"
               element={<TargetsPage />}
             />
             <Route
-              path="/issue-tracker/secrets"
+              path="/projects/:projectId/:envSlug/secrets"
               element={<SecretsPage />}
             />
             <Route
-              path="/issue-tracker/scope"
+              path="/projects/:projectId/:envSlug/scope"
               element={<ScopePage />}
             />
             <Route
-              path="/issue-tracker/panel"
+              path="/projects/:projectId/:envSlug/panel"
               element={<PanelPage />}
             />
             <Route
-              path="/issue-tracker/history"
+              path="/projects/:projectId/:envSlug/history"
               element={<HistoryPage />}
             />
             <Route
-              path="/issue-tracker/issues"
+              path="/projects/:projectId/:envSlug/issues"
               element={<IssuesPage />}
             />
             <Route path="/notepad" element={<NotepadPage />} />

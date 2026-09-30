@@ -5,12 +5,31 @@
 // the whole "tell its AI to verify" flow is visible in the terminal.
 //
 //   npm --prefix mcp-server run drive:chat-verify
+//
+// Args: [emailHint] [projectId] [envSlug]
+//   - emailHint  substring of the secret email to resolve (default: "meraz-zoarder15")
+//   - projectId  project UUID — required after the 2026-09-29 URL flattening
+//                (Issue Tracker sub-routes are no longer global)
+//   - envSlug    one of dev|stg|uat|prod|<custom> — required alongside projectId
+//
+// Without projectId + envSlug the driver just lands on /projects so the
+// caller can pick manually; verification still needs a real env to scope
+// targets + run.
 
 import { chromium } from "playwright";
 import { listSecrets, resolveCredentialForTarget } from "../src/secrets.js";
 
-const APP = "https://dbeegi.slsblx.com:5173/issue-tracker";
+const APP = "https://dbeegi.slsblx.com:5173";
 const EMAIL_HINT = process.argv[2] ?? "meraz-zoarder15";
+const PROJECT_ID = process.argv[3] ?? "";
+const ENV_SLUG = process.argv[4] ?? "dev";
+// Issue Tracker sub-route in the flattened URL shape (no /issue-tracker
+// segment) — used for both the entry page and the post-login landing
+// detection.
+const TARGETS_PATH = PROJECT_ID
+  ? `/projects/${PROJECT_ID}/${ENV_SLUG}/targets`
+  : "/projects";
+const APP_TARGETS = `${APP}${TARGETS_PATH}`;
 const MESSAGE =
   "Start verification now — verify all enabled targets through login, All Functionality + Authentication. I want to watch it live.";
 
@@ -28,7 +47,7 @@ async function main() {
   const page = await ctx.newPage();
 
   // ── Login (app redirects to IAM when the session is gone) ─────────────
-  await page.goto(APP, { waitUntil: "domcontentloaded" });
+  await page.goto(APP_TARGETS, { waitUntil: "domcontentloaded" });
   await page.waitForLoadState("networkidle").catch(() => {});
   if (/iam\.|\/login/i.test(page.url())) {
     // The app's own /login usually shows a trigger that starts the OIDC
@@ -58,10 +77,12 @@ async function main() {
       password.press("Enter"),
     ]);
     // OIDC hops: IdP → callback → app (sometimes a transient /login hop).
-    for (let i = 0; i < 30 && !page.url().includes("/issue-tracker"); i++) {
+    // After the 2026-09-29 URL flattening, the post-login landing lives at
+    // /projects/:id/:env/targets (or whatever the entry path resolves to).
+    for (let i = 0; i < 30 && !page.url().includes(TARGETS_PATH); i++) {
       await page.waitForTimeout(2_000);
     }
-    if (!page.url().includes("/issue-tracker")) await page.goto(APP);
+    if (!page.url().includes(TARGETS_PATH)) await page.goto(APP_TARGETS);
   }
   line(`app ready: ${page.url()}`);
 
@@ -73,7 +94,7 @@ async function main() {
   // and only ever touched inside this process.
   const SEED_URLS = [
     "https://dbeegi.slsblx.com:5173",
-    "https://dbeegi.slsblx.com:5173/issue-tracker",
+    "https://dbeegi.slsblx.com:5173/projects",
   ];
   // UrlInput prefixes its id with "url-" — the add-target input's real
   // id is "url-draft" (VerificationTargets passes id="draft").

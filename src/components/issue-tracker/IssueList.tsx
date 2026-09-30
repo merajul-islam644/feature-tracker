@@ -10,6 +10,7 @@ import { Bug, Inbox } from "lucide-react";
 import { IssueCard } from "./IssueCard";
 import { IssueGroup, type MemberOption } from "./IssueGroup";
 import { useUsersByRole } from "@/lib/blocks/users";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
 import { groupByApplication } from "@/hooks/useIssueTracker";
 import type { Issue } from "@/types/issue-tracker";
 
@@ -98,6 +99,7 @@ export function IssueList({
   onApprove,
 }: Props) {
   const navigate = useNavigate();
+  const activeEnv = useActiveEnv();
   const totalCount = useMemo(() => issues.length, [issues]);
   // Member roster for the per-group header dropdown: developers AND
   // testers, each tagged with their role so same-named members stay
@@ -126,7 +128,24 @@ export function IssueList({
   ) => onToggleDeveloper?.(list, member.id, assigned);
 
   const handleNavigateDeveloper = (member: MemberOption) => {
-    navigate(`/issue-tracker?developer=${encodeURIComponent(member.id)}`);
+    // Issue Tracker is project-scoped — the navigate target carries
+    // the (projectId, envSlug) pair the route needs.
+    // `useActiveEnv()` is the canonical source: it's pushed into the
+    // ActiveEnv context by `ProjectDetailPage` /
+    // `useActiveEnvSelection`, and the Issue Tracker pages read the
+    // same context, so navigating to the same (projectId, envSlug)
+    // keeps the user on the same env they were already viewing.
+    // Off-env (no `activeEnv`), this branch is unreachable — the
+    // Issue Tracker rows are hidden by the sidebar's env-context
+    // gate, and the Issues page itself reads from `useIssueTracker`
+    // which no-ops without an env. Note: the `/issue-tracker`
+    // segment was dropped from the URL on 2026-09-29 per user
+    // request — Issues now lives at `/projects/:id/:env/issues`.
+    const env = activeEnv;
+    if (!env) return;
+    navigate(
+      `/projects/${env.projectId}/${env.envSlug}/issues?developer=${encodeURIComponent(member.id)}`,
+    );
   };
 
   // date ▸ application ▸ issues. Each verification day gets its own

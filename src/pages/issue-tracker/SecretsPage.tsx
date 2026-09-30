@@ -1,12 +1,14 @@
 // Verification Secrets sub-page (split out from IssueTrackerPage).
 // Hosts only the `<SecretsPanel>` card for now — the rest of the Issue
 // Tracker sections (Scope / Panel / Run History / Issues) live on
-// sibling sub-routes. Same recipe as `TargetsPage.tsx`: pull the
-// section out, route it under `/issue-tracker/<key>`, wire the
-// sidebar sub-item to it.
+// sibling sub-routes under `/projects/:projectId/:envSlug/<key>`.
+// Same recipe as `TargetsPage.tsx`: pull the section out, mount it
+// at `/projects/:projectId/:envSlug/<key>`, wire the sidebar
+// sub-item to it.
 
 import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
 import { SecretsPanel } from "@/components/issue-tracker/SecretsPanel";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
 export function SecretsPage() {
@@ -24,6 +26,8 @@ export function SecretsPage() {
 
   return (
     <div className="space-y-6">
+      <BackToProjectsLink />
+
       <div>
         <h1 className="text-xl font-semibold text-foreground">
           {t("nav.issueTracker.secrets", "Secrets")}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Plus, GitBranch, Pencil } from "lucide-react";
+import { useNavigate, useParams } from "react-router-dom";
+import { Plus, GitBranch, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,6 +10,7 @@ import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
 import { AddFlowModal } from "@/components/flow/AddFlowModal";
 import { RenameEnvModal } from "@/components/project/RenameEnvModal";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import {
   useProject,
   useProjectFeatures,
@@ -206,13 +207,15 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
     // sub-routes from the env-less landing in the first place.
     //
     // Cleanup intentionally does NOT clear the context: the Issue
-    // Tracker sub-routes (`/issue-tracker/*`) live outside this
-    // component tree but still need the env to scope their reads /
-    // mutations. Without this, navigating from a project env into the
-    // Issue Tracker would unmount ProjectDetailPage, drop the env to
-    // null, and trip the `add_failed_no_env` guard at every mutation.
-    // The next time the user enters a project env, the effect
-    // re-runs and overwrites whatever was there.
+    // Tracker sub-routes (`/projects/:id/:envSlug/<key>` where
+    // `<key>` is one of targets/secrets/scope/panel/issues/history)
+    // live outside this component tree but still need the env to
+    // scope their reads / mutations. Without this, navigating from a
+    // project env into the Issue Tracker would unmount
+    // ProjectDetailPage, drop the env to null, and trip the
+    // `add_failed_no_env` guard at every mutation. The next time the
+    // user enters a project env, the effect re-runs and overwrites
+    // whatever was there.
     if (projectId && envSlug) {
       setEnv({ projectId, envSlug });
     }
@@ -279,15 +282,7 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
 
   return (
     <div className="space-y-6" key={retryKey}>
-      <div>
-        <Link
-          to="/projects"
-          className="inline-flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-          {t("projectDetail.backToProjects", "Projects")}
-        </Link>
-      </div>
+      <BackToProjectsLink />
 
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
@@ -470,7 +465,14 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
               result.oldSlug &&
               result.oldSlug !== result.newSlug
             ) {
-              navigate(`/projects/${project.id}/${result.newSlug}`);
+              // Land on the canonical env-menu URL (`/features`)
+              // after a slug rename, matching the env-chip click
+              // target on the project card — same destination, same
+              // URL shape, no separate in-app affordance for the
+              // bare `/projects/:id/:envSlug` route. The plain
+              // ProjectDetailPage still mounts at that URL via
+              // route definition, but no menu surfaces it.
+              navigate(`/projects/${project.id}/${result.newSlug}/features`);
             }
           }}
         />

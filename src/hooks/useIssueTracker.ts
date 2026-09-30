@@ -25,7 +25,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { issueTrackerApi } from "@/services/issueTrackerApi";
-import { mockInitialChat, idleRun, verificationChecks } from "@/data/issueTrackerConstants";
+import {
+  mockInitialChat,
+  idleRun,
+  verificationChecks,
+} from "@/data/issueTrackerConstants";
 import { useToast } from "@/hooks/useToast";
 import { useAuth } from "@/hooks/useAuth";
 import { useActiveEnv } from "@/contexts/ActiveEnvContext";
@@ -140,7 +144,10 @@ function describeStep(step: string): string {
 // blocker. Detection is conservative on purpose: we'd rather miss a
 // borderline case than wrongly fire a recovery loop on a normal empty
 // page (a privacy interstitial, an OAuth consent screen, etc.).
-function isInvalidBrowserObservation(toolName: string, result: string): boolean {
+function isInvalidBrowserObservation(
+  toolName: string,
+  result: string,
+): boolean {
   if (toolName !== "browser_snapshot" && toolName !== "browser_navigate") {
     return false;
   }
@@ -289,7 +296,11 @@ const MAX_TRACKED_RUN_IDS = 20;
 // `lattice.mirror.userPreference.v1` is the synchronous read fallback so
 // the page boots before the cloud query resolves.
 const USER_PREFERENCE_MIRROR_KEY = "lattice.mirror.userPreference.v1";
-const DEVICE_VALUES: ReadonlySet<string> = new Set(["desktop", "mobile", "tablet"]);
+const DEVICE_VALUES: ReadonlySet<string> = new Set([
+  "desktop",
+  "mobile",
+  "tablet",
+]);
 
 interface MirroredUserPreference {
   scope?: string[];
@@ -322,13 +333,19 @@ function writePrefMirror(userId: string, value: MirroredUserPreference): void {
       }
     }
     all[userId] = value;
-    window.localStorage.setItem(USER_PREFERENCE_MIRROR_KEY, JSON.stringify(all));
+    window.localStorage.setItem(
+      USER_PREFERENCE_MIRROR_KEY,
+      JSON.stringify(all),
+    );
   } catch {
     // best-effort
   }
 }
 
-function readStoredScope(fallback: VerificationCheckId[], userId: string): string[] {
+function readStoredScope(
+  fallback: VerificationCheckId[],
+  userId: string,
+): string[] {
   if (!userId) return fallback;
   const mirror = readPrefMirror(userId).scope;
   if (!Array.isArray(mirror)) return fallback;
@@ -360,10 +377,12 @@ export function useIssueTracker() {
   const { currentUser } = useAuth();
   // Active env from the URL — only set when the user is on
   // `/projects/:projectId/:envSlug`. Issue Tracker hooks read their data
-  // through this. When null (e.g. user is on /issue-tracker/targets but
-  // hasn't visited a project env yet) the chat-driven mutations below
-  // refuse to act rather than stamp an empty envSlug and silently
-  // mis-file the row.
+  // through this. When null (e.g. user is on
+  // `/projects/:id/:envSlug/<key>` but hasn't visited a project env
+  // yet — should not happen since the sidebar gate enforces the
+  // ordering, but defended against anyway) the chat-driven mutations
+  // below refuse to act rather than stamp an empty envSlug and
+  // silently mis-file the row.
   const activeEnv = useActiveEnv();
 
   // User preference row — the canonical store for scope, device,
@@ -514,7 +533,12 @@ export function useIssueTracker() {
     // We deliberately only re-run when bindingVersion or the scope
     // changes — not on every cloud mutation reference update.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bindingVersion, activeEnv?.projectId, activeEnv?.envSlug, currentUser?.id]);
+  }, [
+    bindingVersion,
+    activeEnv?.projectId,
+    activeEnv?.envSlug,
+    currentUser?.id,
+  ]);
 
   // Mutations — wrapped in stable callbacks further down. Holding them as
   // refs at the top avoids re-creating the `addTarget` etc. closures on
@@ -563,12 +587,15 @@ export function useIssueTracker() {
   // start of each run.
   const [runActivityLog, setRunActivityLog] = useState<RunActivityLine[]>([]);
   const activityIdRef = useRef(0);
-  const pushActivity = useCallback((text: string, tone: RunActivityTone = "info") => {
-    setRunActivityLog((log) => {
-      const next = [...log, { id: ++activityIdRef.current, text, tone }];
-      return next.length > 60 ? next.slice(next.length - 60) : next;
-    });
-  }, []);
+  const pushActivity = useCallback(
+    (text: string, tone: RunActivityTone = "info") => {
+      setRunActivityLog((log) => {
+        const next = [...log, { id: ++activityIdRef.current, text, tone }];
+        return next.length > 60 ? next.slice(next.length - 60) : next;
+      });
+    },
+    [],
+  );
   // Render-synced mirror of `run` so event handlers can read per-app names
   // without becoming setRun-updater side effects.
   const runRef = useRef(run);
@@ -605,8 +632,8 @@ export function useIssueTracker() {
   );
   // Device emulation for the next run — forwarded through the api layer so
   // the backend sizes the browser context (viewport + touch).
-  const [device, setDevice] = useState<"desktop" | "mobile" | "tablet">(
-    () => readStoredDevice(userId),
+  const [device, setDevice] = useState<"desktop" | "mobile" | "tablet">(() =>
+    readStoredDevice(userId),
   );
 
   // Scope + device survive page reloads (cloud's `UserPreference` row +
@@ -694,7 +721,9 @@ export function useIssueTracker() {
   // them through applyChatAction, but applyChatAction is memoized later in
   // the hook (it depends on runModelTurn), so a direct closure reference
   // would be a use-before-define. Reassigned every render.
-  const applyChatActionRef = useRef<((action: ChatAction) => Promise<void>) | null>(null);
+  const applyChatActionRef = useRef<
+    ((action: ChatAction) => Promise<void>) | null
+  >(null);
   const chatHistoryQuery = useChatHistory(sessionId);
   const chatSessionsQuery = useChatSessions();
   const appendChatMessage = useAppendChatMessage();
@@ -734,11 +763,7 @@ export function useIssueTracker() {
       issues: issuesQuery.isLoading,
       run: false,
     }),
-    [
-      targetsQuery.isLoading,
-      secretsQuery.isLoading,
-      issuesQuery.isLoading,
-    ],
+    [targetsQuery.isLoading, secretsQuery.isLoading, issuesQuery.isLoading],
   );
 
   // No aggregate error toast here. The three core queries
@@ -788,7 +813,12 @@ export function useIssueTracker() {
     }
     setChatLoaded(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, chatHistoryQuery.isLoading, chatHistoryQuery.data, chatHistoryQuery.error]);
+  }, [
+    sessionId,
+    chatHistoryQuery.isLoading,
+    chatHistoryQuery.data,
+    chatHistoryQuery.error,
+  ]);
 
   // ──────────────────────────────────────────────────────────────────────────
   //  Targets
@@ -801,7 +831,11 @@ export function useIssueTracker() {
   //  failure: toast + leave list untouched.
   // ──────────────────────────────────────────────────────────────────────────
   const addTarget = useCallback(
-    async (payload: { url: string; applicationName?: string; credentialId?: string | null }) => {
+    async (payload: {
+      url: string;
+      applicationName?: string;
+      credentialId?: string | null;
+    }) => {
       // Issue Tracker is env-scoped — refuse to act outside an active
       // project env. Stamping an empty envSlug would silently mis-file
       // the row (the schema sets both fields to requiredOn: "Both"), and
@@ -880,10 +914,7 @@ export function useIssueTracker() {
   // carrying only the two fields the user changed. Network round-trip is
   // imperceptible for a single row.
   const editTarget = useCallback(
-    async (
-      id: string,
-      patch: { applicationName: string; url: string },
-    ) => {
+    async (id: string, patch: { applicationName: string; url: string }) => {
       const previous = targets.find((t) => t.id === id);
       if (!previous) return;
       try {
@@ -918,9 +949,7 @@ export function useIssueTracker() {
       // Env-scoped: refuse outside an active project env (same reason as
       // `addTarget`).
       if (!activeEnv) {
-        toast.error(
-          "Open a project's environment before adding credentials.",
-        );
+        toast.error("Open a project's environment before adding credentials.");
         throw new Error("add_failed_no_env");
       }
       try {
@@ -1002,7 +1031,9 @@ export function useIssueTracker() {
         }
         if (conflicts.length > 0) {
           const names = conflicts
-            .map((id) => targets.find((t) => t.id === id)?.applicationName ?? id)
+            .map(
+              (id) => targets.find((t) => t.id === id)?.applicationName ?? id,
+            )
             .join(", ");
           toast.error(
             `Cannot bind — ${names} ${conflicts.length === 1 ? "is" : "are"} already bound to another credential. Unbind it first.`,
@@ -1132,7 +1163,9 @@ export function useIssueTracker() {
         }
         if (conflicts.length > 0) {
           const names = conflicts
-            .map((id) => targets.find((t) => t.id === id)?.applicationName ?? id)
+            .map(
+              (id) => targets.find((t) => t.id === id)?.applicationName ?? id,
+            )
             .join(", ");
           toast.error(
             `Cannot bind — ${names} ${conflicts.length === 1 ? "is" : "are"} already bound to another credential. Unbind it first.`,
@@ -1176,21 +1209,25 @@ export function useIssueTracker() {
           );
         } else if (toRemove.length === 0 && toAdd.length > 0) {
           const k = toAdd.length;
-          toast.success(
-            `${name} bound to ${k} new target${k > 1 ? "s" : ""}.`,
-          );
+          toast.success(`${name} bound to ${k} new target${k > 1 ? "s" : ""}.`);
         } else {
           const k = nextSet.size;
-          toast.success(
-            `${name} re-bound to ${k} target${k > 1 ? "s" : ""}.`,
-          );
+          toast.success(`${name} re-bound to ${k} target${k > 1 ? "s" : ""}.`);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         toast.error(`Unable to re-bind credential: ${message}`);
       }
     },
-    [secrets, targets, updateTarget, toast, activeEnv, boundTargetsBySecretId, bumpBindingVersion],
+    [
+      secrets,
+      targets,
+      updateTarget,
+      toast,
+      activeEnv,
+      boundTargetsBySecretId,
+      bumpBindingVersion,
+    ],
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -1237,7 +1274,9 @@ export function useIssueTracker() {
       );
       const failed = results.filter((r) => r.status === "rejected").length;
       if (failed > 0) {
-        toast.error(`Assignment failed on ${failed} of ${issues.length} issues.`);
+        toast.error(
+          `Assignment failed on ${failed} of ${issues.length} issues.`,
+        );
         return false;
       }
       toast.success(
@@ -1260,7 +1299,10 @@ export function useIssueTracker() {
         return false;
       }
       try {
-        await updateIssue.mutateAsync({ id, patch: { approvedById: currentUser.id } });
+        await updateIssue.mutateAsync({
+          id,
+          patch: { approvedById: currentUser.id },
+        });
         toast.success("Issue approved.");
         return true;
       } catch {
@@ -1271,8 +1313,14 @@ export function useIssueTracker() {
     [updateIssue, toast, currentUser?.id],
   );
 
-  const filteredIssues = useMemo(() => applyFilters(issues, filters), [issues, filters]);
-  const groupedIssues = useMemo(() => groupByApplication(filteredIssues), [filteredIssues]);
+  const filteredIssues = useMemo(
+    () => applyFilters(issues, filters),
+    [issues, filters],
+  );
+  const groupedIssues = useMemo(
+    () => groupByApplication(filteredIssues),
+    [filteredIssues],
+  );
 
   const issueCounts = useMemo(
     () => ({
@@ -1281,7 +1329,12 @@ export function useIssueTracker() {
       high: issues.filter((i) => i.severity === "high").length,
       medium: issues.filter((i) => i.severity === "medium").length,
       low: issues.filter((i) => i.severity === "low").length,
-      open: issues.filter((i) => i.status === "open" || i.status === "investigating" || i.status === "reopened").length,
+      open: issues.filter(
+        (i) =>
+          i.status === "open" ||
+          i.status === "investigating" ||
+          i.status === "reopened",
+      ).length,
     }),
     [issues],
   );
@@ -1312,7 +1365,9 @@ export function useIssueTracker() {
       try {
         const result = await issueTrackerApi.testConnection(target);
         if (result.urlReachable && result.loginSuccessful) {
-          toast.success(`${target.applicationName}: URL reachable, login successful.`);
+          toast.success(
+            `${target.applicationName}: URL reachable, login successful.`,
+          );
         } else if (!result.urlReachable) {
           toast.error(`${target.applicationName}: unable to reach URL.`);
         } else {
@@ -1356,7 +1411,9 @@ export function useIssueTracker() {
         // defect files a fresh fingerprinted row (one-time cost, self-heals
         // as old rows age out or get resolved). Reads issuesRef (live rows),
         // NOT the `issues` captured when the subscription was made.
-        const match = issuesRef.current.find((i) => i.fingerprint === fingerprint);
+        const match = issuesRef.current.find(
+          (i) => i.fingerprint === fingerprint,
+        );
 
         if (!match) {
           await createIssue.mutateAsync({
@@ -1408,11 +1465,7 @@ export function useIssueTracker() {
   // list reflects the latest run. `useUpdateVerificationTarget` invalidates
   // the list cache on success.
   const persistTargetRunResult = useCallback(
-    async (
-      targetId: string,
-      status: TargetStatus,
-      verifiedAt: string,
-    ) => {
+    async (targetId: string, status: TargetStatus, verifiedAt: string) => {
       try {
         await updateTarget.mutateAsync({
           id: targetId,
@@ -1498,7 +1551,11 @@ export function useIssueTracker() {
             status: r.status === "running" ? r.status : "running",
             perApp: r.perApp.map((p) =>
               p.targetId === event.targetId
-                ? { ...p, status: "verifying", startedAt: new Date().toISOString() }
+                ? {
+                    ...p,
+                    status: "verifying",
+                    startedAt: new Date().toISOString(),
+                  }
                 : p,
             ),
           }));
@@ -1522,7 +1579,9 @@ export function useIssueTracker() {
             pushActivity(`✓ ${describeStep(event.step)}`, "success");
           }
           setRun((r) => {
-            const existing = r.currentActivity.find((a) => a.step === event.step);
+            const existing = r.currentActivity.find(
+              (a) => a.step === event.step,
+            );
             if (existing) {
               return {
                 ...r,
@@ -1533,7 +1592,10 @@ export function useIssueTracker() {
             }
             return {
               ...r,
-              currentActivity: [...r.currentActivity, { step: event.step, done: event.done }],
+              currentActivity: [
+                ...r.currentActivity,
+                { step: event.step, done: event.done },
+              ],
             };
           });
           break;
@@ -1717,7 +1779,10 @@ export function useIssueTracker() {
           fresh,
           setRun,
           persistDetectedIssue,
-          { projectId: activeEnv?.projectId ?? "", envSlug: activeEnv?.envSlug ?? "" },
+          {
+            projectId: activeEnv?.projectId ?? "",
+            envSlug: activeEnv?.envSlug ?? "",
+          },
           () => {
             mockCancelRef.current = null;
             toast.success("Verification complete.");
@@ -1727,7 +1792,16 @@ export function useIssueTracker() {
     } catch {
       toast.error("Unable to start verification.");
     }
-  }, [targets, scope, device, currentUser?.id, toast, applyRunEvent, persistDetectedIssue, issuesQuery]);
+  }, [
+    targets,
+    scope,
+    device,
+    currentUser?.id,
+    toast,
+    applyRunEvent,
+    persistDetectedIssue,
+    issuesQuery,
+  ]);
 
   const pauseVerification = useCallback(() => {
     setRun((r) => (r.status === "running" ? { ...r, status: "paused" } : r));
@@ -1744,7 +1818,11 @@ export function useIssueTracker() {
     // don't fire after we've already moved to "cancelled".
     mockCancelRef.current?.();
     mockCancelRef.current = null;
-    setRun((r) => ({ ...r, status: "cancelled", completedAt: new Date().toISOString() }));
+    setRun((r) => ({
+      ...r,
+      status: "cancelled",
+      completedAt: new Date().toISOString(),
+    }));
     toast.info("Verification cancelled.");
   }, [toast]);
 
@@ -1756,7 +1834,8 @@ export function useIssueTracker() {
   const exportRunReport = useCallback(() => {
     const r = runRef.current;
     const runIssues = issuesRef.current.filter(
-      (i) => (i.seenInRunIds ?? []).includes(r.id) || i.verificationRunId === r.id,
+      (i) =>
+        (i.seenInRunIds ?? []).includes(r.id) || i.verificationRunId === r.id,
     );
     const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "—");
     const lines: string[] = [
@@ -1825,10 +1904,14 @@ export function useIssueTracker() {
         const rendered = new Set<string>();
         const emit = (url: string, depth: number, ancestors: Set<string>) => {
           rendered.add(url);
-          lines.push(`${"  ".repeat(depth)}- \`${new URL(url, "https://x").pathname}\``);
+          lines.push(
+            `${"  ".repeat(depth)}- \`${new URL(url, "https://x").pathname}\``,
+          );
           for (const to of pages[url] ?? []) {
             if (ancestors.has(to) || rendered.has(to)) {
-              lines.push(`${"  ".repeat(depth + 1)}- \`${new URL(to, "https://x").pathname}\` _(already listed)_`);
+              lines.push(
+                `${"  ".repeat(depth + 1)}- \`${new URL(to, "https://x").pathname}\` _(already listed)_`,
+              );
               continue;
             }
             ancestors.add(to);
@@ -1883,10 +1966,13 @@ export function useIssueTracker() {
 
   // Switch to an existing conversation. The hydration effect picks this up
   // via the sessionId dep and re-runs.
-  const switchSession = useCallback((next: string) => {
-    if (!next || next === sessionId) return;
-    setSessionId(next);
-  }, [sessionId]);
+  const switchSession = useCallback(
+    (next: string) => {
+      if (!next || next === sessionId) return;
+      setSessionId(next);
+    },
+    [sessionId],
+  );
 
   // Delete an entire chat session (every persisted message under its
   // sessionId). When the user deletes the session they're currently
@@ -1948,7 +2034,9 @@ export function useIssueTracker() {
   const runModelTurn = useCallback(
     async (
       promptForModel: string,
-      runOptions?: { toolChoice?: { type: "any" | "auto" | "tool"; name?: string } },
+      runOptions?: {
+        toolChoice?: { type: "any" | "auto" | "tool"; name?: string };
+      },
     ) => {
       // Snapshot the page state at send-time so the model sees exactly
       // what the user sees. Cheap (one shallow copy + filter pass) and
@@ -2052,12 +2140,14 @@ export function useIssueTracker() {
       }
       lastAutoTurnAtRef.current = Date.now();
       setChat((cur) => [...cur, replyToShow]);
-      void appendChatMessage.mutateAsync({
-        sessionId,
-        role: replyToShow.role,
-        content: replyToShow.content,
-        actions: replyToShow.actions,
-      }).catch(() => {});
+      void appendChatMessage
+        .mutateAsync({
+          sessionId,
+          role: replyToShow.role,
+          content: replyToShow.content,
+          actions: replyToShow.actions,
+        })
+        .catch(() => {});
       // Dispatch the auto-run steps through the same path an Allow
       // click takes (applyChatAction) so idempotency, the "✓ Done"
       // transcript line and the auto-continue loop stay identical.
@@ -2105,11 +2195,13 @@ export function useIssueTracker() {
       // Persist the user turn immediately so a network blip on the AI reply
       // doesn't lose the question. Failures are silently swallowed — the
       // local state already has the message.
-      void appendChatMessage.mutateAsync({
-        sessionId,
-        role: "user",
-        content: trimmed,
-      }).catch(() => {});
+      void appendChatMessage
+        .mutateAsync({
+          sessionId,
+          role: "user",
+          content: trimmed,
+        })
+        .catch(() => {});
       // A verify ask WITHOUT a URL never reaches the gateway — it opens
       // the in-chat target picker instead (dropdown of configured
       // targets + a free-text URL box). The model only sees the
@@ -2122,7 +2214,8 @@ export function useIssueTracker() {
       const namesUrl = /\bhttps?:\/\/\S+|\bwww\.\S+/i.test(trimmed);
       // "Verify ISSUE-001 again" is an issue re-verify, not an app ask —
       // leave those to the model's verify_again tool.
-      const aboutIssue = /\bissue\b/i.test(trimmed) || /ISSUE-?\d+/i.test(trimmed);
+      const aboutIssue =
+        /\bissue\b/i.test(trimmed) || /ISSUE-?\d+/i.test(trimmed);
       const refersToApp =
         /\b(app|application|site|website|web\s?app|target|url|product|portal)\b/i.test(
           trimmed,
@@ -2227,7 +2320,8 @@ export function useIssueTracker() {
           setFilters((f) => {
             const next = { ...f };
             if (Array.isArray(tool.input.severities)) {
-              next.severities = tool.input.severities as IssueFilters["severities"];
+              next.severities = tool.input
+                .severities as IssueFilters["severities"];
             }
             if (Array.isArray(tool.input.statuses)) {
               next.statuses = tool.input.statuses as IssueFilters["statuses"];
@@ -2249,7 +2343,8 @@ export function useIssueTracker() {
         case "update_issue_status": {
           const issueId = tool.input.issueId as string | undefined;
           const status = tool.input.status as IssueStatus | undefined;
-          if (!issueId || !status) return "Skipped — missing issueId or status.";
+          if (!issueId || !status)
+            return "Skipped — missing issueId or status.";
           await updateIssueStatusFn(issueId, status);
           return `${issueId} set to ${status}.`;
         }
@@ -2271,7 +2366,8 @@ export function useIssueTracker() {
           // Reject obviously suspicious hosts that the user almost
           // certainly didn't mean to add (loopback, private RFC1918).
           const host = parsed.hostname.toLowerCase();
-          const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
+          const isLoopback =
+            host === "localhost" || host === "127.0.0.1" || host === "::1";
           const isPrivate =
             /^10\./.test(host) ||
             /^192\.168\./.test(host) ||
@@ -2313,7 +2409,9 @@ export function useIssueTracker() {
         }
         case "update_verification_target": {
           const targetId = tool.input.targetId as string | undefined;
-          const t = targetId ? targets.find((x) => x.id === targetId) : undefined;
+          const t = targetId
+            ? targets.find((x) => x.id === targetId)
+            : undefined;
           if (!t) return `Skipped — target ${targetId ?? "(none)"} not found.`;
           const applicationName =
             (tool.input.applicationName as string | undefined)?.trim() ||
@@ -2348,7 +2446,9 @@ export function useIssueTracker() {
         }
         case "delete_verification_target": {
           const targetId = tool.input.targetId as string | undefined;
-          const t = targetId ? targets.find((x) => x.id === targetId) : undefined;
+          const t = targetId
+            ? targets.find((x) => x.id === targetId)
+            : undefined;
           if (!t) return `Skipped — target ${targetId ?? "(none)"} not found.`;
           await removeTarget(targetId!);
           return `${t.applicationName} removed.`;
@@ -2386,8 +2486,11 @@ export function useIssueTracker() {
         }
         case "update_secret": {
           const secretId = tool.input.secretId as string | undefined;
-          const s = secretId ? secrets.find((x) => x.id === secretId) : undefined;
-          if (!s) return `Skipped — credential ${secretId ?? "(none)"} not found.`;
+          const s = secretId
+            ? secrets.find((x) => x.id === secretId)
+            : undefined;
+          if (!s)
+            return `Skipped — credential ${secretId ?? "(none)"} not found.`;
           const name =
             (tool.input.name as string | undefined)?.trim() || s.name;
           const email =
@@ -2400,19 +2503,25 @@ export function useIssueTracker() {
         }
         case "delete_secret": {
           const secretId = tool.input.secretId as string | undefined;
-          const s = secretId ? secrets.find((x) => x.id === secretId) : undefined;
-          if (!s) return `Skipped — credential ${secretId ?? "(none)"} not found.`;
+          const s = secretId
+            ? secrets.find((x) => x.id === secretId)
+            : undefined;
+          if (!s)
+            return `Skipped — credential ${secretId ?? "(none)"} not found.`;
           // Look up the binding from the localStorage mirror (NOT
           // target.credentialId — see issueTrackerBindings.ts). Clear
           // every bound target first so the delete never leaves a
           // dangling pointer in Blocks Data, then drop the local mirror
           // entry so a future re-add of the same name doesn't inherit it.
           const boundIds = secretId
-            ? boundTargetsBySecretId[secretId] ?? []
+            ? (boundTargetsBySecretId[secretId] ?? [])
             : [];
           for (const id of boundIds) {
             try {
-              await updateTarget.mutateAsync({ id, patch: { credentialId: null } });
+              await updateTarget.mutateAsync({
+                id,
+                patch: { credentialId: null },
+              });
             } catch {
               // localStorage mirror cleared below — keep going.
             }
@@ -2424,8 +2533,11 @@ export function useIssueTracker() {
         }
         case "bind_secret": {
           const secretId = tool.input.secretId as string | undefined;
-          const s = secretId ? secrets.find((x) => x.id === secretId) : undefined;
-          if (!s) return `Skipped — credential ${secretId ?? "(none)"} not found.`;
+          const s = secretId
+            ? secrets.find((x) => x.id === secretId)
+            : undefined;
+          if (!s)
+            return `Skipped — credential ${secretId ?? "(none)"} not found.`;
           const targetId = tool.input.targetId as string | null | undefined;
           if (targetId === undefined) {
             return "Skipped — missing targetId (pass the target id, or null to unbind).";
@@ -2448,10 +2560,14 @@ export function useIssueTracker() {
           // Same-name guard: the Projects list would render two rows the
           // user can't tell apart, and update/delete-by-name turns
           // ambiguous. Case-insensitive — matches how users expect it.
-          if (projects.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+          if (
+            projects.some((p) => p.name.toLowerCase() === name.toLowerCase())
+          ) {
             return `Skipped — a project named "${name}" already exists.`;
           }
-          const description = (tool.input.description as string | undefined)?.trim();
+          const description = (
+            tool.input.description as string | undefined
+          )?.trim();
           try {
             const created = await createProject.mutateAsync({
               name,
@@ -2468,20 +2584,34 @@ export function useIssueTracker() {
         }
         case "update_project": {
           const projectId = tool.input.projectId as string | undefined;
-          const p = projectId ? projects.find((x) => x.id === projectId) : undefined;
-          if (!p) return `Skipped — project ${projectId ?? "(none)"} not found.`;
-          const patch: { name?: string; description?: string; status?: string } = {};
+          const p = projectId
+            ? projects.find((x) => x.id === projectId)
+            : undefined;
+          if (!p)
+            return `Skipped — project ${projectId ?? "(none)"} not found.`;
+          const patch: {
+            name?: string;
+            description?: string;
+            status?: string;
+          } = {};
           const name = (tool.input.name as string | undefined)?.trim();
-          const description = (tool.input.description as string | undefined)?.trim();
+          const description = (
+            tool.input.description as string | undefined
+          )?.trim();
           const status = (tool.input.status as string | undefined)?.trim();
           if (name && name !== p.name) patch.name = name;
           if (description && description !== (p.description ?? "")) {
             patch.description = description;
           }
-          if (status && status !== (p.status ?? "active")) patch.status = status;
-          if (Object.keys(patch).length === 0) return "Skipped — nothing to change.";
+          if (status && status !== (p.status ?? "active"))
+            patch.status = status;
+          if (Object.keys(patch).length === 0)
+            return "Skipped — nothing to change.";
           try {
-            const updated = await updateProject.mutateAsync({ id: projectId!, patch });
+            const updated = await updateProject.mutateAsync({
+              id: projectId!,
+              patch,
+            });
             return `Project "${updated.name}" updated.`;
           } catch (err) {
             return `Couldn't update the project — ${
@@ -2491,8 +2621,11 @@ export function useIssueTracker() {
         }
         case "delete_project": {
           const projectId = tool.input.projectId as string | undefined;
-          const p = projectId ? projects.find((x) => x.id === projectId) : undefined;
-          if (!p) return `Skipped — project ${projectId ?? "(none)"} not found.`;
+          const p = projectId
+            ? projects.find((x) => x.id === projectId)
+            : undefined;
+          if (!p)
+            return `Skipped — project ${projectId ?? "(none)"} not found.`;
           try {
             await deleteProject.mutateAsync(projectId!);
             return `Project "${p.name}" deleted.`;
@@ -2504,8 +2637,11 @@ export function useIssueTracker() {
         }
         case "add_project_environment": {
           const projectId = tool.input.projectId as string | undefined;
-          const p = projectId ? projects.find((x) => x.id === projectId) : undefined;
-          if (!p) return `Skipped — project ${projectId ?? "(none)"} not found.`;
+          const p = projectId
+            ? projects.find((x) => x.id === projectId)
+            : undefined;
+          if (!p)
+            return `Skipped — project ${projectId ?? "(none)"} not found.`;
           const label = (tool.input.label as string | undefined)?.trim();
           if (!label) return "Skipped — missing environment label.";
           const slug =
@@ -2535,7 +2671,10 @@ export function useIssueTracker() {
             await updateProject.mutateAsync({
               id: projectId!,
               patch: {
-                customEnvs: [...(p.customEnvs ?? []), { slug, label, color: "#64748b" }],
+                customEnvs: [
+                  ...(p.customEnvs ?? []),
+                  { slug, label, color: "#64748b" },
+                ],
               },
             });
             return `Environment "${label}" (${slug}) added to ${p.name}.`;
@@ -2547,10 +2686,16 @@ export function useIssueTracker() {
         }
         case "list_project_contents": {
           const projectId = tool.input.projectId as string | undefined;
-          const p = projectId ? projects.find((x) => x.id === projectId) : undefined;
-          if (!p) return `Skipped — project ${projectId ?? "(none)"} not found.`;
+          const p = projectId
+            ? projects.find((x) => x.id === projectId)
+            : undefined;
+          if (!p)
+            return `Skipped — project ${projectId ?? "(none)"} not found.`;
           try {
-            const { features, flows } = await fetchProjectContents(projectId!, activeEnv?.envSlug);
+            const { features, flows } = await fetchProjectContents(
+              projectId!,
+              activeEnv?.envSlug,
+            );
             if (features.length === 0) {
               return `Project "${p.name}" has no features yet (create one with create_feature).`;
             }
@@ -2580,16 +2725,25 @@ export function useIssueTracker() {
         }
         case "create_feature": {
           const projectId = tool.input.projectId as string | undefined;
-          const p = projectId ? projects.find((x) => x.id === projectId) : undefined;
-          if (!p) return `Skipped — project ${projectId ?? "(none)"} not found.`;
+          const p = projectId
+            ? projects.find((x) => x.id === projectId)
+            : undefined;
+          if (!p)
+            return `Skipped — project ${projectId ?? "(none)"} not found.`;
           const name = (tool.input.name as string | undefined)?.trim();
           if (!name) return "Skipped — missing feature name.";
           // Features are env-scoped; dev is the source-of-truth env (the
           // cross-env cascade treats dev as the source), so an unspecified
           // env lands there rather than in the legacy env-less shape.
-          const envSlug = ((tool.input.envSlug as string | undefined) ?? "dev").trim();
+          const envSlug = (
+            (tool.input.envSlug as string | undefined) ?? "dev"
+          ).trim();
           try {
-            const created = await createFeature.mutateAsync({ projectId: projectId!, name, envSlug });
+            const created = await createFeature.mutateAsync({
+              projectId: projectId!,
+              name,
+              envSlug,
+            });
             return `Feature "${created.name}" created in ${p.name} (${envSlug}).`;
           } catch (err) {
             return `Couldn't create the feature — ${
@@ -2601,18 +2755,28 @@ export function useIssueTracker() {
           const projectId = tool.input.projectId as string | undefined;
           const name = (tool.input.name as string | undefined)?.trim();
           const featureId = tool.input.featureId as string | undefined;
-          const featureName = (tool.input.featureName as string | undefined)?.trim();
+          const featureName = (
+            tool.input.featureName as string | undefined
+          )?.trim();
           if (!projectId || !name || (!featureId && !featureName)) {
             return "Skipped — projectId, the feature (id or name) and the new name are required.";
           }
           try {
-            const { features } = await fetchProjectContents(projectId, activeEnv?.envSlug);
+            const { features } = await fetchProjectContents(
+              projectId,
+              activeEnv?.envSlug,
+            );
             const f = featureId
               ? features.find((x) => x.id === featureId)
               : matchUnique(features, featureName!);
-            if (!f) return `Skipped — feature ${featureId ?? `"${featureName}"`} not found in that project.`;
+            if (!f)
+              return `Skipped — feature ${featureId ?? `"${featureName}"`} not found in that project.`;
             if (f.name === name) return "Skipped — nothing to change.";
-            await updateFeature.mutateAsync({ id: f.id, projectId, patch: { name } });
+            await updateFeature.mutateAsync({
+              id: f.id,
+              projectId,
+              patch: { name },
+            });
             return `Feature renamed to "${name}" (was "${f.name}"). Cross-env clones sync automatically.`;
           } catch (err) {
             return `Couldn't rename the feature — ${
@@ -2623,16 +2787,22 @@ export function useIssueTracker() {
         case "delete_feature": {
           const projectId = tool.input.projectId as string | undefined;
           const featureId = tool.input.featureId as string | undefined;
-          const featureName = (tool.input.featureName as string | undefined)?.trim();
+          const featureName = (
+            tool.input.featureName as string | undefined
+          )?.trim();
           if (!projectId || (!featureId && !featureName)) {
             return "Skipped — projectId and the feature (id or name) are required.";
           }
           try {
-            const { features } = await fetchProjectContents(projectId, activeEnv?.envSlug);
+            const { features } = await fetchProjectContents(
+              projectId,
+              activeEnv?.envSlug,
+            );
             const f = featureId
               ? features.find((x) => x.id === featureId)
               : matchUnique(features, featureName!);
-            if (!f) return `Skipped — feature ${featureId ?? `"${featureName}"`} not found in that project.`;
+            if (!f)
+              return `Skipped — feature ${featureId ?? `"${featureName}"`} not found in that project.`;
             await deleteFeature.mutateAsync({ id: f.id, projectId });
             return `Feature "${f.name}" deleted (cross-env clones removed with it).`;
           } catch (err) {
@@ -2644,21 +2814,31 @@ export function useIssueTracker() {
         case "create_flow": {
           const projectId = tool.input.projectId as string | undefined;
           const featureId = tool.input.featureId as string | undefined;
-          const featureName = (tool.input.featureName as string | undefined)?.trim();
+          const featureName = (
+            tool.input.featureName as string | undefined
+          )?.trim();
           const name = (tool.input.name as string | undefined)?.trim();
           if (!projectId || (!featureId && !featureName) || !name) {
             return "Skipped — projectId, the parent feature (id or name) and the flow name are required.";
           }
-          const description = (tool.input.description as string | undefined)?.trim();
+          const description = (
+            tool.input.description as string | undefined
+          )?.trim();
           const steps = Array.isArray(tool.input.steps)
-            ? (tool.input.steps as string[]).map((s) => String(s).trim()).filter(Boolean)
+            ? (tool.input.steps as string[])
+                .map((s) => String(s).trim())
+                .filter(Boolean)
             : undefined;
           try {
-            const { features } = await fetchProjectContents(projectId, activeEnv?.envSlug);
+            const { features } = await fetchProjectContents(
+              projectId,
+              activeEnv?.envSlug,
+            );
             const f = featureId
               ? features.find((x) => x.id === featureId)
               : matchUnique(features, featureName!);
-            if (!f) return `Skipped — feature ${featureId ?? `"${featureName}"`} not found in that project.`;
+            if (!f)
+              return `Skipped — feature ${featureId ?? `"${featureName}"`} not found in that project.`;
             const created = await createFlow.mutateAsync({
               projectId,
               featureId: f.id,
@@ -2687,11 +2867,15 @@ export function useIssueTracker() {
           const status = (tool.input.status as string | undefined)?.trim();
           if (!name && !status) return "Skipped — nothing to change.";
           try {
-            const { flows } = await fetchProjectContents(projectId, activeEnv?.envSlug);
+            const { flows } = await fetchProjectContents(
+              projectId,
+              activeEnv?.envSlug,
+            );
             const fl = flowId
               ? flows.find((x) => x.id === flowId)
               : matchUnique(flows, flowName!);
-            if (!fl) return `Skipped — flow ${flowId ?? `"${flowName}"`} not found in that project.`;
+            if (!fl)
+              return `Skipped — flow ${flowId ?? `"${flowName}"`} not found in that project.`;
             const newName = name || fl.name;
             const newStatus = (status || fl.status || "active") as Parameters<
               typeof updateFlow.mutateAsync
@@ -2709,8 +2893,10 @@ export function useIssueTracker() {
               patch: name && name !== fl.name ? { name: newName } : {},
             });
             const changes: string[] = [];
-            if (name && name !== fl.name) changes.push(`renamed to "${newName}"`);
-            if (status && status !== (fl.status ?? "active")) changes.push(`status → ${newStatus}`);
+            if (name && name !== fl.name)
+              changes.push(`renamed to "${newName}"`);
+            if (status && status !== (fl.status ?? "active"))
+              changes.push(`status → ${newStatus}`);
             return `Flow "${fl.name}" ${changes.join(", ")}. Cross-env clones sync automatically.`;
           } catch (err) {
             return `Couldn't update the flow — ${
@@ -2726,12 +2912,20 @@ export function useIssueTracker() {
             return "Skipped — projectId and the flow (id or name) are required.";
           }
           try {
-            const { flows } = await fetchProjectContents(projectId, activeEnv?.envSlug);
+            const { flows } = await fetchProjectContents(
+              projectId,
+              activeEnv?.envSlug,
+            );
             const fl = flowId
               ? flows.find((x) => x.id === flowId)
               : matchUnique(flows, flowName!);
-            if (!fl) return `Skipped — flow ${flowId ?? `"${flowName}"`} not found in that project.`;
-            await deleteFlow.mutateAsync({ id: fl.id, projectId, featureId: fl.featureId });
+            if (!fl)
+              return `Skipped — flow ${flowId ?? `"${flowName}"`} not found in that project.`;
+            await deleteFlow.mutateAsync({
+              id: fl.id,
+              projectId,
+              featureId: fl.featureId,
+            });
             return `Flow "${fl.name}" deleted (cross-env clones removed with it).`;
           } catch (err) {
             return `Couldn't delete the flow — ${
@@ -2817,7 +3011,8 @@ export function useIssueTracker() {
           const exactTwin = targets.find((t) => {
             try {
               return (
-                stripTrailing(new URL(t.url).href) === stripTrailing(parsed.href)
+                stripTrailing(new URL(t.url).href) ===
+                stripTrailing(parsed.href)
               );
             } catch {
               return false;
@@ -2833,15 +3028,15 @@ export function useIssueTracker() {
           // Resolve the bound secret id from the localStorage mirror —
           // same reason as everywhere else, see issueTrackerBindings.ts.
           const resolveBinding = (t: VerificationTarget): string | null => {
-            for (const [secretId, ids] of Object.entries(boundTargetsBySecretId)) {
+            for (const [secretId, ids] of Object.entries(
+              boundTargetsBySecretId,
+            )) {
               if (ids.includes(t.id)) return secretId;
             }
             return null;
           };
           const distinctCreds = new Set(
-            originTwins
-              .map(resolveBinding)
-              .filter((c): c is string => !!c),
+            originTwins.map(resolveBinding).filter((c): c is string => !!c),
           );
           const exactTwinBinding = exactTwin ? resolveBinding(exactTwin) : null;
           if (!exactTwinBinding && distinctCreds.size > 1) {
@@ -2897,20 +3092,26 @@ export function useIssueTracker() {
             unsubscribeRunRef.current?.();
             unsubscribeRunRef.current = null;
             if (import.meta.env.VITE_USE_REAL_VERIFY === "1") {
-              unsubscribeRunRef.current = issueTrackerApi.subscribeRun(fresh.id, {
-                onEvent: applyRunEvent,
-                onError: () => {
-                  unsubscribeRunRef.current?.();
-                  unsubscribeRunRef.current = null;
+              unsubscribeRunRef.current = issueTrackerApi.subscribeRun(
+                fresh.id,
+                {
+                  onEvent: applyRunEvent,
+                  onError: () => {
+                    unsubscribeRunRef.current?.();
+                    unsubscribeRunRef.current = null;
+                  },
                 },
-              });
+              );
             } else {
               mockCancelRef.current?.();
               mockCancelRef.current = driveMockRun(
                 fresh,
                 setRun,
                 persistDetectedIssue,
-                { projectId: activeEnv?.projectId ?? "", envSlug: activeEnv?.envSlug ?? "" },
+                {
+                  projectId: activeEnv?.projectId ?? "",
+                  envSlug: activeEnv?.envSlug ?? "",
+                },
                 () => {
                   mockCancelRef.current = null;
                   toast.success("Verification complete.");
@@ -3004,7 +3205,11 @@ export function useIssueTracker() {
   );
 
   const applyChatAction = useCallback(
-    async (action: ChatMessage["actions"] extends (infer A)[] | undefined ? A : never) => {
+    async (
+      action: ChatMessage["actions"] extends (infer A)[] | undefined
+        ? A
+        : never,
+    ) => {
       if (!action) return;
       switch (action.kind) {
         case "start_verification":
@@ -3021,7 +3226,10 @@ export function useIssueTracker() {
           break;
         }
         case "filter_severity":
-          setFilters((f) => ({ ...f, severities: [action.payload?.severity as never] }));
+          setFilters((f) => ({
+            ...f,
+            severities: [action.payload?.severity as never],
+          }));
           break;
         case "request_tool_permission": {
           // The card payload carries the full proposal — look it up by
@@ -3048,7 +3256,8 @@ export function useIssueTracker() {
             ({
               id: toolUseId,
               name: toolName,
-              input: (action.payload?.toolInput as Record<string, unknown>) ?? {},
+              input:
+                (action.payload?.toolInput as Record<string, unknown>) ?? {},
             } as ToolUseBlock);
           if (!tool) return;
           // Replace the Allow button with a Deny/Allow status label pair
@@ -3084,11 +3293,13 @@ export function useIssueTracker() {
               timestamp: new Date().toISOString(),
             };
             setChat((cur) => [...cur, doneMsg]);
-            void appendChatMessage.mutateAsync({
-              sessionId,
-              role: "system",
-              content: doneMsg.content,
-            }).catch(() => {});
+            void appendChatMessage
+              .mutateAsync({
+                sessionId,
+                role: "system",
+                content: doneMsg.content,
+              })
+              .catch(() => {});
             // Agentic continuation: fire the model's next turn automatically
             // after a successful tool execution so the conversation flows
             // card → Allow → next card without the user typing "continue"
@@ -3100,7 +3311,10 @@ export function useIssueTracker() {
             // EXCEPTIONS — tools whose progress is driven by a separate
             // long-running stream (the verification run's SSE feed) so the
             // AI shouldn't kick off another model turn on top of that.
-            const SKIP_CONTINUE = new Set(["start_verification", "verify_live_url"]);
+            const SKIP_CONTINUE = new Set([
+              "start_verification",
+              "verify_live_url",
+            ]);
             if (!SKIP_CONTINUE.has(tool.name)) {
               if (agentTurnsRef.current >= 60) {
                 const stopMsg: ChatMessage = {
@@ -3141,8 +3355,7 @@ export function useIssueTracker() {
                 const idleMs =
                   lastProgress === null ? Infinity : Date.now() - lastProgress;
                 const isBrowser = tool.name.startsWith("browser_");
-                const narrationStuck =
-                  narrationStreak >= 2 && idleMs > 15_000;
+                const narrationStuck = narrationStreak >= 2 && idleMs > 15_000;
                 const invalidStuck = invalidStreak >= 2;
                 const stuckSuffix =
                   narrationStuck || invalidStuck
@@ -3187,7 +3400,9 @@ Continue.`;
                 const toolChoice = isBrowser
                   ? ({ type: "any" } as const)
                   : undefined;
-                await runModelTurn(continuationPrompt + stuckSuffix, { toolChoice });
+                await runModelTurn(continuationPrompt + stuckSuffix, {
+                  toolChoice,
+                });
                 // STEP-TIMEOUT SAFETY: if the model produced a tool_use,
                 // `narrationOnlyStreakRef` was reset inside runModelTurn —
                 // we are healthy. If it returned narration only and the
@@ -3276,11 +3491,13 @@ Continue.`;
               timestamp: new Date().toISOString(),
             };
             setChat((cur) => [...cur, failMsg]);
-            void appendChatMessage.mutateAsync({
-              sessionId,
-              role: "system",
-              content: failMsg.content,
-            }).catch(() => {});
+            void appendChatMessage
+              .mutateAsync({
+                sessionId,
+                role: "system",
+                content: failMsg.content,
+              })
+              .catch(() => {});
             toast.error(`Tool failed: ${message}`);
           }
           break;
@@ -3413,23 +3630,33 @@ function applyFilters(issues: Issue[], f: IssueFilters): Issue[] {
     if (f.statuses.length && !f.statuses.includes(i.status)) return false;
     if (f.categories.length && !f.categories.includes(i.category)) return false;
     if (f.application && i.applicationName !== f.application) return false;
-    if (search && !`${i.title} ${i.description} ${i.applicationName} ${i.id}`
-      .toLowerCase()
-      .includes(search)) return false;
+    if (
+      search &&
+      !`${i.title} ${i.description} ${i.applicationName} ${i.id}`
+        .toLowerCase()
+        .includes(search)
+    )
+      return false;
     return true;
   });
   switch (f.sort) {
     case "newest":
-      out = out.sort((a, b) => +new Date(b.detectedAt) - +new Date(a.detectedAt));
+      out = out.sort(
+        (a, b) => +new Date(b.detectedAt) - +new Date(a.detectedAt),
+      );
       break;
     case "oldest":
-      out = out.sort((a, b) => +new Date(a.detectedAt) - +new Date(b.detectedAt));
+      out = out.sort(
+        (a, b) => +new Date(a.detectedAt) - +new Date(b.detectedAt),
+      );
       break;
     case "severity":
       out = out.sort(severityRank);
       break;
     case "application":
-      out = out.sort((a, b) => a.applicationName.localeCompare(b.applicationName));
+      out = out.sort((a, b) =>
+        a.applicationName.localeCompare(b.applicationName),
+      );
       break;
   }
   return out;
@@ -3463,7 +3690,10 @@ function deriveNameFromUrl(url: string): string {
   }
 }
 
-function lastCompletedRun(run: VerificationRun, now: number = Date.now()): string | null {
+function lastCompletedRun(
+  run: VerificationRun,
+  now: number = Date.now(),
+): string | null {
   if (!run.completedAt) return null;
   // Clamp at zero — a client clock ahead of `completedAt` would otherwise
   // render "-1m ago" if local time drifted briefly.
@@ -3502,7 +3732,10 @@ function cryptoUuid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }
-  return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  return (
+    Math.random().toString(36).slice(2, 10) +
+    Math.random().toString(36).slice(2, 10)
+  );
 }
 
 // Mock progress driver — replaces the AI Agent / MCP for this phase. Now
@@ -3514,10 +3747,7 @@ function cryptoUuid(): string {
 // Returns a `cancel` function so the caller can flush pending timeouts when
 // the user navigates away mid-run (otherwise setRun fires on an unmounted
 // component and React logs a warning).
-type PersistDetectedIssue = (
-  payload: Issue,
-  runId: string,
-) => Promise<void>;
+type PersistDetectedIssue = (payload: Issue, runId: string) => Promise<void>;
 
 // Env scope stamped onto the synthetic issue `driveMockRun` discovers
 // late in the run. Empty strings when the mock fires outside a project
@@ -3578,7 +3808,13 @@ function driveMockRun(
         completedTargets: completed,
         failedTargets: failed,
         perApp: snapshot.perApp.map((a, i) =>
-          i === idx ? { ...a, status: idx === apps.length - 1 ? "issues_found" : "healthy", completedAt: new Date().toISOString() } : a,
+          i === idx
+            ? {
+                ...a,
+                status: idx === apps.length - 1 ? "issues_found" : "healthy",
+                completedAt: new Date().toISOString(),
+              }
+            : a,
         ),
       };
     });
@@ -3612,9 +3848,7 @@ function driveMockRun(
       projectId: scope.projectId,
       envSlug: scope.envSlug,
       applicationName: firstApp?.applicationName ?? "Unverified application",
-      url: firstApp?.targetId
-        ? ""
-        : "/dashboard",
+      url: firstApp?.targetId ? "" : "/dashboard",
       category: "ui",
       severity: "medium",
       status: "open",

@@ -13,6 +13,7 @@ import {
   RunVerificationActions,
 } from "@/components/issue-tracker/IssueTrackerHeader";
 import { VerificationPanel } from "@/components/issue-tracker/VerificationPanel";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
 export function PanelPage() {
@@ -31,6 +32,8 @@ export function PanelPage() {
 
   return (
     <div className="space-y-6">
+      <BackToProjectsLink />
+
       {/* Title row: H1 on the left, Run verification CTA on the right.
           Same flex alignment as other section headers so the button
           reads as belonging to this page (not as a stuck-on toolbar). */}

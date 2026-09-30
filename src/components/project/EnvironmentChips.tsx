@@ -100,7 +100,16 @@ export function EnvironmentChips({
 
   const goTo = (slug: string) => {
     if (mode === "link" && projectId) {
-      navigate(`/projects/${projectId}/${slug}`);
+      // Canonical env-menu URL — every env-scoped click lands on
+      // `/projects/<id>/<envSlug>/features` (the `FeaturesPage` for
+      // that env), so the sidebar's "Features" item, the env chip on
+      // a project card, and the post-rename redirect all share one
+      // URL pattern. The plain `/projects/<id>/<envSlug>` route
+      // (ProjectDetailPage) still exists and is reachable via
+      // browser history / deep-links, but no in-app menu surfaces
+      // it anymore. User asked (2026-09-29): every env menu should
+      // follow the `/features` URL pattern.
+      navigate(`/projects/${projectId}/${slug}/features`);
     }
   };
 

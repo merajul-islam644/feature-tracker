@@ -6,12 +6,13 @@
 //
 // The provider lives at the AppLayout root so it survives navigation
 // between `/projects/:id/:envSlug` and the Issue Tracker sub-routes
-// (`/issue-tracker/*`). Once set, the env stays active until the user
-// navigates away from both — the consumer decides whether to clear
-// (e.g. on `/dashboard`) or keep (e.g. on `/issue-tracker/*`). Today
-// nothing clears it: leaving the project simply means the Issue
-// Tracker menu hides (URL-based gate in AppSidebar) and the hook
-// filter is a no-op because no consumer is reading.
+// (`/projects/:id/:envSlug/<key>`). Once set, the env stays active
+// until the user navigates away from both — the consumer decides
+// whether to clear (e.g. on `/dashboard`) or keep (e.g. on
+// `/projects/:id/:envSlug/<key>`). Today nothing clears it: leaving
+// the project simply means the Issue Tracker menu hides (URL-based
+// gate in AppSidebar) and the hook filter is a no-op because no
+// consumer is reading.
 //
 // Outside a project env the context returns `null`. Hooks that depend
 // on it should treat `null` as "no data" (empty list, no mutations
@@ -98,10 +99,11 @@ const ActiveEnvContext = createContext<ActiveEnvContextValue | null>(null);
 
 export function ActiveEnvProvider({ children }: { children: ReactNode }) {
   // Hydrate from the localStorage mirror so a hard refresh on
-  // `/issue-tracker/*` (or any other env-only path that doesn't carry
-  // the (projectId, envSlug) pair in the URL) doesn't kick the user
-  // out of their env. The cloud read below replaces the value once it
-  // resolves — so a different device sees the right env on next load.
+  // `/projects/:id/:envSlug/<key>` (or any other env-only path that
+  // doesn't carry the (projectId, envSlug) pair in the URL) doesn't
+  // kick the user out of their env. The cloud read below replaces the
+  // value once it resolves — so a different device sees the right env
+  // on next load.
   const [env, setEnvState] = useState<ActiveEnv | null>(() => readMirrorEnv());
 
   const cloudSelection = useActiveEnvSelection();
