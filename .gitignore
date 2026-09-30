@@ -28,6 +28,7 @@ prompt/
 # Root-level debug screenshots and ad-hoc state dumps from local sessions
 /*.png
 /*.jpeg
+/network-requests.txt
 /*.jpg
 /*.gif
 /*.mp4
