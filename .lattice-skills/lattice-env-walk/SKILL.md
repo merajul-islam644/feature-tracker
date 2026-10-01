@@ -30,11 +30,23 @@ These are **hard** — every one came from explicit user feedback. Violating any
 9. **No screenshot spam.** Don't take screenshots to "show" the user what you see — they don't need a slideshow of every page. Use snapshots (`browser_snapshot`) and `browser_evaluate` to read state. Screenshots only when the user explicitly asks or when an evidence artefact needs to be saved.
 10. **Stop the moment you find a leak, do not work around it.** If you discover the password is exposed in a log, response, SSE event, or file, STOP and tell the user. Don't paper over it, don't "use it just this once".
 
+## Environment model (schema v2.1)
+
+Every project env is a row in `blx_Environments`. **`ItemId` is the env's identity**; `slug` is a renameable display cache (URL segment), never a stable key. Projects start with ZERO envs — the user adds each one (canonical kind `dev`/`stg`/`prod`/`uat`, or `custom`) via Add Environment.
+
+Everything env-scoped points at the row:
+
+- Targets / Secrets / SecretBindings / Issues carry `environmentId` (the ItemId) alongside the legacy `projectId`+`envSlug` pair. **Scope reads by `environmentId`** — a slug rename must never orphan a walk's data.
+- Verification scope is per-env rows in `blx_VerificationChecks` — one row per check per env (`source: "builtin"` mirrors the 11-id catalog; `source: "custom"` carries a `custom_`-prefixed `checkId`; `enabled` is the user's selection). The legacy `localStorage.lattice.verification-checks.v1` blob is stale — do not read it.
+- The active env is `UserPreference.activeEnvironmentId` for the logged-in user (one-way write from the app; cross-device). The old `lattice.mirror.active-env.v1` mirror and the `__active__::` SecretBinding sentinel are gone.
+
+Rule of thumb: resolve the env row first (`fetchEnvironments` → match by id, slug, or the active preference), then use its `id` everywhere.
+
 ## Setup — one target at a time
 
 ### 0. Session bootstrap (programmatic only)
 
-Walker never navigates the Lattice UI to read configuration. **All reads go through APIs** — Targets, Secrets, and Bindings are pulled by the helpers under `scripts/walker/`, never by walking the Lattice SPA.
+Walker never navigates the Lattice UI to read configuration. **All reads go through APIs** — Environments, Checks, Targets, Secrets, and Bindings are pulled by the helpers under `scripts/walker/`, never by walking the Lattice SPA.
 
 **Required `.env` keys** (project root):
 
@@ -42,16 +54,16 @@ Walker never navigates the Lattice UI to read configuration. **All reads go thro
 - `VITE_BLOCKS_OIDC_URL` — OIDC discovery URL (e.g. `https://iam.seliseblocks.com`)
 - `VITE_BLOCKS_OIDC_CLIENT_ID` — OIDC client id (public, safe to read)
 - `VITE_BLOCKS_KEY` — Blocks tenant key (public, safe to read)
-- `Email` — IAM login email (per-user: ask whoever is running the skill for theirs, same as the password — never assume one specific person's)
-- `Password` — IAM login password (used for programmatic login, see step 3)
 
-No bearer token is read from the user. **Walker logs in itself** via the OIDC password-equivalent endpoint:
+**IAM credential is NOT an .env key.** The walker's login lives in the MCP server's encrypted secret store under the reserved name **`IAM Walker Login`** (email + password). `auth.mjs`'s `iamCredential()` resolves it: `GET /secrets` → match the name → `GET /secrets/:id` (loopback-only — non-local peers are refused before the id is looked up). The MCP server must be running (default `http://127.0.0.1:8787`, override with `MCP_SERVER_URL`). A deprecated `Email`/`Password` env fallback still exists but warns loudly — the store is the source. Never print the password; `iamCredential()` and the login fetch keep it in process memory only.
+
+No bearer token is read from the user. **Walker logs in itself** via the OIDC password-equivalent endpoint, with the credential from `iamCredential()`:
 
 ```
 POST https://iam.seliseblocks.com/api/auth/login?tenant_id=<VITE_BLOCKS_KEY>
 Content-Type: application/json
 
-{ "username": "<Email>", "password": "<Password>" }
+{ "username": "<iamCredential().email>", "password": "<iamCredential().password>" }
 ```
 
 Response: `200 { access_token, expires_in: 12540, … }` — a bearer JWT, no PKCE / code exchange, no cookie jar required. The IAM session cookie that `BLOCKS_BEARER_TOKEN` previously piggy-backed on is irrelevant for this path.
@@ -64,27 +76,30 @@ Response: `200 { access_token, expires_in: 12540, … }` — a bearer JWT, no PK
 
 **Walker bootstrap in order:**
 
-1. **Load `.env`.** Use the inline dotenv loader at the top of `scripts/walker/auth.mjs`, or `import { config } from 'dotenv'; config({ path: '.env' })`. Verify the four `VITE_BLOCKS_*` keys + `Email` + `Password` exist. If missing, list them and ask the user to add to `.env`.
-2. **Pick a scope.** Read `localStorage.lattice.mirror.active-env.v1` from the Lattice origin (the user's browser; not opened by walker) for `{projectId, envSlug}`. If empty, infer from the first VerificationTarget's `environment` field after fetching.
-3. **Login programmatically.** `import { walkerClient } from "./scripts/walker/auth.mjs"; const client = await walkerClient();`. `walkerClient()` builds an SDK whose `accessToken` callback re-logs in when the cached token is within 60s of expiry (~3.5h lifetime) and refreshes from `.env`. No manual refresh step.
-4. **Targets.** `import { fetchTargets } from "./scripts/walker/data.mjs"; const targets = await fetchTargets(client, { projectId, envSlug });`. Each row has `{id, url, applicationName, environment, credentialId, enabled, lastVerifiedAt, lastStatus}`.
-5. **Secrets metadata.** `import { fetchSecrets } from "./scripts/walker/data.mjs"; const secrets = await fetchSecrets(client, { projectId, envSlug });`. Each row has `{id, name, email, passwordMasked}` — masked only, no plaintext (skill rule 10).
-6. **Bindings (secretId → targetId[]).** `import { fetchSecretBindings } from "./scripts/walker/data.mjs"; const { bindings } = await fetchSecretBindings(client, { projectId, envSlug });`. Returns the parsed `bindingsJson` map.
+1. **Load `.env`.** Use the inline dotenv loader at the top of `scripts/walker/auth.mjs`, or `import { config } from 'dotenv'; config({ path: '.env' })`. Verify the four `VITE_BLOCKS_*` keys exist. If missing, list them and ask the user to add to `.env`. The IAM credential comes from the MCP secret store (`iamCredential()`), not `.env` — see the note above.
+2. **Pick a scope.** Resolve it from the cloud — never from a browser mirror. `const envs = await fetchEnvironments(client, { projectId });` gives the project's env rows; `const activeEnvironmentId = await fetchActiveEnvironmentId(client);` gives the user's cross-device preference. Match the env row by id (preference) or by the slug the user named. If the user named neither a project nor an env and the preference is empty, ask which env to walk — do not infer.
+3. **Login programmatically.** `import { walkerClient } from "./scripts/walker/auth.mjs"; const client = await walkerClient();`. `walkerClient()` builds an SDK whose `accessToken` callback re-logs in when the cached token is within 60s of expiry (~3.5h lifetime), re-resolving the credential from the MCP secret store each time. No manual refresh step.
+4. **Environments + scope.** `import { fetchEnvironments, fetchVerificationChecks } from "./scripts/walker/data.mjs";` — `fetchEnvironments(client, { projectId })` returns `{id, slug, label, kind, order}` rows (`id` = Environment ItemId, the identity); `fetchVerificationChecks(client, { projectId, environmentId })` returns the per-env scope rows `{checkId, source, label, enabled}` — the `enabled: true` set IS the walk's scope.
+5. **Targets.** `import { fetchTargets } from "./scripts/walker/data.mjs"; const targets = await fetchTargets(client, { projectId, environmentId });`. Each row has `{id, url, applicationName, environmentId, credentialId, enabled, lastVerifiedAt, lastStatus}`.
+6. **Secrets metadata.** `import { fetchSecrets } from "./scripts/walker/data.mjs"; const secrets = await fetchSecrets(client, { projectId, environmentId });`. Each row has `{id, name, email, passwordMasked}` — masked only, no plaintext (skill rule 10).
+7. **Bindings (secretId → targetId[]).** `import { fetchSecretBindings } from "./scripts/walker/data.mjs"; const { bindings } = await fetchSecretBindings(client, { projectId, environmentId });`. Returns the parsed `bindingsJson` map.
+
+Steps 2–7 collapse into one call when the scope is already known: `const ctx = await loadWalkerContext({ projectId, envSlug });` (or `{ projectId, environmentId }`, or bare to use the active preference). It resolves the env row itself and returns `{env, environments, targets, secrets, secretBindings, checks}`.
 
 **Hard rules for bootstrap:**
 
 - **Never navigate the Lattice UI.** Walker reads everything through the cloud SDK and MCP server. No `browser_navigate` to `https://dbeegi.slsblx.com/...`, no DOM scraping, no `localStorage` mirror reads in stdio browser. The user opens Lattice themselves if they want.
 - **Walker never opens a browser tab for any target URL.** `browser_tabs action=new url=<targetUrl>` is **not** a walker primitive. The walker does not open, walk, or screenshot target apps in any browser. Verification of the target app's UI is the MCP server's `POST /verify/runs` headed-browser agent — gated behind explicit user consent (skill rule 8).
 - **Never auto-fill passwords.** Walker does not log in to anything. The MCP server's `/verify/runs` endpoint is the only mechanism that handles passwords, and that's gated behind explicit user consent (skill rule 8).
-- **Never invent a token.** If `.env` has no valid `Email`/`Password`, walker stops and asks.
+- **Never invent a token.** If the MCP secret store has no `IAM Walker Login` secret (or the store is down) and no env fallback resolves, walker stops and asks.
 - **If a step fails**, surface the message to the user, do not retry in a loop.
 
 For every target the user adds:
 
 1. **The user adds the target.** In the Lattice UI: Projects → pick the project → pick the env → Targets page → "Add URL" with display name + URL. The target shows up in the list with id, url, enabled toggle.
-2. **If the target needs login, the user adds a credential.** Secrets page → "+ Add Secret" with name + email + password + binding to the target via the secret-target dropdown. The secret is stored in `mcp-server/data/secrets.enc` (AES-256-GCM). The cloud only sees `passwordMasked`. The actual password never leaves the MCP server's process — there is no API endpoint that returns it, and the classifier will block any attempt to extract it as **Credential Exploration**.
-3. **The user picks verification scope.** Scopes page — checkbox grid covering `page_load`, `navigation`, `buttons`, `forms`, `broken_links`, `console_errors`, `network_errors`, `authentication`, `accessibility`, `performance`, `all_functionality`. Saved to `lattice.verification-checks.v1`. Use these for both the agent run and the manual walk.
-4. **Walker reads the configuration.** Read targets from `/projects/<projectId>/<envSlug>/targets`; read bindings from `localStorage.lattice.mirror.secretBindings.v1`; read scope from `localStorage.lattice.verification-checks.v1`.
+2. **If the target needs login, the user adds a credential.** Secrets page → "+ Add Secret" with name + email + password + binding to the target via the secret-target dropdown. The secret is stored in `mcp-server/data/secrets.enc` (AES-256-GCM). The cloud only sees `passwordMasked`. The actual password never leaves the MCP server's process except through the **loopback-only** `GET /secrets/:id` — the walker's own login is the one legitimate consumer; anything non-local is refused before the id is looked up, and the classifier will block any attempt to exfiltrate it as **Credential Exploration**.
+3. **The user picks verification scope.** Scopes page — checkbox grid covering `page_load`, `navigation`, `buttons`, `forms`, `broken_links`, `console_errors`, `network_errors`, `authentication`, `accessibility`, `performance`, `all_functionality` (plus any custom checks they defined). Under v2.1 each toggle is a per-env row in `blx_VerificationChecks` — tester-only UI, saved straight to the cloud.
+4. **Walker reads the configuration.** Everything through `scripts/walker/data.mjs`: env row via `fetchEnvironments`, scope via `fetchVerificationChecks` (env-scoped by `environmentId`), targets/secrets/bindings via their helpers. No UI navigation, no `localStorage` mirrors.
 
 If any of these is missing, ask the user to set it up. Don't fabricate bindings.
 
@@ -96,53 +111,65 @@ The walker does **not** read Lattice configuration through a browser. All of it 
 // Walker script (no browser)
 import { walkerClient } from "./scripts/walker/auth.mjs";
 import {
+  fetchEnvironments,
+  fetchVerificationChecks,
   fetchTargets,
   fetchSecrets,
   fetchSecretBindings,
+  loadWalkerContext,
 } from "./scripts/walker/data.mjs";
 const client = await walkerClient();
-const targets = await fetchTargets(client, { projectId, envSlug });
-const secrets = await fetchSecrets(client, { projectId, envSlug });
-const { bindings } = await fetchSecretBindings(client, { projectId, envSlug });
+const environments = await fetchEnvironments(client, { projectId });
+const checks = await fetchVerificationChecks(client, {
+  projectId,
+  environmentId,
+});
+const targets = await fetchTargets(client, { projectId, environmentId });
+const secrets = await fetchSecrets(client, { projectId, environmentId });
+const { bindings } = await fetchSecretBindings(client, {
+  projectId,
+  environmentId,
+});
+// …or one-shot: const ctx = await loadWalkerContext({ projectId, envSlug });
 ```
 
-If the cloud SDK returns 401 even after auto-login, the only dynamic action is `forceRefresh()` from `scripts/walker/auth.mjs`. If that also fails, walker stops and asks the user to verify `.env` `Email`/`Password`.
+If the cloud SDK returns 401 even after auto-login, the only dynamic action is `forceRefresh()` from `scripts/walker/auth.mjs`. If that also fails, walker stops and asks the user to check the `IAM Walker Login` secret (MCP store + server health).
 
 #### Configuration fetch — full decision tree
 
-Walk this in order. Stop at the first path that yields `[{id, url, applicationName, environment, credentialId, enabled}]`.
+Walk this in order. Stop at the first path that yields `[{id, url, applicationName, environmentId, credentialId, enabled}]`.
 
-1. **API helpers** (`fetchTargets`, `fetchSecrets`, `fetchSecretBindings` from `scripts/walker/data.mjs`). Always first. If it works, walker gets full config without opening any tab. Done.
+1. **API helpers** (`fetchEnvironments`, `fetchVerificationChecks`, `fetchTargets`, `fetchSecrets`, `fetchSecretBindings` — or the one-shot `loadWalkerContext` — from `scripts/walker/data.mjs`). Always first. If it works, walker gets full config without opening any tab. Done.
 2. **`list-targets.mjs`** (`node scripts/verify/list-targets.mjs`). User runs this manually when they want a CLI view; walker does **not** invoke it. It scans Chrome profiles for an `access_token` cookie and queries `VerificationTarget`. Survives only when the cookie is still alive.
 3. **Lattice UI in stdio browser** (legacy, discouraged). `browser_navigate` to `/projects/<id>/<env>/targets`, scrape the DOM, read `localStorage.lattice.mirror.secretBindings.v1` via `browser_evaluate`. **Walker never does this.** The user opens Lattice in their own browser if they want this view.
-4. **Nothing works.** Walker has no config. Stop and ask the user to verify `.env` `Email`/`Password` and rerun the helpers.
+4. **Nothing works.** Walker has no config. Stop and ask the user to check the MCP server and the `IAM Walker Login` secret, then rerun the helpers.
 
 #### Requesting login from the user — concrete template
 
-When path 4 hits, walker cannot fabricate, guess, or walk. Use exactly this template (translated into the user's preferred language):
+When the credential can't be resolved, walker cannot fabricate, guess, or walk. Use exactly this template (translated into the user's preferred language):
 
-> Walker cannot read target URLs because `.env` has no working `Email`/`Password` for programmatic IAM login. To unblock:
+> Walker cannot resolve its IAM login. To unblock:
 >
-> 1. Open `.env` in the project root.
-> 2. Confirm the four `VITE_BLOCKS_*` keys + `Email` + `Password` are present and correct.
-> 3. Re-run the walker (it will re-login via `/api/auth/login` automatically).
+> 1. Make sure the MCP server is running (`GET http://127.0.0.1:8787/health`).
+> 2. Open the Lattice **Secrets** page and add a secret named exactly **`IAM Walker Login`** with your IAM email + password (the same account you use in the app).
+> 3. Re-run the walker — it resolves the credential from the store and re-logins via `/api/auth/login` automatically.
 >
-> Targets fetched this way include `id`, `url`, `applicationName`, `environment`, `credentialId`, `enabled` — the full set needed for the walk loop.
+> Targets fetched this way include `id`, `url`, `applicationName`, `environmentId`, `credentialId`, `enabled` — the full set needed for the walk loop.
 
 Do not silently invent a target list. Do not walk URLs from old chat history. Do not skip the configuration step.
 
-If the user can't or won't put credentials in `.env`, walker stops. There is no `BLOCKS_BEARER_TOKEN` path anymore — that was the cookie-jar approach and is no longer supported by the walker.
+If the user can't or won't add the secret, walker stops. There is no `BLOCKS_BEARER_TOKEN` path (that was the cookie-jar approach, long gone) and `.env` credentials are deprecated — the store is the source.
 
 ## Architecture — know this cold
 
-The MCP server (`mcp-server/src/index.ts`) holds the encrypted secret store. The only function that decrypts is `resolveCredentialForTarget(id)` in `mcp-server/src/secrets.ts:191`. It returns `{email, password}` **only inside the MCP server's process**. The password is then handed directly to Playwright's `fill()` (`mcp-server/src/agent.ts:1049`):
+The MCP server (`mcp-server/src/index.ts`) holds the encrypted secret store. The only function that decrypts is `resolveCredentialForTarget(id)` in `mcp-server/src/secrets.ts`. It returns `{email, password}` inside the MCP server's process, and over the wire through exactly one door: **`GET /secrets/:id`, loopback-only** (non-local peers get 403 before the id is looked up) — the walker's IAM login and the verify agent's own fills are the only legitimate consumers. The password is then handed directly to Playwright's `fill()` (`mcp-server/src/agent.ts`):
 
 ```
 const cred = resolveCredentialForTarget(credentialId);  // internal
 await passwordInput.fill(cred.password);                 // into Playwright, never into a response
 ```
 
-There is no HTTP endpoint, SSE event, evidence file, run-event payload, or test script that returns the plaintext password over the wire. The comment in `secrets.ts:15` says it explicitly: _"the agent's LLM context never sees it."_ If you find yourself searching for "the API call that gives me the password", stop — it does not exist by design. The classifier will block this search as **Credential Exploration** anyway.
+No SSE event, evidence file, run-event payload, or test script returns the plaintext password, and no non-loopback peer can fetch it. The rule that matters is unchanged: **the agent's LLM context never sees it.** If you find yourself wanting to print, log, or paste the password — stop. The classifier will block that as **Credential Exploration** anyway.
 
 Two Playwright instances are in play. Do not confuse them.
 
@@ -161,11 +188,13 @@ Two ESM modules make the walker self-sufficient without `BLOCKS_BEARER_TOKEN` or
 
 ### `scripts/walker/auth.mjs`
 
-Programmatic login + self-healing client. Read credentials from `.env`, cache the access_token to disk, re-login when within 60s of expiry.
+Programmatic login + self-healing client. Resolves the IAM credential from the MCP secret store (`IAM Walker Login`), caches the access_token to disk, re-login when within 60s of expiry.
 
 ```js
 import {
   walkerConfig, // { iam, apiUrl, oidcUrl, clientId, redirectUri, tenant, email, password }
+  iamCredential, // async () => {email, password, source} — MCP store first, env fallback deprecated
+  IAM_SECRET_NAME, // "IAM Walker Login" — the reserved secret name
   freshAccessToken, // async () => token — use as `accessToken: freshAccessToken`
   walkerClient, // async () => Blocks SDK with self-refreshing token
   forceRefresh, // async () => fresh token — drop cache, re-login
@@ -175,23 +204,26 @@ const client = await walkerClient();
 ```
 
 - The token cache is `.walker-token-cache.json` (JSON: `{access_token, expires_at}`). Exists at project root, written only by this module. Never committed.
-- `walkerConfig()` reads `VITE_BLOCKS_*`, `Email`, `Password` from `.env`. No `BLOCKS_BEARER_TOKEN` key is read.
+- `walkerConfig()` reads `VITE_BLOCKS_*` from `.env`. `iamCredential()` resolves the login from the MCP store (`GET /secrets` → `IAM Walker Login` → loopback-only `GET /secrets/:id`); the `Email`/`Password` env keys are a deprecated fallback that warns. No `BLOCKS_BEARER_TOKEN` key is read.
 
 ### `scripts/walker/data.mjs`
 
-API-only reads for the three cloud collections the walker needs. Backed by `client.data.collection(...)` against `VerificationTarget`, `Secret`, and `SecretBinding`. No Lattice UI navigation.
+API-only reads for the six cloud collections the walker needs. Backed by `client.data.collection(...)` against `Environment`, `VerificationCheck`, `UserPreference`, `VerificationTarget`, `Secret`, and `SecretBinding`. No Lattice UI navigation.
 
 ```js
 import {
-  fetchTargets, // (client, { projectId, envSlug, enabledOnly? }) => [{id, url, applicationName, …}]
-  fetchSecrets, // (client, { projectId, envSlug }) => [{id, name, email, passwordMasked, …}]
-  fetchSecretBindings, // (client, { projectId, envSlug }) => {id, bindings: {secretId: [targetId]}, updatedBy}
-  loadWalkerContext, // one-shot: client + all three for the given scope
+  fetchEnvironments, // (client, { projectId }) => [{id, slug, label, kind, order}]
+  fetchVerificationChecks, // (client, { projectId, environmentId }) => [{checkId, source, label, enabled}]
+  fetchActiveEnvironmentId, // (client) => activeEnvironmentId ("" when unset)
+  fetchTargets, // (client, { projectId, environmentId, enabledOnly? }) => [{id, url, applicationName, …}]
+  fetchSecrets, // (client, { projectId, environmentId }) => [{id, name, email, passwordMasked, …}]
+  fetchSecretBindings, // (client, { projectId, environmentId }) => {id, bindings: {secretId: [targetId]}, updatedBy}
+  loadWalkerContext, // one-shot: client + env row + all four env-scoped reads
 } from "./scripts/walker/data.mjs";
 ```
 
-- **Filter rule:** `filter: {projectId, envSlug}` is only sent when **both** are truthy. Empty-string scopes are dropped (the gateway matches `""` literally and returns 0 rows). Without a scope, the call returns every row the user can read.
-- **Field selectors must include `projectId` and `envSlug`** for the gateway to honor the filter — see `data-gateway-filter-rule` memory.
+- **Filter rule (v2.1):** env-scoped reads filter by `environmentId` when known, else by the legacy `{projectId, envSlug}` pair when **both** are truthy. Empty-string scopes are dropped (the gateway matches `""` literally and returns 0 rows). Without a scope, the call returns every row the user can read.
+- **Field selectors must include every filtered column** (`environmentId`, or `projectId` + `envSlug`) or the gateway silently drops the rows — see `data-gateway-filter-rule` memory.
 - **No password on the wire.** `fetchSecrets` returns `passwordMasked` only; there is no `password` field.
 
 ### When to fall back to `list-targets.mjs`
@@ -340,7 +372,7 @@ The Issue collection lives in the same SDK client used by `useIssueTracker.ts`. 
 4. For each defect, compute the fingerprint using the formula below, build the payload, call `collection.create(payload)`.
 5. Write a summary JSON next to the script with each `itemId` (you'll need them for deletion).
 
-Required fields for the `Issue` row: `title`, `applicationName`, `url`, `category`, `severity`, `status`, `description`, `expected`, `actual`, `reproductionStepsJson`, `evidenceJson`, `detectedAt`, `verificationRunId`, `fingerprint`, `occurrenceCount`, `lastSeenAt`, `seenInRunIdsJson`, `assignedDeveloperIdsJson`, `approvedById`, `CreatedBy`, `CreatedDate`, `LastUpdatedBy`, `LastUpdatedDate`. Cast `occurrenceCount` to **string** (`"1"`), not number — the cloud stores it as text.
+Required fields for the `Issue` row: `title`, `applicationName`, `url`, `category`, `severity`, `status`, `description`, `expected`, `actual`, `reproductionStepsJson`, `evidenceJson`, `detectedAt`, `verificationRunId`, `fingerprint`, `occurrenceCount`, `lastSeenAt`, `seenInRunIdsJson`, `assignedDeveloperIdsJson`, `approvedById`, `CreatedBy`, `CreatedDate`, `LastUpdatedBy`, `LastUpdatedDate`. **Echo the env scope on every row (v2.1):** `projectId`, `envSlug`, and `environmentId` (the Environment ItemId) — plus `targetId` when you know which target row the defect came from (hard link that survives URL edits). Missing scope fields drop the issue out of the env's Issues view, and updates must echo every field (`issue-tracker-update-requiredon-3-echo`). Cast `occurrenceCount` to **string** (`"1"`), not number — the cloud stores it as text.
 
 The fingerprint formula (mirror exactly, do not rewrite):
 
@@ -390,6 +422,7 @@ These memories are load-bearing for this skill — read them on resume.
 - [secret-edit-form-dynamic-ids](../MEMORY.md) — input ids are `secret-edit-name-<rowUuid>` / `secret-edit-email-<rowUuid>` after Edit click.
 - [commit-needs-permission](../MEMORY.md) — stage freely to preview, but ask before commit/push/reset/clean.
 - [issue-tracker-update-requiredon-3-echo](../MEMORY.md) — cloud marks projectId+envSlug `requiredOn: 3`; hooks must echo them on update.
+- [env-schema-v21-rollout](../MEMORY.md) — env identity = `Environment.ItemId`; slug is a renameable display cache; scope lives in per-env `blx_VerificationChecks` rows; active env in `UserPreference.activeEnvironmentId`.
 
 ## What this skill is NOT for
 

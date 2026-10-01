@@ -29,7 +29,8 @@ function loadDotenv(path = ".env") {
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
-    ) value = value.slice(1, -1);
+    )
+      value = value.slice(1, -1);
     if (process.env[key] === undefined) process.env[key] = value;
   }
 }
@@ -58,6 +59,47 @@ export function walkerConfig() {
 let cachedToken = null;
 let cachedExpiry = 0;
 
+// Where the MCP server's encrypted secret store lives. The walker and the
+// server share the host, so loopback is the expected address.
+const MCP_STORE_URL = process.env.MCP_SERVER_URL ?? "http://127.0.0.1:8787";
+// Reserved secret name holding the walker's IAM login (email + password).
+// Create/update it on the Lattice Secrets page — never in an .env file.
+export const IAM_SECRET_NAME = "IAM Walker Login";
+
+/** IAM credential for the programmatic login. Primary source: the MCP
+ * server's encrypted store — GET /secrets, match `IAM_SECRET_NAME`, then the
+ * loopback-only GET /secrets/:id. The secret store must be running (the
+ * walker and the verify agent share that server). Fallback, deprecated:
+ * `Email`/`Password` env keys — kept only so an un-migrated checkout still
+ * boots; it warns loudly. Neither path ever prints the password. */
+export async function iamCredential() {
+  try {
+    const list = await fetch(`${MCP_STORE_URL}/secrets`).then((r) => r.json());
+    const row = (list.secrets ?? []).find(
+      (s) => String(s.name ?? "").trim().toLowerCase() === IAM_SECRET_NAME.toLowerCase(),
+    );
+    if (row) {
+      const cred = await fetch(`${MCP_STORE_URL}/secrets/${row.id}`).then((r) => r.json());
+      if (cred.email && cred.password) {
+        return { email: cred.email, password: cred.password, source: "mcp-store" };
+      }
+    }
+  } catch {
+    // Store down or unreachable — fall through to the env fallback.
+  }
+  const cfg = walkerConfig();
+  if (cfg.email && cfg.password) {
+    console.warn(
+      `[walker] IAM credential from Email/Password env keys — deprecated. ` +
+        `Create the "${IAM_SECRET_NAME}" secret on the Lattice Secrets page instead.`,
+    );
+    return { email: cfg.email, password: cfg.password, source: "env" };
+  }
+  throw new Error(
+    `No IAM credential: MCP store has no "${IAM_SECRET_NAME}" secret (is the MCP server on ${MCP_STORE_URL}?) and no Email/Password env fallback.`,
+  );
+}
+
 function loadCache() {
   try {
     if (!existsSync(CACHE_FILE)) return;
@@ -71,7 +113,11 @@ function loadCache() {
 function persistCache() {
   writeFileSync(
     CACHE_FILE,
-    JSON.stringify({ access_token: cachedToken, expires_at: cachedExpiry }, null, 2),
+    JSON.stringify(
+      { access_token: cachedToken, expires_at: cachedExpiry },
+      null,
+      2,
+    ),
   );
 }
 loadCache();
@@ -80,10 +126,11 @@ loadCache();
 export async function freshAccessToken() {
   if (cachedToken && Date.now() / 1000 < cachedExpiry - 60) return cachedToken;
   const cfg = walkerConfig();
+  const cred = await iamCredential();
   const r = await fetch(cfg.iam + "/api/auth/login?tenant_id=" + cfg.tenant, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: cfg.email, password: cfg.password }),
+    body: JSON.stringify({ username: cred.email, password: cred.password }),
   });
   if (!r.ok) throw new Error(`login failed: ${r.status} ${await r.text()}`);
   const j = await r.json();
@@ -93,13 +140,42 @@ export async function freshAccessToken() {
   return cachedToken;
 }
 
+/** Decode the cached access_token's JWT payload (claims only, no signature
+ * verification — the walker just needs the user id to key UserPreference).
+ * Never log the token or the full claims; `currentUserId()` is the only
+ * intended consumer. */
+export function tokenClaims() {
+  if (!cachedToken) loadCache();
+  if (!cachedToken) return {};
+  try {
+    const payload = cachedToken.split(".")[1];
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+
+/** IAM user id from the token claims — the key UserPreference rows hang off
+ * (the walker's active-env preference lives there under v2.1). Verified
+ * 2026-10-02: the claim is `user_id` (`sub` carries the same value today;
+ * kept as fallback in case IAM rotates the claim name). Empty string when
+ * no cached token — callers treat it as "ask the user which env". */
+export function currentUserId() {
+  const claims = tokenClaims();
+  return claims.user_id ?? claims.sub ?? "";
+}
+
 /** Build a Blocks SDK client whose `accessToken` self-refreshes. */
 export async function walkerClient() {
   const { createBlocksClient } = await import("@seliseblocks/client");
   const cfg = walkerConfig();
   return createBlocksClient({
     apiUrl: cfg.apiUrl,
-    oidc: { clientId: cfg.clientId, url: cfg.oidcUrl, redirectUri: cfg.redirectUri },
+    oidc: {
+      clientId: cfg.clientId,
+      url: cfg.oidcUrl,
+      redirectUri: cfg.redirectUri,
+    },
     xBlocksKey: cfg.tenant,
     accessToken: freshAccessToken,
   });
