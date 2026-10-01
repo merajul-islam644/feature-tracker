@@ -73,14 +73,21 @@ if (missing.length > 0) {
 const apply = process.argv.includes("--apply");
 const dryRun = !apply;
 
-// ── Bearer token (same as backfill-env-scope.mjs) ──────────────────────────
+// ── Bearer token ───────────────────────────────────────────────────────────
+// Preferred: the browser session (verify/grab-token.mjs). Fallback: the
+// walker's programmatic IAM login (walker/auth.mjs — creds live in the
+// gitignored scripts/walker/.env.local, same source dev-walk uses). Both
+// produce a bearer for the same tenant (VITE_BLOCKS_KEY).
 let bearerToken;
+let tokenSource = "browser";
 try {
   const grabModule = await import("./verify/grab-token.mjs");
   bearerToken = await grabModule.getBearerToken();
-} catch (err) {
-  console.error(err.message);
-  process.exit(2);
+} catch {
+  console.error("[token] no browser cookie — using walker IAM login fallback");
+  tokenSource = "walker";
+  const walker = await import("./walker/auth.mjs");
+  bearerToken = await walker.freshAccessToken();
 }
 
 const { createBlocksClient } = await import("@seliseblocks/client");
@@ -89,6 +96,9 @@ const client = createBlocksClient({
   oidc: {
     clientId: process.env.VITE_BLOCKS_OIDC_CLIENT_ID,
     url: process.env.VITE_BLOCKS_OIDC_URL,
+    // Required outside a browser (the SDK throws without it in node) —
+    // same callback the app itself uses; walker/auth.mjs does the same.
+    redirectUri: "https://dbeegi.slsblx.com/login/callback",
   },
   xBlocksKey: process.env.VITE_BLOCKS_KEY,
   accessToken: () => Promise.resolve(bearerToken),
@@ -103,63 +113,64 @@ const SCHEMAS_DIR = join(
   "schemas",
 );
 
-function bothFields(schemaName) {
+// Field names straight from the authored schema JSONs — the source of truth
+// we pushed to the tenant, so these are guaranteed-valid projection columns.
+function schemaFieldNames(schemaName) {
   try {
     const json = JSON.parse(
       readFileSync(join(SCHEMAS_DIR, `${schemaName}.json`), "utf8"),
     );
-    return json.fields
-      .filter((f) => f.requiredOn === "Both")
-      .map((f) => f.name);
+    return json.fields.map((f) => f.name);
   } catch {
-    // Unknown schema — no echo list. Writes will carry only the patch, which
-    // the gateway may reject with VALIDATION_ERROR; the step reports it.
     return [];
   }
 }
 
-const BOTH = Object.fromEntries(
-  ["Feature", "Flow", "VerificationTarget", "Secret", "Issue", "SecretBinding"]
-    .map((name) => [name, bothFields(name)]),
-);
-
-// ── Collection refs ────────────────────────────────────────────────────────
-// `environmentId` MUST be in the selector: the gateway drops filter fields
-// that aren't selected, and the idempotency check reads the column back.
-const FIELDS = [
-  "id",
-  "ItemId",
-  "title",
-  "name",
-  "applicationName",
-  "url",
-  "projectId",
-  "envSlug",
-  "environmentId",
-  "featureId",
-  "status",
-  "enabled",
-  "detectedAt",
-  "bindingsJson",
-  "CreatedBy",
-  "CreatedDate",
-  "LastUpdatedDate",
+const ALL_STAMPED_SCHEMAS = [
+  "Project",
+  "Environment",
+  "VerificationCheck",
+  "Feature",
+  "Flow",
+  "VerificationTarget",
+  "Secret",
+  "Issue",
+  "SecretBinding",
 ];
 
-function collection(name, extraFields = []) {
-  return client.data.collection(name, {
-    fields: [...FIELDS, ...extraFields],
-  });
+// ── Collection refs ────────────────────────────────────────────────────────
+// Per-schema selectors — the gateway rejects a projection naming a field
+// another schema owns ("Field `title` does not exist on type `Project`"),
+// so every collection lists exactly its own columns. We select ALL of the
+// schema's fields (not just the ones we stamp): the gateway validates every
+// update against the live schema's required-on-update fields, and those
+// required columns must ride along on the echo (see echoPatch).
+const SELECTORS = Object.fromEntries(
+  ALL_STAMPED_SCHEMAS.map((name) => [name, ["ItemId", ...schemaFieldNames(name)]]),
+);
+
+function collection(name) {
+  return client.data.collection(name, { fields: SELECTORS[name] ?? ["ItemId"] });
 }
 
-async function listAll(name, extraFields = []) {
-  const raw = await collection(name, extraFields).list({
+async function listAll(name) {
+  const raw = await collection(name).list({
     pageNo: 1,
     pageSize: 500,
   });
   const envelope = raw && typeof raw === "object" ? raw : {};
-  return Array.isArray(envelope.data?.items) ? envelope.data.items :
-    Array.isArray(envelope.items) ? envelope.items : [];
+  // The SDK wraps lists GraphQL-style: { data: { get<Plural>: { items } } }.
+  // Walk one level under `data` and take the first object with an items
+  // array, so a gateway envelope change can't zero every collection again.
+  const d = envelope.data;
+  if (Array.isArray(d?.items)) return d.items;
+  if (Array.isArray(envelope.items)) return envelope.items;
+  if (d && typeof d === "object") {
+    for (const v of Object.values(d)) {
+      if (v && typeof v === "object" && Array.isArray(v.items)) return v.items;
+    }
+  }
+  return [];
 }
 
 const isBlank = (v) => v === null || v === undefined || v === "";
@@ -168,11 +179,19 @@ const norm = (v) => String(v ?? "").trim().toLowerCase();
 // Echo helper: a PATCH must carry every requiredOn:"Both" column or the
 // gateway rejects it. Merge the patch on top of the row's current values.
 function echoPatch(schemaName, row, patch) {
-  const out = { ...patch };
-  for (const f of BOTH[schemaName] ?? []) {
-    if (out[f] === undefined) out[f] = row[f] ?? "";
+  // The gateway validates every update against the LIVE schema's
+  // required-on-update fields — a set far broader than any local "Both" list
+  // (Feature needs status; Secret needs email+passwordMasked; Issue needs
+  // applicationName/url/category/severity/…). Missing any one of them fails
+  // the whole mutation with VALIDATION_ERROR while the SDK still resolves,
+  // so echo EVERY column the row read back with; the patch always wins.
+  void schemaName;
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (k === "ItemId") continue;
+    out[k] = v ?? "";
   }
-  return out;
+  return { ...out, ...patch };
 }
 
 // ── Builtin check catalog (mirrors src/data/issueTrackerConstants.ts) ──────
@@ -200,14 +219,6 @@ const CANONICAL_ENVS = [
 // ── Plan accumulator ───────────────────────────────────────────────────────
 const plan = [];
 let writes = 0;
-function add(schemaName, itemId, label, patch) {
-  writes++;
-  plan.push({ schemaName, itemId, label, patch });
-}
-async function write(entry, row) {
-  const c = collection(entry.schemaName);
-  await c.update(entry.itemId, echoPatch(entry.schemaName, row, entry.patch));
-}
 
 // ── Main ───────────────────────────────────────────────────────────────────
 console.log(
@@ -216,7 +227,7 @@ console.log(
 
 // Projects — customEnvs + envLabelOverrides ride along for step 3.
 process.stdout.write("Loading projects… ");
-const projects = await listAll("Project", ["customEnvs", "envLabelOverrides"]);
+const projects = await listAll("Project");
 console.log(`${projects.length} project(s)`);
 
 // Step 2+3 — Environment rows.
@@ -296,19 +307,18 @@ for (const p of projects) {
 
 // Newly created envs (from the plan) join the id map so step 5 can stamp
 // rows pointing at a custom env that didn't exist as a row until now.
-const envIdByKey = new Map(); // `${projectId}::${slug}` → ItemId
+// Placeholder values carry their env key so the apply phase can swap in
+// the real ItemId right after the create lands (single-pass apply).
+const envIdByKey = new Map(); // `${projectId}::${slug}` → ItemId | `<<envkey:…>>`
 for (const e of envRows) {
   if (e.projectId && e.slug) {
     envIdByKey.set(`${e.projectId}::${norm(e.slug)}`, e.ItemId);
   }
 }
-let nextCustomId = 1;
 for (const entry of plan) {
   if (entry.create !== "Environment") continue;
   const key = `${entry.payload.projectId}::${norm(entry.payload.slug)}`;
-  if (!envIdByKey.has(key)) {
-    envIdByKey.set(key, `<<new:${nextCustomId++}>> ${entry.label}`);
-  }
+  if (!envIdByKey.has(key)) envIdByKey.set(key, `<<envkey:${key}>>`);
 }
 
 // Step 4 — builtin checks per env.
@@ -375,22 +385,25 @@ function resolveEnvId(row) {
 
 const skipped = [];
 function stamp(schemaName, row, label) {
-  if (isBlank(row.environmentId) && !isBlank(row.projectId) && !isBlank(row.envSlug)) {
-    const envId = resolveEnvId(row);
-    if (!envId || envId.startsWith("<<new:")) {
-      if (!isBlank(row.projectId) && !envId) {
-        skipped.push(`  ? ${schemaName} "${label}" — no Environment row for (${row.projectId}, ${row.envSlug})`);
-      }
-      return; // <<new:>> ids resolve once --apply creates the env rows; re-run finishes
-    }
-    plan.push({
-      schemaName,
-      itemId: row.ItemId,
-      label,
-      patch: { environmentId: envId },
-      row,
-    });
+  if (!isBlank(row.environmentId) || isBlank(row.projectId) || isBlank(row.envSlug)) {
+    return;
   }
+  const envId = resolveEnvId(row);
+  if (!envId) {
+    skipped.push(
+      `  ? ${schemaName} "${label}" — no Environment row for (${row.projectId}, ${row.envSlug})`,
+    );
+    return;
+  }
+  // envId may be a `<<envkey:…>>` placeholder for an env this same run is
+  // about to create — the apply phase resolves it to the real ItemId.
+  plan.push({
+    schemaName,
+    itemId: row.ItemId,
+    label,
+    patch: { environmentId: envId },
+    row,
+  });
 }
 
 features.forEach((f) => stamp("Feature", f, f.title ?? f.ItemId));
@@ -402,8 +415,12 @@ const featureEnvById = new Map(
 for (const fl of flows) {
   if (!isBlank(fl.environmentId)) continue;
   const parentEnv = featureEnvById.get(fl.featureId);
-  if (isBlank(parentEnv) || String(parentEnv).startsWith("<<new:")) {
-    if (!fl.featureId) skipped.push(`  ? Flow "${fl.title ?? fl.ItemId}" — no featureId`);
+  if (!parentEnv) {
+    skipped.push(
+      fl.featureId
+        ? `  ? Flow "${fl.title ?? fl.ItemId}" — parent feature has no resolvable env`
+        : `  ? Flow "${fl.title ?? fl.ItemId}" — no featureId`,
+    );
     continue;
   }
   plan.push({
@@ -482,31 +499,111 @@ console.log(`\nWriting…`);
 let ok = 0;
 let failed = 0;
 
+// Pull the new ItemId out of an insert envelope
+// ({ data: { insert<Schema>: { acknowledged, itemId, … } } }).
+function extractItemId(response) {
+  const d = response?.data;
+  if (d && typeof d === "object") {
+    for (const v of Object.values(d)) {
+      if (v && typeof v === "object" && typeof v.itemId === "string") {
+        return v.itemId;
+      }
+    }
+  }
+  return null;
+}
+
+const envKeyOf = (payload) => `${payload.projectId}::${norm(payload.slug)}`;
+const createdEnvIds = new Map(); // env key → real ItemId, filled as creates land
+const patchResponses = [];
+
 // Creates first — patches may point at env rows that don't exist yet.
 for (const entry of creates) {
   try {
-    await collection(entry.create).create(entry.payload);
+    const resp = await collection(entry.create).create(entry.payload);
+    if (entry.create === "Environment") {
+      const itemId = extractItemId(resp);
+      if (itemId) createdEnvIds.set(envKeyOf(entry.payload), itemId);
+    }
     ok++;
   } catch (err) {
     failed++;
     console.error(`  ✗ create ${entry.create} "${entry.label}": ${err.message}`);
   }
 }
+
+// Swap `<<envkey:…>>` placeholders for real ids — env rows this run just
+// created win; rows that already existed are in envIdByKey.
+function resolveVal(v) {
+  if (typeof v === "string" && v.startsWith("<<envkey:") && v.endsWith(">>")) {
+    const key = v.slice("<<envkey:".length, -2);
+    return createdEnvIds.get(key) ?? envIdByKey.get(key) ?? null;
+  }
+  return v;
+}
+
 for (const entry of patches) {
   try {
-    await write(entry, entry.row);
+    const patch = Object.fromEntries(
+      Object.entries(entry.patch).map(([k, v]) => [k, resolveVal(v)]),
+    );
+    if (Object.values(patch).some((v) => v === null || v === undefined)) {
+      failed++;
+      console.error(
+        `  ✗ ${entry.schemaName}/${entry.itemId} (${entry.label}): env row still missing — re-run the script`,
+      );
+      continue;
+    }
+    const resp = await collection(entry.schemaName).update(
+      entry.itemId,
+      echoPatch(entry.schemaName, entry.row, patch),
+    );
     ok++;
+    // The gateway reports per-mutation outcome inside the payload
+    // (acknowledged/message/totalImpactedData) WITHOUT a GraphQL error, so
+    // the SDK resolves silently even when nothing was written. Capture the
+    // raw shapes for the diagnosis section below.
+    const d = resp?.data;
+    const payload =
+      d && typeof d === "object"
+        ? Object.values(d).find((v) => v && typeof v === "object")
+        : null;
+    patchResponses.push({
+      schemaName: entry.schemaName,
+      itemId: entry.itemId,
+      payload,
+      raw: resp,
+    });
   } catch (err) {
     failed++;
     console.error(`  ✗ ${entry.schemaName}/${entry.itemId} (${entry.label}): ${err.message}`);
   }
 }
 
-console.log(`\nDone. OK: ${ok}, Failed: ${failed}`);
-if (String(plan.some((p) => p.patch?.environmentId)?.patch?.environmentId ?? "").startsWith("<<new:")) {
+// Per-schema ack/impact tally + raw payload of any suspicious write, so a
+// silent no-op (ack=true but 0 rows impacted, or ack=false) is visible.
+const tally = {};
+for (const r of patchResponses) {
+  const t = (tally[r.schemaName] ??= { ack: 0, notAck: 0, zeroImpact: 0, sample: null });
+  if (r.payload?.acknowledged === true) t.ack++;
+  else t.notAck++;
+  if (Number(r.payload?.totalImpactedData ?? 0) === 0) t.zeroImpact++;
+  if (!t.sample && (r.payload?.acknowledged !== true || Number(r.payload?.totalImpactedData ?? 0) === 0)) {
+    t.sample = r;
+  }
+}
+for (const [schema, t] of Object.entries(tally)) {
   console.log(
-    "Some patches referenced not-yet-created env rows — re-run the script once more to finish them.",
+    `  ${schema}: ack=${t.ack} notAck=${t.notAck} zeroImpact=${t.zeroImpact}`,
   );
+  if (t.sample) {
+    console.log(`    sample: ${JSON.stringify(t.sample.raw ?? t.sample)?.slice(0, 600)}`);
+  }
+}
+
+console.log(`\nDone. OK: ${ok}, Failed: ${failed}`);
+if (failed > 0) {
+  console.log("Fix the failures above and re-run — the script is idempotent.");
 }
 console.log("");
 process.exit(failed > 0 ? 1 : 0);
