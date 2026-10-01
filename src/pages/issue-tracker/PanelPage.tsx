@@ -13,6 +13,7 @@ import {
   RunVerificationActions,
 } from "@/components/issue-tracker/IssueTrackerHeader";
 import { VerificationPanel } from "@/components/issue-tracker/VerificationPanel";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
@@ -34,13 +35,16 @@ export function PanelPage() {
     <div className="space-y-6">
       <BackToProjectsLink />
 
-      {/* Title row: H1 on the left, Run verification CTA on the right.
-          Same flex alignment as other section headers so the button
+      {/* Title row: H1 + env chip on the left, Run verification CTA on the
+          right. Same flex alignment as other section headers so the button
           reads as belonging to this page (not as a stuck-on toolbar). */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-xl font-semibold text-foreground">
-          {t("issueTracker.panel.title", "Panel")}
-        </h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-foreground">
+            {t("issueTracker.panel.title", "Panel")}
+          </h1>
+          <EnvHeaderChip />
+        </div>
         <RunVerificationActions
           runStatus={run.status}
           loading={loading.run}

@@ -1,47 +1,78 @@
 // Verification Scopes sub-page. Hosts the `<VerificationScope>` card
-// (which checkboxes run + device picker) and reads `toggleScope` /
-// `setDevice` from the same store used by the parent page.
+// (which checkboxes run + device picker), reading the env's check rows
+// and the toggle/add/edit/delete callbacks from the same store the
+// parent page uses.
 //
-// In addition to the shipped catalog (`verificationChecks`), users
-// can define their own scopes via `useCustomVerificationChecks` —
-// these live in localStorage and render in the "Custom" section of
-// the card. They participate in the same scope toggle list, so a
-// selected custom scope reaches the AI in the next run alongside
-// any built-ins the user enabled.
+// Under schema v2.1 the selection is per-environment: rows come from
+// `blx_VerificationChecks` via `useVerificationChecks` (inside the
+// store), keyed by the active env's row identity. Toggling writes the
+// row's enabled flag — no more per-user localStorage catalog.
+//
+// Deployment-gap / load-window fallback: when the store reports ready
+// but the row list is empty (schema undeployed, or the env genuinely
+// has no rows), the shipped catalog renders as a read-only view with
+// the recommended checks marked on — matching what a run would use —
+// so the page never lies about the selection while writes are
+// impossible.
 
+import { useMemo } from "react";
 import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
 import { VerificationScope } from "@/components/issue-tracker/VerificationScope";
 import { verificationChecks } from "@/data/issueTrackerConstants";
-import { useCustomVerificationChecks } from "@/hooks/useCustomVerificationChecks";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useT } from "@/lib/blocks/i18n";
+import type { EnvVerificationCheck } from "@/lib/blocks/data";
 
 export function ScopePage() {
   const t = useT();
   const tracker = useIssueTrackerStore();
-  const { scope, toggleScope, device, setDevice } = tracker;
   const {
-    customChecks,
+    checks,
+    checksReady,
+    checksReadOnly,
+    toggleScope,
+    device,
+    setDevice,
     addCustomCheck,
     updateCustomCheck,
     deleteCustomCheck,
-  } = useCustomVerificationChecks();
+  } = tracker;
 
-  // Built-in IDs merged with custom ones — `Select all` and `Clear`
-  // both need the full universe, not just the shipped set.
-  const allIds = [
-    ...verificationChecks.map((c) => c.id),
-    ...customChecks.map((c) => c.id),
-  ];
+  // Deployment-gap fallback: pseudo rows built from the shipped catalog,
+  // enabled = recommended (the same defaults the v2.1 seeds wrote).
+  // Toggles are disabled in this state — there's no row to PATCH.
+  const displayChecks = useMemo<EnvVerificationCheck[]>(() => {
+    if (checks.length > 0) return checks;
+    return verificationChecks.map((c) => ({
+      id: c.id,
+      projectId: "",
+      environmentId: "",
+      source: "builtin" as const,
+      checkId: c.id,
+      label: c.label,
+      description: c.description,
+      recommended: c.recommended,
+      enabled: c.recommended,
+      createdAt: "",
+      updatedAt: "",
+    }));
+  }, [checks]);
+  const cloudRows = checks.length > 0;
 
   return (
     <div className="space-y-6">
       <BackToProjectsLink />
 
       <div>
-        <h1 className="text-xl font-semibold text-foreground">
-          {t("nav.issueTracker.scope", "Scopes")}
-        </h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-foreground">
+            {t("nav.issueTracker.scope", "Scopes")}
+          </h1>
+          <EnvHeaderChip />
+        </div>
         <p className="mt-1 text-sm text-muted-foreground">
           {t(
             "issueTracker.scope.description",
@@ -50,25 +81,39 @@ export function ScopePage() {
         </p>
       </div>
 
-      <VerificationScope
-        checks={verificationChecks}
-        customChecks={customChecks}
-        selectedIds={scope}
-        onToggle={(id) => toggleScope(id)}
-        onSelectAll={() => {
-          allIds.forEach((id) => {
-            if (!scope.includes(id)) toggleScope(id);
-          });
-        }}
-        onClear={() => {
-          scope.forEach((id) => toggleScope(id));
-        }}
-        device={device}
-        onDeviceChange={setDevice}
-        onAddCustom={addCustomCheck}
-        onUpdateCustom={updateCustomCheck}
-        onDeleteCustom={deleteCustomCheck}
-      />
+      {!checksReady ? (
+        <Card>
+          <CardHeader>
+            <Skeleton className="h-5 w-40" />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+          </CardContent>
+        </Card>
+      ) : (
+        <VerificationScope
+          checks={displayChecks}
+          readOnly={checksReadOnly || !cloudRows}
+          onToggle={(id) => toggleScope(id)}
+          onSelectAll={() => {
+            displayChecks.forEach((row) => {
+              if (!row.enabled) toggleScope(row.checkId);
+            });
+          }}
+          onClear={() => {
+            displayChecks.forEach((row) => {
+              if (row.enabled) toggleScope(row.checkId);
+            });
+          }}
+          device={device}
+          onDeviceChange={setDevice}
+          onAddCustom={addCustomCheck}
+          onUpdateCustom={updateCustomCheck}
+          onDeleteCustom={deleteCustomCheck}
+        />
+      )}
     </div>
   );
 }

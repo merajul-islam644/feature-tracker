@@ -56,8 +56,9 @@ export function EnvSync() {
   // Only the env pair matters for the dependency diff — re-running the
   // effect on every pathname change would still work, but would also
   // re-fire when the user navigates between sibling sub-routes on the
-  // same env (no-op write, plus a `useActiveEnvSelection` mutation
-  // round-trip). The pair is the actual change unit.
+  // same env (no-op mirror write; the preference write in
+  // ActiveEnvContext reconciles by id and skips identical values). The
+  // pair is the actual change unit.
   const next = readEnvFromPath(pathname);
   const nextKey = next ? `${next.projectId}/${next.envSlug}` : "";
 

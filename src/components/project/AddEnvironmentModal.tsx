@@ -1,14 +1,27 @@
-// Modal for adding a per-project custom environment. Opened from the
+// Modal for adding a per-project environment. Opened from the
 // `Add Environment` button on `/projects`. The modal collects a target
-// project, an env slug (URL path segment), a display label, and a color,
-// then dispatches `useAddProjectEnv`. The env appears as a new chip on
-// only that project's card — not on any other project — per the
-// per-project opt-in design.
+// project, an env slug (URL path segment), a display label, and a
+// color, then dispatches `useCreateEnvironment`, which inserts a
+// `blx_Environments` row and seeds its verification checks. The env
+// appears as a new chip on only that project's card — not on any other
+// project — per the per-project opt-in design.
+//
+// There is no Kind picker (user asked, 2026-10-02: drop the dropdown) —
+// the kind is INFERRED from the slug: a canonical slug (dev/stg/prod/
+// uat) names its own kind, anything else is custom. Kind still matters
+// beyond the badge: only `kind: "dev"` envs surface the Add Feature CTA
+// (`isDevEnv` in FeaturesPage / ProjectDetailPage), so slug "dev" is
+// the one way a workspace gets a feature-authoring env. Typing a
+// canonical slug pre-fills the display label with the kind's FULL form
+// ("Development", …) — env page headers render the row label verbatim,
+// so canonical rows must carry the long name (the card chips derive
+// their short form from the kind). The reserved-slug rule bends to let
+// `slug === kind` through (see `validateEnvSlug`).
 //
 // Validation runs locally (slug format + reserved + duplicate within the
-// target project's current env list); on server success the project query
-// cache is invalidated by `useUpdateProject` inside the mutation, so the
-// card refreshes without an explicit refetch.
+// target project's current env rows); the mutation re-checks uniqueness
+// against a fresh server list before the insert, so a stale local list
+// can't produce a duplicate slug.
 
 import { useMemo, useState } from "react";
 import {
@@ -24,12 +37,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ColorPicker } from "@/components/ui/color-picker";
-import { useAddProjectEnv, useProjects, useProject } from "@/lib/blocks/hooks";
-import { useAuth } from "@/hooks/useAuth";
+import {
+  useCreateEnvironment,
+  useEnvironments,
+  useProjects,
+} from "@/lib/blocks/hooks";
 import { useToast } from "@/hooks/useToast";
 import { useT } from "@/lib/blocks/i18n";
 import { CANONICAL_ENV_SLUGS, validateEnvSlug } from "@/lib/validation";
+import type { EnvironmentKind } from "@/lib/blocks/data";
 import { envChipStyle } from "@/components/ui/color-picker";
+// Event-time reads only (inside the kind handler) — this modal sits in an
+// established import cycle with ProjectDetailPage, and touching its module
+// constants at module-eval time would hit the TDZ.
+import {
+  PROJECT_ENV_META,
+  type CanonicalEnvSlug,
+} from "@/pages/ProjectDetailPage";
 
 interface AddEnvironmentModalProps {
   open: boolean;
@@ -40,10 +64,8 @@ export function AddEnvironmentModal({
   open,
   onClose,
 }: AddEnvironmentModalProps) {
-  const { currentUser } = useAuth();
-  const userId = currentUser?.id ?? "";
   const projectsQuery = useProjects();
-  const addEnv = useAddProjectEnv();
+  const addEnv = useCreateEnvironment();
   const toast = useToast();
   const t = useT();
 
@@ -58,18 +80,24 @@ export function AddEnvironmentModal({
   }>({});
   const [submitting, setSubmitting] = useState(false);
 
-  // The target project is needed both to populate the existing-env list
-  // (for duplicate validation) and to show in the success toast. We look
-  // it up by id; since the user picked it from the dropdown, it will
-  // always resolve to a Project.
-  const targetProjectId = projectId;
-  const targetProjectQuery = useProject(targetProjectId || undefined);
-  const targetProject = targetProjectQuery.data;
+  // Kind is inferred, not picked: canonical slug → that kind, anything
+  // else is custom. The cast is safe — a canonical slug IS an
+  // EnvironmentKind by definition.
+  const trimmedSlug = slug.trim().toLowerCase();
+  const kind: EnvironmentKind = (
+    CANONICAL_ENV_SLUGS as readonly string[]
+  ).includes(trimmedSlug)
+    ? (trimmedSlug as EnvironmentKind)
+    : "custom";
+
+  // The target project's env rows power duplicate detection. Canonical
+  // slugs are rows too under v2.1, so the row list alone covers the
+  // reserved set — no need to union a hardcoded list into the check.
+  const envRowsQuery = useEnvironments(projectId || null);
 
   const existingSlugs = useMemo<string[]>(() => {
-    const fromCustom = targetProject?.customEnvs?.map((e) => e.slug) ?? [];
-    return [...CANONICAL_ENV_SLUGS, ...fromCustom];
-  }, [targetProject]);
+    return (envRowsQuery.data ?? []).map((e) => e.slug);
+  }, [envRowsQuery.data]);
 
   const projects = projectsQuery.data ?? [];
 
@@ -103,7 +131,9 @@ export function AddEnvironmentModal({
       next.label = t("addEnvironment.labelRequired", "Label is required");
     }
 
-    const slugError = validateEnvSlug(slug, existingSlugs);
+    // Canonical slugs stay reserved EXCEPT when the slug names the chosen
+    // kind — creating a dev-kind env with slug "dev" is the whole point.
+    const slugError = validateEnvSlug(slug, existingSlugs, kind);
     if (slugError) {
       // Surface reserved-slug error with the cleaner key reserved message
       // so the runtime can show a localised message instead of the raw
@@ -144,7 +174,13 @@ export function AddEnvironmentModal({
         label: label.trim(),
         color,
       };
-      await addEnv.mutateAsync({ projectId, env });
+      await addEnv.mutateAsync({
+        projectId,
+        slug: env.slug,
+        label: env.label,
+        color: env.color,
+        kind,
+      });
       const projectName =
         projects.find((p) => p.id === projectId)?.name ?? projectId;
       toast.success(
@@ -247,6 +283,31 @@ export function AddEnvironmentModal({
                   value={slug}
                   onChange={(e) => {
                     setSlug(e.target.value);
+                    // Canonical slug → pre-fill the display label with the
+                    // kind's FULL form ("Development", …). Fills an empty
+                    // label or a previous auto-fill (any canonical label),
+                    // never a hand-typed one. PROJECT_ENV_META is read
+                    // here — event time — not at module eval (TDZ note on
+                    // the import above).
+                    const nextSlug = e.target.value.trim().toLowerCase();
+                    if (
+                      (CANONICAL_ENV_SLUGS as readonly string[]).includes(
+                        nextSlug,
+                      )
+                    ) {
+                      const fullLabel =
+                        PROJECT_ENV_META[nextSlug as CanonicalEnvSlug]?.label;
+                      const canonicalLabels = Object.values(
+                        PROJECT_ENV_META,
+                      ).map((m) => m.label);
+                      if (
+                        fullLabel &&
+                        (!label.trim() ||
+                          canonicalLabels.includes(label.trim()))
+                      ) {
+                        setLabel(fullLabel);
+                      }
+                    }
                     if (errors.slug) {
                       setErrors((prev) => {
                         const { slug: _drop, ...rest } = prev;
@@ -260,9 +321,25 @@ export function AddEnvironmentModal({
                   spellCheck={false}
                   maxLength={32}
                 />
-                {targetProject && slug.trim() && !errors.slug && (
+                {projectId && slug.trim() && !errors.slug && (
                   <p className="text-xs text-muted-foreground">
-                    Path: <code>/projects/{targetProject.id}/{slug.trim().toLowerCase()}</code>
+                    Path: <code>/projects/{projectId}/{slug.trim().toLowerCase()}</code>
+                  </p>
+                )}
+                {/* Kind now rides on the slug (no picker) — surface what the
+                    slug implies, most importantly that "dev" unlocks feature
+                    authoring. Hidden for custom slugs: nothing to announce. */}
+                {slug.trim() && kind !== "custom" && (
+                  <p className="text-xs text-muted-foreground">
+                    {kind === "dev"
+                      ? t(
+                          "addEnvironment.kindDevHelp",
+                          "Feature authoring happens on dev envs.",
+                        )
+                      : t(
+                          "addEnvironment.kindCanonicalHelp",
+                          "Reserved slug — badge follows it.",
+                        )}
                   </p>
                 )}
               </div>

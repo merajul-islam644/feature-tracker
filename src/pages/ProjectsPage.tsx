@@ -7,7 +7,8 @@ import { ProjectEmptyState } from "@/components/project/ProjectEmptyState";
 import { ViewToggle } from "@/components/project/ViewToggle";
 import { CreateProjectModal } from "@/components/project/CreateProjectModal";
 import { AddEnvironmentModal } from "@/components/project/AddEnvironmentModal";
-import { useProjects, useProjectsDevCounts } from "@/lib/blocks/hooks";
+import { useProjects, useProjectsDevCounts, useAllEnvironments } from "@/lib/blocks/hooks";
+import type { Environment } from "@/lib/blocks/data";
 import { useIsRole } from "@/hooks/useAuth";
 import { useT } from "@/lib/blocks/i18n";
 import { useProjectsViewStore } from "@/store/projectsViewStore";
@@ -53,6 +54,24 @@ export function ProjectsPage() {
   // fetching on mount. Until it resolves, fall back to an empty map
   // so `counts.get(id)?.features ?? 0` reads as 0 in both surfaces.
   const countsMap = counts ?? new Map<string, { features: number; flows: number }>();
+  // One workspace-wide env read for the whole page instead of one read
+  // per card/row (the N+1 the chips' internal query used to cost).
+  // Grouped by project id and handed down through both surfaces into
+  // EnvironmentChips' `envs` override, which also switches the chips'
+  // internal per-project read off. Every project gets an entry — an
+  // empty array for env-less projects — so the override always wins and
+  // no component falls back to its own query.
+  const { data: allEnvRows } = useAllEnvironments();
+  const envsByProject = useMemo(() => {
+    const map = new Map<string, Environment[]>();
+    for (const p of allProjects) map.set(p.id, []);
+    // useAllEnvironments returns rows globally sorted by `order`, so a
+    // plain grouping pass keeps each project's chips in display order.
+    for (const env of allEnvRows ?? []) {
+      map.get(env.projectId)?.push(env);
+    }
+    return map;
+  }, [allProjects, allEnvRows]);
   // Loading is "true" while either the project list or the counts are
   // still in flight. Card/row surfaces both depend on counts, so the
   // skeleton must wait until both are ready.
@@ -190,9 +209,13 @@ export function ProjectsPage() {
           </button>
         </div>
       ) : viewMode === "list" ? (
-        <ProjectListRows projects={list} counts={countsMap} />
+        <ProjectListRows
+          projects={list}
+          counts={countsMap}
+          envsByProject={envsByProject}
+        />
       ) : (
-        <ProjectList projects={list} counts={countsMap} />
+        <ProjectList projects={list} counts={countsMap} envsByProject={envsByProject} />
       )}
 
       <CreateProjectModal

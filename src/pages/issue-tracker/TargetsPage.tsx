@@ -11,6 +11,7 @@ import { useState } from "react";
 import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
 import { validateUrl } from "@/components/issue-tracker/UrlInput";
 import { VerificationTargets } from "@/components/issue-tracker/VerificationTargets";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
@@ -56,9 +57,12 @@ export function TargetsPage() {
       <BackToProjectsLink />
 
       <div>
-        <h1 className="text-xl font-semibold text-foreground">
-          {t("nav.issueTracker.targets", "Targets")}
-        </h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-foreground">
+            {t("nav.issueTracker.targets", "Targets")}
+          </h1>
+          <EnvHeaderChip />
+        </div>
         <p className="mt-1 text-sm text-muted-foreground">
           {t(
             "issueTracker.targets.description",

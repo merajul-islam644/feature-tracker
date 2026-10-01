@@ -16,13 +16,28 @@ type ChatPanelProps = ComponentProps<typeof ChatPanel>;
 export interface ChatLauncherProps extends ChatPanelProps {
   /** Current verification progress percentage (0–100) when active. */
   runProgressPct?: number;
+  /** Reported on every open/close so owners can react (the app-wide
+   *  store gates its chat reads on the panel actually being open —
+   *  page-scoped fetching). */
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function ChatLauncher({
   runProgressPct,
+  onOpenChange,
   ...props
 }: ChatLauncherProps) {
   const [open, setOpen] = useState(false);
+
+  // Reports before flipping so owners see the NEW state synchronously.
+  // Kept outside the `setOpen` updater on purpose — React may invoke
+  // updaters twice in dev StrictMode, and side effects don't belong in
+  // them anyway.
+  const toggle = () => {
+    const next = !open;
+    onOpenChange?.(next);
+    setOpen(next);
+  };
 
   // Escape closes while open — matches the sheet/drawer convention
   // without yanking focus (the input keeps its own key handling).
@@ -38,6 +53,7 @@ export function ChatLauncher({
       );
       if (layerAbove) return;
       setOpen(false);
+      onOpenChange?.(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -64,7 +80,7 @@ export function ChatLauncher({
       )}
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-label={open ? "Close AI Assistant chat" : "Open AI Assistant chat"}

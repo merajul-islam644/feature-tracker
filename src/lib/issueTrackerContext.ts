@@ -22,7 +22,6 @@ import type {
   VerificationRun,
   VerificationTarget,
 } from "@/types/issue-tracker";
-import type { CustomVerificationCheck } from "@/hooks/useCustomVerificationChecks";
 import type { Project } from "@/lib/blocks/data";
 import { verificationChecks } from "@/data/issueTrackerConstants";
 
@@ -132,7 +131,10 @@ export function buildIssueTrackerContext(input: {
   run: VerificationRun;
   filters: IssueFilters;
   projects?: Project[];
-  customChecks?: CustomVerificationCheck[];
+  // Per-env check labels from `blx_Environments`' verification-check
+  // rows (schema v2.1), indexed by checkId. Custom check ids (`custom_*`)
+  // resolve here; built-in ids fall back to the shipped catalog labels.
+  checkLabels?: Record<string, string>;
   // (projectId, envSlug) the Issue Tracker is currently scoped to. The
   // snapshot reports it so the assistant can speak about the user's
   // current scope without asking. Null = outside a project env.
@@ -153,18 +155,18 @@ export function buildIssueTrackerContext(input: {
     filters,
     projects,
     activeEnv = null,
-    customChecks = [],
+    checkLabels = {},
     boundTargetsBySecretId = {},
   } = input;
-  // Merge built-in + custom labels so the AI can answer "what does
+  // Merge built-in + per-env row labels so the AI can answer "what does
   // this scope do?" for any id the user has enabled, including
   // custom_*. Built-in wins on collision (shouldn't happen — custom
   // IDs are slug-prefixed `custom_`).
   const labelMap: Record<string, string> = Object.fromEntries(
     verificationChecks.map((c) => [c.id, c.label]),
   );
-  for (const c of customChecks) {
-    labelMap[c.id] = c.label;
+  for (const [id, label] of Object.entries(checkLabels)) {
+    labelMap[id] = label;
   }
 
   // Drop the verbose `evidence` payload from issues — the assistant
@@ -232,7 +234,7 @@ export function buildIssueTrackerContext(input: {
       enabled: scope,
       available: [
         ...verificationChecks.map((c) => c.id),
-        ...customChecks.map((c) => c.id),
+        ...Object.keys(checkLabels),
       ],
       labels: labelMap,
     },

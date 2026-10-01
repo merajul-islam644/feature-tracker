@@ -84,9 +84,11 @@ import {
   type CloudFlow,
   type CloudFlowComment,
   type CloudHiddenAnnouncement,
+  type CloudIssue,
   type CloudMailMessage,
   type CloudMemberProject,
   type CloudProject,
+  type CloudSecret,
   type CloudSecretBinding,
   type CloudTestCase,
   type CloudUserAiConfig,
@@ -95,6 +97,7 @@ import {
   type CloudUserPreference,
   type CloudUserProfile,
   type CloudVerificationCheck,
+  type CloudVerificationTarget,
   type DirectMessage,
   type Environment,
   type EnvironmentKind,
@@ -476,6 +479,10 @@ export const queryKeys = {
   // Environments (schema v2.1) — keyed per-project: every env page renders
   // one project's env rows, and a project switch must not share stale rows.
   environments: (projectId: string) => ["environments", projectId] as const,
+  /** Every Environment row the account can read — no project scoping.
+   *  Used by the active-env resolver (UserPreference.activeEnvironmentId
+   *  → {projectId, envSlug}), which can't know the project up front. */
+  allEnvironments: () => ["environments", "__all__"] as const,
   // Env-scoped verification checks — keyed per-(project, environment) since
   // the Scope page reads exactly one env's rows. See `useVerificationChecks`.
   verificationChecks: (projectId: string, environmentId: string) =>
@@ -497,36 +504,50 @@ export const queryKeys = {
 
 // --- Reads ------------------------------------------------------------------
 
-export function useProjects(): UseQueryResult<Project[]> {
+// The single project-list read. Both `useProjects` and `useAliveScope`
+// go through this so the workspace listing crosses the wire AT MOST once
+// per stale window — TanStack dedupes concurrent `fetchQuery`/`useQuery`
+// calls that share a key, instead of the two hooks each issuing their
+// own differently-sized list (the old `pageSize: 100` + `pageSize: 500`
+// double read).
+export function projectsListQueryFn() {
+  return async () => {
+    // Workspace-wide listing — testers need to browse every project in
+    // the workspace (read-only). Mutating hooks still gate on `isTester`
+    // so they can't author/delete. We deliberately dropped
+    // `createdByFilter(userId)` here: with it on, a tester who didn't
+    // author the seed projects saw an empty workspace.
+    const raw = await projectsCollection.list({
+      pageNo: 1,
+      pageSize: 500,
+      // Server expects sort direction as a numeric (`-1` desc, `1` asc);
+      // a string direction (`"desc"`) triggers "Unexpected Execution Error".
+      sort: { LastUpdatedDate: -1 },
+    });
+    return unwrapPaged<unknown>(raw).items.map((p) =>
+      toProject(p as Parameters<typeof toProject>[0]),
+    );
+  };
+}
+
+export function useProjects(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<Project[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   return useQuery({
     queryKey: queryKeys.projects(userId),
-    enabled: Boolean(userId),
+    // Page-scoped callers (the issue-tracker store fetches the list only
+    // while the assistant is open) hold the read until they need it.
+    enabled: Boolean(userId) && (opts?.enabled ?? true),
     // 60 s matches `useAliveScope` — they cover the same row set with
-    // different page sizes, so a single stale window keeps the two
-    // calls in lockstep (one read goes fresh, then the next read in
-    // either hook is a cache hit until 60 s elapse). Project
+    // the same shared read now, so a single stale window keeps every
+    // consumer in lockstep (one read goes fresh, the next read in any
+    // consumer is a cache hit until 60 s elapse). Project
     // create/update/delete mutations invalidate the key directly, so
     // the user always sees fresh state after a write.
     staleTime: 60_000,
-    queryFn: async () => {
-      // Workspace-wide listing — testers need to browse every project in
-      // the workspace (read-only). Mutating hooks still gate on `isTester`
-      // so they can't author/delete. We deliberately dropped
-      // `createdByFilter(userId)` here: with it on, a tester who didn't
-      // author the seed projects saw an empty workspace.
-      const raw = await projectsCollection.list({
-        pageNo: 1,
-        pageSize: 100,
-        // Server expects sort direction as a numeric (`-1` desc, `1` asc);
-        // a string direction (`"desc"`) triggers "Unexpected Execution Error".
-        sort: { LastUpdatedDate: -1 },
-      });
-      return unwrapPaged<unknown>(raw).items.map((p) =>
-        toProject(p as Parameters<typeof toProject>[0]),
-      );
-    },
+    queryFn: projectsListQueryFn(),
   });
 }
 
@@ -648,6 +669,56 @@ export function useFeatureFlows(
 // `useProjectFlows` — the gateway filter parser drops operator objects
 // like `{ in: [...] }`, so `projectId: { in: [...] }` is silently ignored
 // and the query would return empty.
+// Shared workspace-wide feature/flow candidate lists for the dashboard
+// derivatives. Four consumers read every feature row (and three read
+// every flow row) only to narrow/bucket in memory — the gateway's flat
+// filter parser can't express the alive-set predicates. One shared
+// cache entry per table means a cold dashboard or /projects mount costs
+// ONE read per table instead of up to four at differing pageSize caps
+// (was 500/200/1000 for features). Sorted CreatedDate desc so the
+// Recent cards can slice off the top; counting consumers ignore order.
+// Keyed under `queryKeys.dashboard(userId)` so the existing dashboard
+// invalidations (feature/flow/project create/update/delete) refresh
+// both entries together with aliveScope/totals/devCounts — no freshness
+// regression versus the per-hook reads they replace.
+function workspaceFeaturesQuery(userId: string) {
+  return {
+    queryKey: [...queryKeys.dashboard(userId), "workspaceFeatures"] as const,
+    queryFn: async () => {
+      const raw = await featuresCollection.list({
+        pageNo: 1,
+        pageSize: 1000,
+        sort: { CreatedDate: -1 },
+      });
+      return unwrapPaged<{
+        ItemId: string;
+        projectId?: string;
+        envSlug?: string;
+      }>(raw).items;
+    },
+    staleTime: 60_000,
+  };
+}
+
+function workspaceFlowsQuery(userId: string) {
+  return {
+    queryKey: [...queryKeys.dashboard(userId), "workspaceFlows"] as const,
+    queryFn: async () => {
+      const raw = await flowsCollection.list({
+        pageNo: 1,
+        pageSize: 200,
+        sort: { CreatedDate: -1 },
+      });
+      return unwrapPaged<{
+        ItemId: string;
+        featureId?: string;
+        envSlug?: string;
+      }>(raw).items;
+    },
+    staleTime: 60_000,
+  };
+}
+
 // Most recent features across the workspace, narrowed to alive projects
 // so a deleted project's features stop appearing in the dashboard.
 // Mirrors `useRecentFlows` (just below) — same scope gate, same sort,
@@ -656,6 +727,7 @@ export function useFeatureFlows(
 export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
     queryKey: [...queryKeys.dashboard(userId), "features", limit] as const,
@@ -664,23 +736,12 @@ export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
       const scope = scopeQuery.data;
       if (!scope) return [];
       if (scope.projectIds.size === 0) return [];
-      const featuresRaw = await featuresCollection.list({
-        // Candidate pool: 200 most-recent features, narrowed client-side
-        // to `scope.projectIds` (alive projects). Lowered from 1000 to
-        // 200 — a typical workspace has well under 200 features; the
-        // dashboard "Recent Features" card only displays `limit` rows
-        // (default 5), so 200 candidates gives ample headroom without
-        // pulling a thousand-row response just to discard 99.5% of it.
-        // Going wider would mask genuine "the user's recent N is not
-        // in the first 200" bugs by silently truncating — same
-        // rationale as the previous 1000 bound.
-        pageNo: 1,
-        pageSize: 200,
-        sort: { CreatedDate: -1 },
-      });
-      return unwrapPaged<unknown>(featuresRaw)
-        .items.filter((f) => {
-          const pid = (f as { projectId?: string }).projectId;
+      const featureItems = await qc.fetchQuery(
+        workspaceFeaturesQuery(userId),
+      );
+      return featureItems
+        .filter((f) => {
+          const pid = f.projectId;
           return pid !== undefined && scope.projectIds.has(pid);
         })
         .slice(0, limit)
@@ -692,6 +753,7 @@ export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
 export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
     queryKey: [...queryKeys.dashboard(userId), "flows", limit] as const,
@@ -702,23 +764,10 @@ export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
       // assertion would otherwise leak through.
       if (!scope) return [];
       if (scope.featureIds.size === 0) return [];
-      // pageSize 200 mirrors `useRecentFeatures` — the dashboard
-      // "Recent Flows" card only displays `limit` rows (default 5),
-      // so a 200-row candidate pool gives ample headroom for typical
-      // workspaces while cutting the response payload by ~80% from
-      // the previous 1000. Going wider would mask genuine "the user's
-      // recent N is not in the first 200" bugs by silently truncating.
-      const flowsRaw = await flowsCollection.list({
-        // Workspace-wide read: dropped `createdByFilter(userId)` so a
-        // tester can see recent workspace flows. Narrowed client-side to
-        // `scope.featureIds` (alive features in alive projects) below.
-        pageNo: 1,
-        pageSize: 200,
-        sort: { CreatedDate: -1 },
-      });
-      return unwrapPaged<unknown>(flowsRaw)
-        .items.filter((f) => {
-          const fid = (f as { featureId?: string }).featureId;
+      const flowItems = await qc.fetchQuery(workspaceFlowsQuery(userId));
+      return flowItems
+        .filter((f) => {
+          const fid = f.featureId;
           return fid !== undefined && scope.featureIds.has(fid);
         })
         .slice(0, limit)
@@ -743,6 +792,7 @@ export function useWorkspaceTotals(): UseQueryResult<{
 }> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
     queryKey: [...queryKeys.dashboard(userId), "totals"] as const,
@@ -753,37 +803,19 @@ export function useWorkspaceTotals(): UseQueryResult<{
       // No live projects → no live features or flows can exist. Return
       // zero without burning a fetch.
       if (scope.projectIds.size === 0) return { features: 0, flows: 0 };
-      const [featuresRaw, flowsRaw] = await Promise.all([
-        featuresCollection.list({
-          // Workspace-wide read: dropped `createdByFilter(userId)` so a
-          // tester can see totals across the workspace. Narrowed client-
-          // side to `scope.projectIds` (alive projects) below. pageSize
-          // 200 is a soft cap on how many rows we scan for the dashboard
-          // stat card — typical workspaces fit comfortably; huge ones
-          // silently cap (the stat then undercounts but the page still
-          // renders). Going to 1000 made the response ~5× heavier for a
-          // card that only displays two integers.
-          pageNo: 1,
-          pageSize: 200,
-        }),
-        flowsCollection.list({
-          // Workspace-wide read: dropped `createdByFilter(userId)` so a
-          // tester can see totals across the workspace. Narrowed client-
-          // side to `scope.featureIds` (alive features in alive projects)
-          // below. Same 200 cap rationale as featuresRaw above.
-          pageNo: 1,
-          pageSize: 200,
-        }),
+      const [featureItems, flowItems] = await Promise.all([
+        qc.fetchQuery(workspaceFeaturesQuery(userId)),
+        qc.fetchQuery(workspaceFlowsQuery(userId)),
       ]);
       let features = 0;
-      for (const f of unwrapPaged<{ projectId?: string }>(featuresRaw).items) {
+      for (const f of featureItems) {
         const pid = f.projectId;
         if (pid !== undefined && scope.projectIds.has(pid)) features++;
       }
       let flows = 0;
       // No live features → no live flows can exist either.
       if (scope.featureIds.size > 0) {
-        for (const f of unwrapPaged<{ featureId?: string }>(flowsRaw).items) {
+        for (const f of flowItems) {
           const fid = f.featureId;
           if (fid !== undefined && scope.featureIds.has(fid)) flows++;
         }
@@ -799,11 +831,9 @@ export function useWorkspaceTotals(): UseQueryResult<{
 // dashboard mount. Not exported — these sets are an internal detail of
 // how the dashboard derives orphan-safe slices.
 //
-// pageSize 500 matches the upper bound on `useProjectFlows` and is more
-// than enough for typical workspaces; if a single user ever has more
-// than 500 projects, the silent truncation would be visible as features
-// and flows under the 501st-and-onward projects failing to surface on
-// the dashboard, which is preferable to an unbounded fetch.
+// Projects come through the shared `queryKeys.projects(userId)` read
+// (pageSize 500 — same bound as before), so the listing crosses the wire
+// once per stale window no matter how many consumers mount.
 // `useAliveScope` was previously file-local — it powers the dashboard
 // totals card and the recent-feeds hooks. `useProjectsDevCounts` below
 // reuses the same alive-set, so it's now exported for shared use.
@@ -811,23 +841,24 @@ export function useAliveScope(userId: string): UseQueryResult<{
   projectIds: Set<string>;
   featureIds: Set<string>;
 }> {
+  const qc = useQueryClient();
   return useQuery({
     queryKey: [...queryKeys.dashboard(userId), "aliveScope"] as const,
     enabled: Boolean(userId),
     queryFn: async () => {
-      // 1. The user's surviving projects. Empty set → no features or
-      //    flows can possibly belong to a live parent, so short-circuit
-      //    the features query. This is the "deleted all projects" path:
-      //    the tile should render zero, not orphans.
-      const projectsRaw = await projectsCollection.list({
-        // Workspace-wide read: dropped `createdByFilter(userId)` so a
-        // tester can see the workspace's alive project set.
-        pageNo: 1,
-        pageSize: 500,
+      // 1. The user's surviving projects — read through the SHARED
+      //    `queryKeys.projects(userId)` entry (same key + queryFn as
+      //    `useProjects`). Concurrent first paints dedupe into one wire
+      //    call, and a warm 60 s cache satisfies this read outright —
+      //    the old code re-listed projects at pageSize 500 alongside
+      //    `useProjects`' own read, doubling the round trip on every
+      //    page that mounted both.
+      const projects = await qc.fetchQuery({
+        queryKey: queryKeys.projects(userId),
+        queryFn: projectsListQueryFn(),
+        staleTime: 60_000,
       });
-      const projectIds = new Set(
-        unwrapPaged<{ ItemId: string }>(projectsRaw).items.map((p) => p.ItemId),
-      );
+      const projectIds = new Set(projects.map((p) => p.id));
       if (projectIds.size === 0) {
         return { projectIds, featureIds: new Set<string>() };
       }
@@ -835,17 +866,18 @@ export function useAliveScope(userId: string): UseQueryResult<{
       // 2. The user's features, narrowed to those whose `projectId` is
       //    in the surviving-project set. The cloud filter parser drops
       //    operator objects (see the doc comment on `useProjectFlows`),
-      //    so we list everything and filter client-side.
-      const featuresRaw = await featuresCollection.list({
-        // Workspace-wide read: dropped `createdByFilter(userId)` so a
-        // tester can see features across the workspace.
-        pageNo: 1,
-        pageSize: 500,
-      });
+      //    so we list everything and filter client-side. The list comes
+      //    through the shared workspace entry — `useWorkspaceTotals` /
+      //    `useRecentFeatures` / `useProjectsDevCounts` read the same
+      //    cached rows, so a cold mount costs ONE features read no
+      //    matter how many of these hooks mount together.
+      const featureItems = await qc.fetchQuery(
+        workspaceFeaturesQuery(userId),
+      );
       const featureIds = new Set(
-        unwrapPaged<{ ItemId: string }>(featuresRaw)
-          .items.filter((f) => {
-            const pid = (f as { projectId?: string }).projectId;
+        featureItems
+          .filter((f) => {
+            const pid = f.projectId;
             return pid !== undefined && projectIds.has(pid);
           })
           .map((f) => f.ItemId),
@@ -887,6 +919,7 @@ export function useProjectsDevCounts(): UseQueryResult<
 > {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
+  const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
     queryKey: [...queryKeys.projects(userId), "devCounts"] as const,
@@ -900,22 +933,15 @@ export function useProjectsDevCounts(): UseQueryResult<
       // round trips entirely.
       if (projectIds.size === 0) return new Map();
 
-      // Pass 1 — features. Workspace-wide list, narrowed client-side
-      // because the gateway filter parser drops operator objects (see
-      // `createdByFilter`). We collect three things:
+      // Pass 1 — features. Shared workspace entry (one read serves
+      // aliveScope / totals / recents too). We collect three things:
       //   - `featureProjectById` for the flows pass to look up parents,
       //   - the feature counts per project,
       //   - a Set of featureIds scoped to dev sources (so the flows
       //     pass knows which features belong to the dev env).
-      const featuresRaw = await featuresCollection.list({
-        pageNo: 1,
-        pageSize: 1000,
-      });
-      const featureItems = unwrapPaged<{
-        ItemId: string;
-        projectId?: string;
-        envSlug?: string;
-      }>(featuresRaw).items;
+      const featureItems = await qc.fetchQuery(
+        workspaceFeaturesQuery(userId),
+      );
       const featureProjectById = new Map<string, string>();
       const devFeatureIds = new Set<string>();
       const featureCounts = new Map<string, number>();
@@ -940,23 +966,15 @@ export function useProjectsDevCounts(): UseQueryResult<
           ]),
         );
       }
-      const flowsRaw = await flowsCollection.list({
-        // Workspace-wide read, narrowed to dev-source flows whose
-        // `featureId` is in our dev-feature set (orphans skipped).
-        // pageSize 200 mirrors the totals/recents trim — typical
-        // workspaces fit comfortably; the per-project flow count then
-        // undercounts on huge workspaces rather than pulling a
-        // thousand-row response just to bucket them. The Projects list
-        // renders a feature/flow badge per project, so a soft cap is
-        // acceptable as long as it's documented.
-        pageNo: 1,
-        pageSize: 200,
-      });
-      const flowItems = unwrapPaged<{
-        ItemId: string;
-        featureId?: string;
-        envSlug?: string;
-      }>(flowsRaw).items;
+      // Shared workspace entry — the dashboard's totals/recents hooks
+      // read the same cached rows, so no page pays a second flows read
+      // for bucketing. pageSize 200 mirrors that entry's cap: typical
+      // workspaces fit comfortably; the per-project flow count then
+      // undercounts on huge workspaces rather than pulling a
+      // thousand-row response just to bucket them. The Projects list
+      // renders a feature/flow badge per project, so a soft cap is
+      // acceptable as long as it's documented.
+      const flowItems = await qc.fetchQuery(workspaceFlowsQuery(userId));
       const flowCounts = new Map<string, number>();
       for (const fl of flowItems) {
         const fid = fl.featureId;
@@ -1098,12 +1116,15 @@ export async function fetchProjectContents(
 // when the result is empty.
 export function useChatHistory(
   sessionId: string,
+  opts?: { enabled?: boolean },
 ): UseQueryResult<PersistedChatMessage[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   return useQuery({
     queryKey: queryKeys.chatHistory(userId, sessionId),
-    enabled: Boolean(userId && sessionId),
+    // The floating assistant passes `enabled` so the history read only
+    // fires while the panel is actually open — closed launcher, no read.
+    enabled: Boolean(userId && sessionId) && (opts?.enabled ?? true),
     queryFn: async () => {
       const raw = await chatMessagesCollection.list({
         filter: { ...createdByFilter(userId), sessionId },
@@ -1125,12 +1146,16 @@ export function useChatHistory(
 // zero saved messages are intentionally absent — a brand-new session exists
 // in localStorage but never had a message persisted yet, so it shows up
 // only after the first user turn.
-export function useChatSessions(): UseQueryResult<ChatSessionSummary[]> {
+export function useChatSessions(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<ChatSessionSummary[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   return useQuery({
     queryKey: queryKeys.chatSessions(userId),
-    enabled: Boolean(userId),
+    // Same page-scoped policy as `useChatHistory` — the session list is
+    // only rendered inside the open assistant panel.
+    enabled: Boolean(userId) && (opts?.enabled ?? true),
     queryFn: async () => {
       const raw = await chatMessagesCollection.list({
         filter: createdByFilter(userId),
@@ -1862,8 +1887,14 @@ export function useIncomingCallSignals(): UseQueryResult<CallSignal[]> {
   return useQuery({
     queryKey: [...queryKeys.callSignals(userId), "incoming"],
     enabled: Boolean(userId),
-    refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
+    // 15 s, foreground-only. The incoming-call ring is inherently
+    // app-wide (the dialog can pop on any page), but the old 5 s +
+    // background-refetch pair polled the signaling table 12×/minute on
+    // every page even with the tab hidden. 15 s bounds ring detection
+    // delay off the chat surface; an ACTIVE call still polls at 2 s via
+    // `useActiveCallSignal` (dialog-scoped), so in-call latency is
+    // unaffected.
+    refetchInterval: 15_000,
     queryFn: async () => {
       const raw = await callSignalsCollection.list({
         filter: { recipientId: userId },
@@ -2217,17 +2248,13 @@ export function useAnnouncements(): UseQueryResult<Announcement[]> {
     // workspace-wide.
     queryKey: [...queryKeys.announcements, userId],
     enabled: Boolean(userId),
-    // Polls every 5 s, matching `useDirectMessages` so a freshly posted
-    // announcement surfaces on other members' dashboards with the same
-    // WhatsApp-ish liveness as a chat message. The query is mounted by
-    // `useAnnouncementsAutoOpen` in `Topbar`, so this fires on every
-    // authenticated page — no need to navigate back to /dashboard for
-    // the cache to catch up. `refetchIntervalInBackground: true` keeps
-    // the poll running even when the tab is hidden, so a member who
-    // parked the app in a background tab still sees the announcement
-    // surface (and the auto-open dialog pop) when they refocus.
-    refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
+    // Polls every 60 s. This used to be 5 s with background refetch —
+    // a workspace banner doesn't need WhatsApp liveness, and the pair
+    // made the announcement read the single hottest query in the app
+    // (12 requests/minute on every page, tab hidden or not). 60 s still
+    // surfaces a fresh post without a reload; the composer's own
+    // invalidation covers the poster's screen instantly.
+    refetchInterval: 60_000,
     queryFn: async () => {
       const raw = await announcementsCollection.list({
         pageNo: 1,
@@ -3328,14 +3355,13 @@ export function useCreateProject(): UseMutationResult<
         CreatedDate: now,
         LastUpdatedDate: now,
       };
-      // Schema v2.1: every project starts with the four canonical envs
-      // (dev/stg/prod/uat) as real Environment rows, each seeded with the
-      // 11 builtin verification checks (enabled = recommended). Best-effort
-      // with the deployment-gap swallow — blx_Environments /
-      // blx_VerificationChecks 400 until their schema deploy lands, and a
-      // failed seed must never fail the project create (the migration
-      // script backfills the same rows for pre-existing projects).
-      await seedCanonicalEnvs(itemId);
+      // No default envs (user directive 2026-10-01): a fresh project is
+      // JUST this row. Envs are added explicitly via `useCreateEnvironment`
+      // (Add Environment modal), and each new env seeds its own builtin
+      // checks. The old auto-seed (4 canonical envs + 44 checks, all
+      // awaited inside this mutationFn) both blocked the Create Project
+      // modal for the whole batch and created env structure the user
+      // explicitly doesn't want at create time.
       return toProject(item);
     },
   });
@@ -3593,6 +3619,528 @@ export function useCreateFlow(): UseMutationResult<
   });
 }
 
+// --- Project cascade delete -------------------------------------------------
+//
+// The Blocks Data Gateway has no server-side ON DELETE cascade: deleting the
+// Project row would orphan every child row that points at it (features,
+// flows, envs, checks, secrets, issues, ...). This helper reads ALL child
+// sets first and deletes them before the project row itself, so a mid-way
+// failure leaves the project visible and retryable instead of a half-gone
+// husk with dangling children.
+//
+// Link map (verified against the deployed schemas + collection selectors in
+// data.ts — every filter field MUST be in the selector or the gateway
+// silently drops it, the recurring selector-gating lesson):
+//   direct `projectId` children  → Feature, Environment, VerificationCheck,
+//     VerificationTarget, Secret, Issue, SecretBinding
+//   feature-linked grandchildren → Flow (`featureId`; the Flow selector does
+//     NOT select `projectId`, so flows are derived from the project's
+//     feature ids), TestCase (`featureId`/`flowId` — no `projectId` column),
+//     FlowComment (`flowId`)
+//   membership strip             → MemberProject.projectIdsJson (JSON array
+//     of project ids — strip this id, never delete the member's row)
+//   user-scoped rows (Notification, UserNote, UserPreference, ...) are left
+//     alone: they're the receiver's history, not the project's data.
+
+/** How many child deletes run concurrently per gateway round-trip. */
+const CASCADE_CHUNK_SIZE = 8;
+
+// Gateway mutations resolve as NORMAL responses even when the write was
+// rejected — `acknowledged: false` rides in the payload, not an HTTP error
+// (same lesson as the mark-read writes in notifier.ts:800-858). The wire
+// shape is `{ data: { delete<Schema>: { acknowledged, message, ... } } }`,
+// but some endpoints return the flat `{ acknowledged, ... }` directly, so
+// both depths are checked. `undefined` passes: absence of evidence isn't a
+// rejection, and aborting on it would strand the cascade half-done.
+function assertWriteAck(response: unknown, what: string): void {
+  const readAck = (
+    candidate: unknown,
+  ): { acknowledged?: boolean; message?: string } | undefined =>
+    candidate && typeof candidate === "object" && "acknowledged" in candidate
+      ? (candidate as { acknowledged?: boolean; message?: string })
+      : undefined;
+  const direct = readAck(response);
+  const inner = readAck(
+    Object.values(
+      ((response as { data?: Record<string, unknown> })?.data ?? {}) as Record<
+        string,
+        unknown
+      >,
+    )[0],
+  );
+  const ack = direct ?? inner;
+  if (ack && ack.acknowledged === false) {
+    throw new Error(
+      `Write aborted at "${what}": ${ack.message ?? "not acknowledged"}`,
+    );
+  }
+}
+
+// Deletes a batch of child rows, `CASCADE_CHUNK_SIZE` per round-trip, and
+// ack-checks every response — one rejected delete stops the whole cascade
+// before the project row goes.
+async function deleteCascadeChunked(
+  ids: string[],
+  what: string,
+  del: (id: string) => Promise<unknown>,
+): Promise<void> {
+  for (let i = 0; i < ids.length; i += CASCADE_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + CASCADE_CHUNK_SIZE);
+    const responses = await Promise.all(chunk.map((id) => del(id)));
+    responses.forEach((resp, j) =>
+      assertWriteAck(resp, `${what} ${chunk[j] ?? ""}`),
+    );
+  }
+}
+
+// --- Env slug rename migration ----------------------------------------------
+//
+// Every env-scoped read in the app still resolves by `envSlug` (features,
+// flows, verification targets, secrets, secret bindings, issues — see the
+// list filters), so a slug rewrite that touches only the Environment row
+// would orphan every child row under the old slug: the renamed env's pages
+// would render empty while the data stayed in the cloud. This is the v2.1
+// successor to `useRenameProjectEnv`'s migration step, extended to the
+// tracker trio + issues.
+//
+// Echo strategy (the migration script's `echoPatch` convention): the gateway
+// validates each PATCH against the LIVE schema's required-on-update fields —
+// a set far broader than any local list (Secret needs email+passwordMasked,
+// Issue needs applicationName/url/category/severity/…) — and a partial echo
+// fails with VALIDATION_ERROR while the SDK still resolves. So echo every
+// BUSINESS column the row read back with; the new slug always wins. The four
+// audit columns are excluded — no working update in this codebase sends them
+// and the gateway's update input isn't proven to accept them.
+const AUDIT_COLUMNS = new Set([
+  "CreatedBy",
+  "CreatedDate",
+  "LastUpdatedBy",
+  "LastUpdatedDate",
+]);
+
+function slugEchoPatch<T>(
+  row: Record<string, unknown>,
+  slug: string,
+): Partial<T> {
+  const echo: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (k === "ItemId" || AUDIT_COLUMNS.has(k)) continue;
+    echo[k] = v ?? "";
+  }
+  // The generic here only retypes the same key/value bag for each
+  // collection's update signature — the runtime shape is identical, so
+  // the double cast is safe.
+  return { ...echo, envSlug: slug } as unknown as Partial<T>;
+}
+
+// Rewrites `envSlug` on every row that lives under (projectId, oldSlug).
+// Children move FIRST and the caller updates the Environment row last: a
+// failed PATCH aborts before the env row is touched, so retrying the same
+// rename re-lists the stragglers under the old slug and converges — nothing
+// ends up stranded invisible.
+async function migrateEnvSlugRows(
+  projectId: string,
+  oldSlug: string,
+  nextSlug: string,
+): Promise<void> {
+  // 1) Features under (project, old slug) — read first because the flow
+  //    pass needs their ids to scope the workspace-wide flow read below.
+  const featureRows = unwrapPaged<Record<string, unknown>>(
+    await featuresCollection.list({
+      filter: { projectId, envSlug: oldSlug },
+      pageNo: 1,
+      pageSize: 1000,
+    }),
+  ).items;
+  const featureIds = new Set(featureRows.map((f) => String(f.ItemId ?? "")));
+
+  // 2) Flows. The Flow selector has no `projectId`, so `{ envSlug }` alone
+  //    spans projects; client-filter by the feature ids collected above.
+  //    (The legacy hook scoped this read by CreatedBy instead, which missed
+  //    tester-authored flows — Add Flow is a tester affordance.)
+  const flowRows = unwrapPaged<Record<string, unknown>>(
+    await flowsCollection.list({
+      filter: { envSlug: oldSlug },
+      pageNo: 1,
+      pageSize: 1000,
+    }),
+  ).items.filter((f) => featureIds.has(String(f.featureId ?? "")));
+
+  // 3) Tracker trio + issues — exact (project, slug) filters.
+  const [targetRows, secretRows, bindingRows, issueRows] = await Promise.all([
+    verificationTargetsCollection
+      .list({
+        filter: { projectId, envSlug: oldSlug },
+        pageNo: 1,
+        pageSize: 1000,
+      })
+      .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+    secretsCollection
+      .list({
+        filter: { projectId, envSlug: oldSlug },
+        pageNo: 1,
+        pageSize: 1000,
+      })
+      .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+    secretBindingsCollection
+      .list({
+        filter: { projectId, envSlug: oldSlug },
+        pageNo: 1,
+        pageSize: 1000,
+      })
+      .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+    issuesCollection
+      .list({
+        filter: { projectId, envSlug: oldSlug },
+        pageNo: 1,
+        pageSize: 1000,
+      })
+      .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+  ]);
+
+  // 4) PATCH everything chunked + ack-checked, one collection at a time so
+  //    a failure surfaces with a precise label. Every row carries `ItemId`
+  //    (the SDK always projects it), which is what the update targets.
+  const batches: Array<{
+    what: string;
+    rows: Record<string, unknown>[];
+    update: (id: string, row: Record<string, unknown>) => Promise<unknown>;
+  }> = [
+    {
+      what: "flow",
+      rows: flowRows,
+      update: (id, row) =>
+        flowsCollection.update(id, slugEchoPatch<CloudFlow>(row, nextSlug)),
+    },
+    {
+      what: "feature",
+      rows: featureRows,
+      update: (id, row) =>
+        featuresCollection.update(id, slugEchoPatch<CloudFeature>(row, nextSlug)),
+    },
+    {
+      what: "verification target",
+      rows: targetRows,
+      update: (id, row) =>
+        verificationTargetsCollection.update(
+          id,
+          slugEchoPatch<CloudVerificationTarget>(row, nextSlug),
+        ),
+    },
+    {
+      what: "secret",
+      rows: secretRows,
+      update: (id, row) =>
+        secretsCollection.update(id, slugEchoPatch<CloudSecret>(row, nextSlug)),
+    },
+    {
+      what: "secret binding",
+      rows: bindingRows,
+      update: (id, row) =>
+        secretBindingsCollection.update(
+          id,
+          slugEchoPatch<CloudSecretBinding>(row, nextSlug),
+        ),
+    },
+    {
+      what: "issue",
+      rows: issueRows,
+      update: (id, row) =>
+        issuesCollection.update(id, slugEchoPatch<CloudIssue>(row, nextSlug)),
+    },
+  ];
+  for (const batch of batches) {
+    for (let i = 0; i < batch.rows.length; i += CASCADE_CHUNK_SIZE) {
+      const chunk = batch.rows.slice(i, i + CASCADE_CHUNK_SIZE);
+      const responses = await Promise.all(
+        chunk.map((row) => batch.update(String(row.ItemId), row)),
+      );
+      responses.forEach((resp, j) =>
+        assertWriteAck(resp, `${batch.what} ${String(chunk[j]?.ItemId ?? "")}`),
+      );
+    }
+  }
+}
+
+// --- Env delete cascade ------------------------------------------------------
+//
+// Deleting an Environment row must take its children with it. Every
+// env-scoped read resolves by `envSlug` (see the rename migration above), so
+// leaving features/flows/targets/secrets/bindings/issues behind orphans them
+// under a slug no Environment row answers — invisible data that only the
+// cloud remembers. Verification checks are the one environmentId-keyed
+// collection, so they filter by (projectId, environmentId) instead.
+//
+// Order: children delete FIRST, the Environment row LAST — a failed delete
+// aborts before the env row goes, so retrying the same delete re-lists the
+// leftovers and converges (same discipline as the rename migration and
+// deleteProjectCascade).
+async function deleteEnvScopedRows(
+  projectId: string,
+  envSlug: string,
+  environmentId: string,
+): Promise<void> {
+  // Same listing shape as migrateEnvSlugRows: features first (the flow pass
+  // needs their ids), flows client-filtered (the Flow selector has no
+  // projectId), the rest by exact (project, slug) filter. Checks read by the
+  // row identity — slug-independent by design.
+  const featureRows = unwrapPaged<Record<string, unknown>>(
+    await featuresCollection.list({
+      filter: { projectId, envSlug },
+      pageNo: 1,
+      pageSize: 1000,
+    }),
+  ).items;
+  const featureIds = new Set(featureRows.map((f) => String(f.ItemId ?? "")));
+  const flowRows = unwrapPaged<Record<string, unknown>>(
+    await flowsCollection.list({
+      filter: { envSlug },
+      pageNo: 1,
+      pageSize: 1000,
+    }),
+  ).items.filter((f) => featureIds.has(String(f.featureId ?? "")));
+  const [targetRows, secretRows, bindingRows, issueRows, checkRows] =
+    await Promise.all([
+      verificationTargetsCollection
+        .list({
+          filter: { projectId, envSlug },
+          pageNo: 1,
+          pageSize: 1000,
+        })
+        .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+      secretsCollection
+        .list({
+          filter: { projectId, envSlug },
+          pageNo: 1,
+          pageSize: 1000,
+        })
+        .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+      secretBindingsCollection
+        .list({
+          filter: { projectId, envSlug },
+          pageNo: 1,
+          pageSize: 1000,
+        })
+        .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+      issuesCollection
+        .list({
+          filter: { projectId, envSlug },
+          pageNo: 1,
+          pageSize: 1000,
+        })
+        .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+      verificationChecksCollection
+        .list({
+          filter: { projectId, environmentId },
+          pageNo: 1,
+          pageSize: 1000,
+        })
+        .then((raw) => unwrapPaged<Record<string, unknown>>(raw).items),
+    ]);
+
+  await deleteCascadeChunked(
+    flowRows.map((r) => String(r.ItemId)),
+    "flow",
+    (id) => flowsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    featureRows.map((r) => String(r.ItemId)),
+    "feature",
+    (id) => featuresCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    targetRows.map((r) => String(r.ItemId)),
+    "verification target",
+    (id) => verificationTargetsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    secretRows.map((r) => String(r.ItemId)),
+    "secret",
+    (id) => secretsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    bindingRows.map((r) => String(r.ItemId)),
+    "secret binding",
+    (id) => secretBindingsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    issueRows.map((r) => String(r.ItemId)),
+    "issue",
+    (id) => issuesCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    checkRows.map((r) => String(r.ItemId)),
+    "verification check",
+    (id) => verificationChecksCollection.delete(id),
+  );
+}
+
+export async function deleteProjectCascade(
+  projectId: string,
+  actorId: string,
+): Promise<void> {
+  // 1) Read every child set up front. One workspace-wide read per collection
+  //    with the flat `{ projectId }` filter (flat only — operator objects
+  //    are silently ignored). Any read failure throws BEFORE anything is
+  //    deleted, so the project stays intact for a retry.
+  const [
+    featureRows,
+    envRows,
+    checkRows,
+    targetRows,
+    secretRows,
+    issueRows,
+    bindingRows,
+    allFlowRows,
+    allTestCaseRows,
+    allCommentRows,
+    memberRows,
+  ] = await Promise.all([
+    featuresCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 1000 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    environmentsCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 200 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    verificationChecksCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 1000 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    verificationTargetsCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 200 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    secretsCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 500 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    issuesCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 1000 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    secretBindingsCollection
+      .list({ filter: { projectId }, pageNo: 1, pageSize: 200 })
+      .then((raw) => unwrapPaged<{ ItemId: string }>(raw).items),
+    // Flow/TestCase/FlowComment have no `projectId` column (or, for Flow, no
+    // selected one) — link them through the project's feature/flow ids.
+    flowsCollection
+      .list({ pageNo: 1, pageSize: 1000, sort: { CreatedDate: -1 } })
+      .then((raw) =>
+        unwrapPaged<{ ItemId: string; featureId?: string }>(raw).items,
+      ),
+    testCasesCollection
+      .list({ pageNo: 1, pageSize: 1000, sort: { CreatedDate: -1 } })
+      .then((raw) =>
+        unwrapPaged<{
+          ItemId: string;
+          featureId?: string;
+          flowId?: string;
+        }>(raw).items,
+      ),
+    flowCommentsCollection
+      .list({ pageNo: 1, pageSize: 1000, sort: { CreatedDate: -1 } })
+      .then((raw) =>
+        unwrapPaged<{ ItemId: string; flowId?: string }>(raw).items,
+      ),
+    memberProjectsCollection
+      .list({ pageNo: 1, pageSize: 200 })
+      .then((raw) => unwrapPaged<CloudMemberProject>(raw).items),
+  ]);
+
+  const featureIds = featureRows.map((r) => r.ItemId);
+  const featureIdSet = new Set(featureIds);
+  const flowRows = allFlowRows.filter(
+    (r) => r.featureId != null && featureIdSet.has(r.featureId),
+  );
+  const flowIds = flowRows.map((r) => r.ItemId);
+  const flowIdSet = new Set(flowIds);
+  const testCaseRows = allTestCaseRows.filter(
+    (r) =>
+      (r.featureId != null && featureIdSet.has(r.featureId)) ||
+      (r.flowId != null && flowIdSet.has(r.flowId)),
+  );
+  const commentRows = allCommentRows.filter(
+    (r) => r.flowId != null && flowIdSet.has(r.flowId),
+  );
+
+  // 2) Delete grandchildren → children → the project row LAST. Chunked so a
+  //    project with hundreds of rows doesn't open dozens of sockets at once.
+  await deleteCascadeChunked(
+    commentRows.map((r) => r.ItemId),
+    "FlowComment",
+    (id) => flowCommentsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    testCaseRows.map((r) => r.ItemId),
+    "TestCase",
+    (id) => testCasesCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    flowIds,
+    "Flow",
+    (id) => flowsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    featureIds,
+    "Feature",
+    (id) => featuresCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    checkRows.map((r) => r.ItemId),
+    "VerificationCheck",
+    (id) => verificationChecksCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    targetRows.map((r) => r.ItemId),
+    "VerificationTarget",
+    (id) => verificationTargetsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    secretRows.map((r) => r.ItemId),
+    "Secret",
+    (id) => secretsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    issueRows.map((r) => r.ItemId),
+    "Issue",
+    (id) => issuesCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    bindingRows.map((r) => r.ItemId),
+    "SecretBinding",
+    (id) => secretBindingsCollection.delete(id),
+  );
+  await deleteCascadeChunked(
+    envRows.map((r) => r.ItemId),
+    "Environment",
+    (id) => environmentsCollection.delete(id),
+  );
+
+  // 3) Strip the project id from each member's assignment JSON — the
+  //    MemberProject row belongs to the member, not the project, so it must
+  //    survive the delete. Updates echo the full required-on-update field
+  //    set (`userId` / `projectIdsJson` / `updatedBy`) per the
+  //    required-on-update echo rule.
+  for (const member of memberRows) {
+    let projectIds: unknown;
+    try {
+      projectIds = JSON.parse(member.projectIdsJson ?? "[]");
+    } catch {
+      continue; // unreadable JSON — not ours to repair mid-cascade
+    }
+    if (!Array.isArray(projectIds) || !projectIds.includes(projectId)) continue;
+    const stripped = projectIds.filter((id) => id !== projectId);
+    const resp = await memberProjectsCollection.update(member.ItemId, {
+      userId: member.userId,
+      projectIdsJson: JSON.stringify(stripped),
+      updatedBy: actorId,
+    });
+    assertWriteAck(resp, `MemberProject ${member.userId}`);
+  }
+
+  // 4) The project row itself, last — everything dangling is already gone.
+  assertWriteAck(
+    await projectsCollection.delete(projectId),
+    `Project ${projectId}`,
+  );
+}
+
 export function useDeleteProject(): UseMutationResult<void, Error, string> {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
@@ -3609,11 +4157,14 @@ export function useDeleteProject(): UseMutationResult<void, Error, string> {
           "Testers cannot delete projects. Ask a manager for access.",
         );
       }
-      await projectsCollection.delete(projectId);
+      await deleteProjectCascade(projectId, userId);
     },
     onSuccess: (_void, projectId) => {
       qc.invalidateQueries({ queryKey: queryKeys.projects(userId) });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
+      // The cascade removed the project's Environment rows — drop the
+      // workspace-wide env list too so the chips can't resurrect them.
+      qc.invalidateQueries({ queryKey: queryKeys.allEnvironments() });
 
       // Capture the name before cache invalidation drops the row. The
       // list is the source of truth — a single project may be in many
@@ -5308,7 +5859,9 @@ export function useRenameProjectEnv(): UseMutationResult<
 // from other envs into the panel. Outside an env the sidebar hides
 // Issue Tracker entry points anyway, so this state is only briefly
 // observable during the transition between routes.
-export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
+export function useIssueTrackerTargets(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<VerificationTarget[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   const activeEnv = useActiveEnv();
@@ -5318,7 +5871,10 @@ export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
       activeEnv?.projectId ?? "",
       activeEnv?.envSlug ?? "",
     ],
-    enabled: Boolean(userId && activeEnv),
+    // `enabled` is the page-scoped gate from the store: env-scoped reads
+    // only run while a tracker surface actually needs them (a tracker
+    // sub-route, or the open assistant panel).
+    enabled: Boolean(userId && activeEnv) && (opts?.enabled ?? true),
     // The store is mounted once at AppLayout root and the env context
     // is a long-lived React state. Without `staleTime` the default of 0
     // ms means every env navigation re-fires all three reads even when
@@ -5351,7 +5907,9 @@ export function useIssueTrackerTargets(): UseQueryResult<VerificationTarget[]> {
 // `passwordMasked` rides alone on the wire, the form holds the value
 // during the active session and clears on unmount (see the form's
 // local-state treatment + spec section 12.3).
-export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
+export function useIssueTrackerSecrets(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<Secret[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   const activeEnv = useActiveEnv();
@@ -5361,7 +5919,7 @@ export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
       activeEnv?.projectId ?? "",
       activeEnv?.envSlug ?? "",
     ],
-    enabled: Boolean(userId && activeEnv),
+    enabled: Boolean(userId && activeEnv) && (opts?.enabled ?? true),
     // See `useIssueTrackerTargets` — same rationale. The 30 s window
     // matches the mutation invalidation latency for create/delete
     // events on this collection.
@@ -5411,7 +5969,9 @@ export function useIssueTrackerSecrets(): UseQueryResult<Secret[]> {
 // appended AFTER the userId so the mutation invalidations, which use the
 // `queryKeys.issueTrackerIssues(userId)` prefix, still match every
 // variant.
-export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
+export function useIssueTrackerIssues(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<Issue[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   const roles = currentUser?.roles ?? [];
@@ -5432,7 +5992,7 @@ export function useIssueTrackerIssues(): UseQueryResult<Issue[]> {
       activeEnv?.projectId ?? "",
       activeEnv?.envSlug ?? "",
     ],
-    enabled: Boolean(userId && activeEnv),
+    enabled: Boolean(userId && activeEnv) && (opts?.enabled ?? true),
     // See `useIssueTrackerTargets` — same rationale. The IssueTracker
     // is the only screen that benefits from a fresher-than-30s view,
     // and it's mounted under the same provider as the rest of the
@@ -6178,12 +6738,17 @@ export function useUploadProfilePic(): UseMutationResult<
 // `null` is the signal to the chat call site to skip the override headers
 // and let the proxy fall back to its `.env` defaults. Same filter-by-userId
 // pattern as `useProfilePics`; one row per user by convention.
-export function useUserAiConfig(): UseQueryResult<UserAiConfig | null> {
+export function useUserAiConfig(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<UserAiConfig | null> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   return useQuery({
     queryKey: queryKeys.userAiConfig(userId),
-    enabled: Boolean(userId),
+    // The AI-config read attaches gateway headers at message-send time —
+    // the store holds it until the assistant panel opens (SettingsPage
+    // always wants it, so the default stays on).
+    enabled: Boolean(userId) && (opts?.enabled ?? true),
     // Settings-page config rarely changes; keep it warm across navigations
     // so a fresh chat session doesn't trigger an extra Blocks round-trip.
     staleTime: 5 * 60_000,
@@ -6354,6 +6919,7 @@ export interface SecretBindingScope {
 
 export function useSecretBindings(
   scope: SecretBindingScope | null,
+  opts?: { enabled?: boolean },
 ): UseQueryResult<SecretBindings> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
@@ -6363,7 +6929,7 @@ export function useSecretBindings(
       scope?.projectId ?? "",
       scope?.envSlug ?? "",
     ),
-    enabled: Boolean(userId && scope),
+    enabled: Boolean(userId && scope) && (opts?.enabled ?? true),
     // Bindings are small and rarely change; cache warm across navigations
     // so the dropdown doesn't re-fetch on every SecretCard open.
     staleTime: 5 * 60_000,
@@ -6496,12 +7062,17 @@ export function useSaveSecretBindings(): UseMutationResult<
 // id for the GitHub PAT. Mirrors `useUserAiConfig` — different cache
 // key so a chat proxy change never flushes the preferences and vice
 // versa.
-export function useUserPreference(): UseQueryResult<UserPreference> {
+export function useUserPreference(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<UserPreference> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   return useQuery({
     queryKey: queryKeys.userPreference(userId),
-    enabled: Boolean(userId),
+    // `enabled` lets page-scoped callers hold the read until they actually
+    // need the row (page-scoped fetching policy — a page should only pay
+    // for the calls its own data needs). Defaults to the old behaviour.
+    enabled: Boolean(userId) && (opts?.enabled ?? true),
     // Preferences rarely change; keep warm across navigations.
     staleTime: 5 * 60_000,
     // `blx_UserPreferences` is part of the deployment-gap set documented
@@ -7584,22 +8155,17 @@ export function useRegisterMailAddress(): UseMutationResult<
 
 // --- Environments (schema v2.1) ----------------------------------------------
 //
-// Env identity rows (blx_Environments). The four canonical kinds are seeded
-// at project creation (`useCreateProject` → `seedCanonicalEnvs`); users add
-// `custom` envs through `useCreateEnvironment`. Every env-scoped row
-// (Feature/Flow/Target/Secret/Issue/Binding/Check) points at its env by
-// ItemId via `environmentId` — the slug is only the URL/display cache and
-// stays renameable.
+// Env identity rows (blx_Environments). Projects start with ZERO envs
+// (user directive 2026-10-01 — no default env at create time); users add
+// envs explicitly through `useCreateEnvironment` (any slug/label, seeded
+// with the 11 builtin checks) or the AI chat's `add_project_environment`
+// tool. Every env-scoped row (Feature/Flow/Target/Secret/Issue/Binding/
+// Check) points at its env by ItemId via `environmentId` — the slug is
+// only the URL/display cache and stays renameable.
 
-/** Sparse ordering so custom envs sort after the canonical four. */
-export const CANONICAL_ENV_SEEDS = [
-  { slug: "dev", label: "Dev", kind: "dev", order: 0, color: "" },
-  { slug: "stg", label: "Stg", kind: "stg", order: 10, color: "" },
-  { slug: "prod", label: "Prod", kind: "prod", order: 20, color: "" },
-  { slug: "uat", label: "UAT", kind: "uat", order: 30, color: "" },
-] as const;
-
-/** Creates one Environment row; returns the new ItemId (or null). */
+/**
+ * Creates one Environment row; returns the new ItemId (or null).
+ */
 async function createEnvironmentRow(
   projectId: string,
   seed: {
@@ -7637,28 +8203,6 @@ async function seedBuiltinChecks(
       recommended: String(check.recommended),
       enabled: String(check.recommended),
     });
-  }
-}
-
-/**
- * Best-effort canonical-env seed for a fresh project. Deployment-gap safe:
- * while blx_Environments / blx_VerificationChecks are not yet deployed the
- * gateway 400s — we warn and move on, and the migration script backfills
- * the same rows. A failed seed must never fail the project create itself.
- */
-async function seedCanonicalEnvs(projectId: string): Promise<void> {
-  try {
-    for (const seed of CANONICAL_ENV_SEEDS) {
-      const envId = await createEnvironmentRow(projectId, seed);
-      if (envId) await seedBuiltinChecks(projectId, envId);
-    }
-  } catch (err) {
-    if (typeof console !== "undefined") {
-      console.warn(
-        "[seedCanonicalEnvs] env seed failed; migration will backfill",
-        { projectId, err },
-      );
-    }
   }
 }
 
@@ -7703,12 +8247,62 @@ export function useEnvironments(
   });
 }
 
+// Every Environment row the account can read, unscoped. The active-env
+// resolver in ActiveEnvContext needs to turn
+// UserPreference.activeEnvironmentId back into a {projectId, envSlug}
+// pair without knowing the project up front, and the ItemId isn't a
+// filterable gateway column — so the whole (small) table is listed and
+// matched client-side. Same deployment-gap / staleTime policy as
+// `useEnvironments`.
+export function useAllEnvironments(opts?: {
+  enabled?: boolean;
+}): UseQueryResult<Environment[]> {
+  return useQuery({
+    queryKey: queryKeys.allEnvironments(),
+    // Callers that only need the table while an env pair is being resolved
+    // (ActiveEnvContext) pass `enabled: false` until then — no reason for
+    // every page to pay for a workspace-wide env read.
+    enabled: opts?.enabled ?? true,
+    staleTime: 5 * 60_000,
+    retry: false,
+    queryFn: async () => {
+      try {
+        const raw = await environmentsCollection.list({
+          filter: {},
+          pageNo: 1,
+          pageSize: 200,
+        });
+        const rows = unwrapPaged<CloudEnvironment>(raw).items.map(
+          toEnvironment,
+        );
+        return rows.sort((a, b) => a.order - b.order);
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useAllEnvironments] cloud read failed; returning empty",
+            err,
+          );
+        }
+        return [];
+      }
+    },
+  });
+}
+
 export interface CreateEnvironmentInput {
   projectId: string;
   /** URL segment + display cache — normalized to lowercase-kebab here. */
   slug: string;
   label: string;
   color?: string;
+  /**
+   * Badge treatment + feature-authoring gate: only `kind: "dev"` envs get
+   * the Add Feature CTA (`isDevEnv` in FeaturesPage / ProjectDetailPage).
+   * Optional — defaults to "custom" so existing callers keep their
+   * behavior; canonical kinds come in through the Add Environment modal
+   * now that projects no longer seed default envs.
+   */
+  kind?: EnvironmentKind;
 }
 
 export function useCreateEnvironment(): UseMutationResult<
@@ -7756,10 +8350,11 @@ export function useCreateEnvironment(): UseMutationResult<
       );
       const order = maxOrder + 10;
       const label = input.label.trim() || slug;
+      const kind: EnvironmentKind = input.kind ?? "custom";
       const envId = await createEnvironmentRow(input.projectId, {
         slug,
         label,
-        kind: "custom",
+        kind,
         order,
         color: input.color,
       });
@@ -7788,7 +8383,7 @@ export function useCreateEnvironment(): UseMutationResult<
         label,
         color: input.color || undefined,
         order,
-        kind: "custom" as const,
+        kind,
         createdAt: now,
         updatedAt: now,
       };
@@ -7796,6 +8391,12 @@ export function useCreateEnvironment(): UseMutationResult<
     onSuccess: (_env, input) => {
       qc.invalidateQueries({
         queryKey: queryKeys.environments(input.projectId),
+      });
+      // The workspace-wide list (ProjectsPage chips) is a separate cache
+      // entry — without this it serves the pre-insert snapshot for up to
+      // its 5-minute staleTime.
+      qc.invalidateQueries({
+        queryKey: queryKeys.allEnvironments(),
       });
     },
   });
@@ -7862,23 +8463,110 @@ export function useUpdateEnvironment(): UseMutationResult<
         ? input.label.trim()
         : (row.label ?? "");
       if (!nextLabel) throw new Error("Environment label is required.");
-      await environmentsCollection.update(input.id, {
-        projectId: row.projectId ?? input.projectId,
-        slug: nextSlug,
-        label: nextLabel,
-        color: input.color !== undefined
-          ? (input.color ?? "")
-          : (row.color ?? ""),
-        order: input.order !== undefined
-          ? String(input.order)
-          : (row.order ?? ""),
-        kind: row.kind ?? "custom",
-      });
+      // Slug change → migrate the env's child rows first. Every env-scoped
+      // read (features, flows, targets, secrets, bindings, issues) filters
+      // on `envSlug`, so rewriting only the Environment row would orphan
+      // the children under the old slug — the renamed env's pages would
+      // render empty while the data stayed in the cloud. The migration
+      // aborts on any failed write BEFORE the env row moves, so retrying
+      // the same rename re-lists the stragglers and converges.
+      if (nextSlug !== (row.slug ?? "")) {
+        await migrateEnvSlugRows(input.projectId, row.slug ?? "", nextSlug);
+      }
+      assertWriteAck(
+        await environmentsCollection.update(input.id, {
+          projectId: row.projectId ?? input.projectId,
+          slug: nextSlug,
+          label: nextLabel,
+          color: input.color !== undefined
+            ? (input.color ?? "")
+            : (row.color ?? ""),
+          order: input.order !== undefined
+            ? String(input.order)
+            : (row.order ?? ""),
+          kind: row.kind ?? "custom",
+        }),
+        `environment ${input.id}`,
+      );
     },
     onSuccess: (_res, input) => {
       qc.invalidateQueries({
         queryKey: queryKeys.environments(input.projectId),
       });
+      // Workspace-wide list (ProjectsPage chips) — separate cache entry,
+      // same 5-minute staleness hazard as the create path.
+      qc.invalidateQueries({
+        queryKey: queryKeys.allEnvironments(),
+      });
+    },
+  });
+}
+
+export interface DeleteEnvironmentInput {
+  projectId: string;
+  /** The Environment row's ItemId. */
+  id: string;
+}
+
+export function useDeleteEnvironment(): UseMutationResult<
+  void,
+  Error,
+  DeleteEnvironmentInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
+  // Manager-only guard — same class of action as useUpdateEnvironment /
+  // useDeleteProject. The trash trigger is hidden for non-managers; this
+  // throws the same error for any other path.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot delete environments. Ask a manager for access.",
+        );
+      }
+      // Read the row first: the cascade needs the slug to scope the child
+      // deletes, and a missing row means another tab beat us to it.
+      const raw = await environmentsCollection.list({
+        filter: { projectId: input.projectId },
+        pageNo: 1,
+        pageSize: 100,
+      });
+      const items = unwrapPaged<CloudEnvironment>(raw).items;
+      const row = items.find((e) => e.ItemId === input.id);
+      if (!row) {
+        throw new Error(
+          "Environment not found — it may have been deleted in another tab.",
+        );
+      }
+      const envSlug = row.slug ?? "";
+      if (!envSlug) {
+        throw new Error("Environment row is missing its slug — cannot delete.");
+      }
+      await deleteEnvScopedRows(input.projectId, envSlug, input.id);
+      // The Environment row itself, last — children first so a failure
+      // leaves the env (and its pages) still addressable for a retry.
+      assertWriteAck(
+        await environmentsCollection.delete(input.id),
+        `environment ${input.id}`,
+      );
+    },
+    onSuccess: (_res, input) => {
+      // Same invalidation set as the project cascade plus the feature
+      // prefix — deleting an env removes its features, so the project
+      // card counts and dashboard totals must drop too.
+      qc.invalidateQueries({
+        queryKey: queryKeys.environments(input.projectId),
+      });
+      qc.invalidateQueries({
+        queryKey: queryKeys.allEnvironments(),
+      });
+      qc.invalidateQueries({
+        queryKey: queryKeys.features(userId, input.projectId),
+      });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard(userId) });
     },
   });
 }
@@ -7892,13 +8580,14 @@ export function useUpdateEnvironment(): UseMutationResult<
 export function useVerificationChecks(
   projectId: string | null,
   environmentId: string | null,
+  opts?: { enabled?: boolean },
 ): UseQueryResult<EnvVerificationCheck[]> {
   return useQuery({
     queryKey: queryKeys.verificationChecks(
       projectId ?? "",
       environmentId ?? "",
     ),
-    enabled: Boolean(projectId && environmentId),
+    enabled: Boolean(projectId && environmentId) && (opts?.enabled ?? true),
     staleTime: 5 * 60_000,
     retry: false,
     queryFn: async () => {
@@ -7968,6 +8657,84 @@ export function useSetVerificationCheckEnabled(): UseMutationResult<
       });
       return { ...row, enabled };
     },
+    // Optimistic flip — the checkbox responds instantly and the
+    // onSuccess invalidation reconciles with the server copy.
+    onMutate: async ({ row, enabled }) => {
+      const key = queryKeys.verificationChecks(row.projectId, row.environmentId);
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<EnvVerificationCheck[]>(key);
+      qc.setQueryData<EnvVerificationCheck[]>(key, (old) =>
+        (old ?? []).map((r) => (r.id === row.id ? { ...r, enabled } : r)),
+      );
+      return { previous };
+    },
+    onError: (_err, { row }, ctx) => {
+      if (ctx?.previous) {
+        qc.setQueryData(
+          queryKeys.verificationChecks(row.projectId, row.environmentId),
+          ctx.previous,
+        );
+      }
+    },
+    onSuccess: (next) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.verificationChecks(
+          next.projectId,
+          next.environmentId,
+        ),
+      });
+    },
+  });
+}
+
+export interface UpdateCustomCheckInput {
+  row: EnvVerificationCheck;
+  label?: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+export function useUpdateCustomVerificationCheck(): UseMutationResult<
+  EnvVerificationCheck,
+  Error,
+  UpdateCustomCheckInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  // Tester-only guard — same QA-state policy as the enable toggle above.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async ({ row, label, description, recommended }) => {
+      if (!isTester) {
+        throw new Error(
+          "Only testers can edit custom verification checks.",
+        );
+      }
+      if (row.source !== "custom") {
+        throw new Error(
+          "Built-in checks are catalog-owned — only custom checks can be edited.",
+        );
+      }
+      const next = {
+        label: (label ?? row.label).trim(),
+        description: (description ?? row.description).trim(),
+        recommended: String(recommended ?? row.recommended),
+      };
+      if (!next.label) throw new Error("Check name is required.");
+      // Full echo of the requiredOn "Both" set (projectId, environmentId,
+      // source, checkId, label, enabled) plus the writable fields.
+      await verificationChecksCollection.update(row.id, {
+        projectId: row.projectId,
+        environmentId: row.environmentId,
+        source: row.source,
+        checkId: row.checkId,
+        label: next.label,
+        enabled: String(row.enabled),
+        description: next.description,
+        recommended: next.recommended,
+      });
+      return { ...row, ...next, recommended: next.recommended === "true" };
+    },
     onSuccess: (next) => {
       qc.invalidateQueries({
         queryKey: queryKeys.verificationChecks(
@@ -7984,6 +8751,9 @@ export interface AddCustomCheckInput {
   environmentId: string;
   label: string;
   description?: string;
+  /** "Enable by default" flag — purely informational (grouping + the
+   *  Recommended badge); a fresh custom check is always enabled. */
+  recommended?: boolean;
 }
 
 export function useAddCustomVerificationCheck(): UseMutationResult<
@@ -8031,7 +8801,7 @@ export function useAddCustomVerificationCheck(): UseMutationResult<
         checkId,
         label,
         description: input.description?.trim() ?? "",
-        recommended: "false",
+        recommended: String(input.recommended ?? false),
         // A check the user just defined is on by default — they created it
         // because they want it running in this env.
         enabled: "true",
@@ -8051,7 +8821,7 @@ export function useAddCustomVerificationCheck(): UseMutationResult<
         checkId,
         label,
         description: input.description?.trim() ?? "",
-        recommended: false,
+        recommended: input.recommended ?? false,
         enabled: true,
         createdAt: now,
         updatedAt: now,
@@ -8114,8 +8884,8 @@ export function useRemoveCustomVerificationCheck(): UseMutationResult<
 // didn't). Read side rides the existing useUserPreference row, so the
 // deployment-gap fallback (empty string while the schema is undeployed)
 // comes for free.
-export function useActiveEnvironment() {
-  const prefQuery = useUserPreference();
+export function useActiveEnvironment(opts?: { enabled?: boolean }) {
+  const prefQuery = useUserPreference(opts);
   const save = useSaveUserPreference();
   const activeEnvironmentId = prefQuery.data?.activeEnvironmentId ?? "";
   const setActiveEnvironment = (environmentId: string) => {

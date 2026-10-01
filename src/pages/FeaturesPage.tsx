@@ -2,19 +2,18 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Plus, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
 import { FeatureList } from "@/components/feature/FeatureList";
 import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BootstrapDialog } from "@/components/project/BootstrapDialog";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
-import { useProject, useProjectFeatures } from "@/lib/blocks/hooks";
+import { useEnvironments, useProject, useProjectFeatures } from "@/lib/blocks/hooks";
 import { useIsRole } from "@/hooks/useAuth";
 import { useActiveEnvContext } from "@/contexts/ActiveEnvContext";
 import { useT } from "@/lib/blocks/i18n";
-import { envLabelFromSlug } from "@/pages/ProjectDetailPage";
 
 // Dedicated features view — `/projects/:projectId/:envSlug/features`.
 // Renders every feature authored under the active env on a single
@@ -43,6 +42,9 @@ export function FeaturesPage() {
 
   const projectQuery = useProject(projectId);
   const featuresQuery = useProjectFeatures(projectId, envSlug);
+  // The env list — row identity drives the dev gate and the header label
+  // (slugs are renameable display caches under v2.1).
+  const environmentsQuery = useEnvironments(projectId ?? null);
   const isManager = useIsRole("manager");
   const t = useT();
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
@@ -77,10 +79,17 @@ export function FeaturesPage() {
   }
 
   const features = featuresQuery.data ?? [];
-  // Add button + write access only on dev. Other envs (uat, prod,
-  // custom) are read-only views of what was authored under dev.
-  // Mirrors `ProjectDetailPage`:351-355 and `:425`.
-  const isDevEnv = envSlug === "dev";
+  const envRows = environmentsQuery.data ?? [];
+  // Add button + write access only on the env whose row kind is "dev".
+  // Other envs (uat, prod, custom) are read-only views of what was
+  // authored under dev. Mirrors `ProjectDetailPage`'s `isDevEnv`. While
+  // the env rows are still loading (or in the deployment gap) the
+  // canonical slug check stands in.
+  const isDevEnv = envRows.length
+    ? envRows.find((e) => e.slug === envSlug)?.kind === "dev"
+    : envSlug === "dev";
+  // Header badge label + rename/delete triggers live inside EnvHeaderChip;
+  // this page only keeps isDevEnv for the authoring gates below.
 
   return (
     <div className="space-y-6" key={retryKey}>
@@ -91,14 +100,9 @@ export function FeaturesPage() {
           <h1 className="text-2xl font-semibold text-foreground">
             {t("features.title", "Features")}
           </h1>
-          {envSlug && (
-            <Badge
-              className="border-transparent bg-muted text-muted-foreground"
-              aria-label={envLabelFromSlug(envSlug)}
-            >
-              {envLabelFromSlug(envSlug)}
-            </Badge>
-          )}
+          {/* `actions` — the pencil/trash pair renders here ONLY (user
+              asked, 2026-10-01); every other env page shows the badge. */}
+          {envSlug && <EnvHeaderChip actions />}
         </div>
         {/* Bootstrap renders on EVERY env page, for every role — the
             project card's env chips land here, so this is the page the

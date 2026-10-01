@@ -2321,9 +2321,10 @@ export const testCasesCollection = blocksClient.data.collection<CloudTestCase>(
 
 // --- Environments -------------------------------------------------------------
 //
-// Env identity entity (schema v2.1). One row per env per project: the four
-// canonical kinds (dev/stg/prod/uat) are seeded at project creation, and the
-// user can add `custom` envs later. `slug` is the URL segment + display cache
+// Env identity entity (schema v2.1). One row per env per project: projects
+// start with ZERO envs and the user adds every row themselves (canonical
+// kinds dev/stg/prod/uat or `custom`) through the Add Environment modal.
+// `slug` is the URL segment + display cache
 // and IS renameable; `ItemId` is the identity every env-scoped row points at
 // via its `environmentId` column, so a rename never orphans data. Replaces
 // the Project.customEnvs + Project.envLabelOverrides JSON blobs.

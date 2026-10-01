@@ -3,13 +3,16 @@
 // The device picker sizes the run's browser context (viewport + touch) so
 // responsive layouts actually get exercised differently per preset.
 //
-// In addition to the shipped catalog (`verificationChecks`), the user can
-// add their own custom scopes (see `useCustomVerificationChecks`). They
-// render in their own section with edit / delete actions so the user can
-// prune the list at any time. Custom scopes are stored in localStorage
-// (per-device) and the AI uses the label/description as guidance at
-// run-time — there's no fixed backend behaviour for them, just like the
-// built-ins when the AI picks an ad-hoc walk.
+// Under schema v2.1 the selection is PER-ENVIRONMENT and lives in the
+// cloud: the card renders `blx_VerificationChecks` rows (the env's check
+// set — built-ins plus the user's custom ones), and every toggle writes
+// the row's `enabled` flag through the parent's mutation. Custom checks
+// are rows too (source "custom") with inline add / edit / delete — no
+// more localStorage catalog, so the list follows the user across devices.
+//
+// `readOnly` is the non-tester hard gate: QA state, so manager/developer
+// see the matrix but can't flip it (the mutations throw for them too —
+// defense in depth).
 
 import { useEffect, useState } from "react";
 import {
@@ -35,8 +38,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import type { VerificationCheck } from "@/types/issue-tracker";
-import type { CustomVerificationCheck } from "@/hooks/useCustomVerificationChecks";
+import type { EnvVerificationCheck } from "@/lib/blocks/data";
 
 export type VerificationDevice = "desktop" | "mobile" | "tablet";
 
@@ -46,36 +48,35 @@ const DEVICE_OPTIONS: { value: VerificationDevice; label: string }[] = [
   { value: "tablet", label: "Tablet · 820×1180 (touch)" },
 ];
 
+export interface CustomCheckPatch {
+  label?: string;
+  description?: string;
+  recommended?: boolean;
+}
+
 interface Props {
-  checks: VerificationCheck[];
-  customChecks: CustomVerificationCheck[];
-  selectedIds: string[];
-  onToggle: (id: string) => void;
+  /** The environment's check rows, built-ins first (the hook sorts). */
+  checks: EnvVerificationCheck[];
+  /** Non-tester gate — render the matrix read-only. */
+  readOnly?: boolean;
+  /** Flip a row's enabled flag. The id is the row's checkId. */
+  onToggle: (checkId: string) => void;
   onSelectAll: () => void;
   onClear: () => void;
   device: VerificationDevice;
   onDeviceChange: (device: VerificationDevice) => void;
-  // Custom-check CRUD — surfaced as inline add/edit/delete in the
-  // "Custom" section below. Add returns the created row so the parent
-  // can immediately enable the freshly-added scope by its id.
   onAddCustom: (input: {
     label: string;
     description: string;
     recommended: boolean;
-  }) => CustomVerificationCheck;
-  onUpdateCustom: (
-    id: string,
-    patch: Partial<
-      Pick<CustomVerificationCheck, "label" | "description" | "recommended">
-    >,
-  ) => void;
-  onDeleteCustom: (id: string) => void;
+  }) => void;
+  onUpdateCustom: (row: EnvVerificationCheck, patch: CustomCheckPatch) => void;
+  onDeleteCustom: (row: EnvVerificationCheck) => void;
 }
 
 export function VerificationScope({
   checks,
-  customChecks,
-  selectedIds,
+  readOnly = false,
   onToggle,
   onSelectAll,
   onClear,
@@ -85,14 +86,19 @@ export function VerificationScope({
   onUpdateCustom,
   onDeleteCustom,
 }: Props) {
-  const recommended = checks.filter((c) => c.recommended);
-  const optional = checks.filter((c) => !c.recommended);
-  const selectedRecommended = customChecks.filter((c) => c.recommended);
-  const selectedOptional = customChecks.filter((c) => !c.recommended);
+  const builtinRecommended = checks.filter(
+    (c) => c.source === "builtin" && c.recommended,
+  );
+  const builtinOptional = checks.filter(
+    (c) => c.source === "builtin" && !c.recommended,
+  );
+  const customRows = checks.filter((c) => c.source === "custom");
 
-  const selected = new Set(selectedIds);
-  const allCount = checks.length + customChecks.length;
-  const selectedCount = selectedIds.length;
+  const selected = new Set(
+    checks.filter((c) => c.enabled).map((c) => c.checkId),
+  );
+  const allCount = checks.length;
+  const selectedCount = selected.size;
 
   return (
     <Card>
@@ -112,7 +118,7 @@ export function VerificationScope({
             variant="ghost"
             size="sm"
             onClick={onSelectAll}
-            disabled={selectedCount === allCount}
+            disabled={readOnly || selectedCount === allCount}
           >
             Select all
           </Button>
@@ -121,7 +127,7 @@ export function VerificationScope({
             variant="ghost"
             size="sm"
             onClick={onClear}
-            disabled={selectedCount === 0}
+            disabled={readOnly || selectedCount === 0}
           >
             Clear
           </Button>
@@ -154,26 +160,34 @@ export function VerificationScope({
         <ScopeGroup
           title="Recommended"
           description="Enabled by default — the AI always runs these checks."
-          checks={recommended}
+          checks={builtinRecommended}
           selected={selected}
+          readOnly={readOnly}
           onToggle={onToggle}
         />
         <ScopeGroup
           title="Optional"
           description="Pick additional checks for this run."
-          checks={optional}
+          checks={builtinOptional}
           selected={selected}
+          readOnly={readOnly}
           onToggle={onToggle}
         />
         <CustomScopeGroup
-          recommended={selectedRecommended}
-          optional={selectedOptional}
+          rows={customRows}
           selected={selected}
+          readOnly={readOnly}
           onToggle={onToggle}
           onAddCustom={onAddCustom}
           onUpdateCustom={onUpdateCustom}
           onDeleteCustom={onDeleteCustom}
         />
+        {readOnly && (
+          <p className="text-xs text-muted-foreground">
+            Only testers can change the verification scope for an
+            environment — the matrix above reflects the tester's setup.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -182,12 +196,20 @@ export function VerificationScope({
 interface GroupProps {
   title: string;
   description: string;
-  checks: VerificationCheck[];
+  checks: EnvVerificationCheck[];
   selected: Set<string>;
+  readOnly: boolean;
   onToggle: (id: string) => void;
 }
 
-function ScopeGroup({ title, description, checks, selected, onToggle }: GroupProps) {
+function ScopeGroup({
+  title,
+  description,
+  checks,
+  selected,
+  readOnly,
+  onToggle,
+}: GroupProps) {
   if (checks.length === 0) return null;
   return (
     <div className="space-y-2">
@@ -200,7 +222,7 @@ function ScopeGroup({ title, description, checks, selected, onToggle }: GroupPro
       <p className="text-xs text-muted-foreground">{description}</p>
       <ul className="space-y-2">
         {checks.map((c) => {
-          const isOn = selected.has(c.id);
+          const isOn = selected.has(c.checkId);
           return (
             <li
               key={c.id}
@@ -209,10 +231,18 @@ function ScopeGroup({ title, description, checks, selected, onToggle }: GroupPro
               <Checkbox
                 id={`scope-${c.id}`}
                 checked={isOn}
-                onCheckedChange={() => onToggle(c.id)}
+                onCheckedChange={() => onToggle(c.checkId)}
+                disabled={readOnly}
                 className="mt-0.5"
               />
-              <Label htmlFor={`scope-${c.id}`} className="flex-1 cursor-pointer">
+              <Label
+                htmlFor={`scope-${c.id}`}
+                className={
+                  readOnly
+                    ? "flex-1 cursor-default opacity-80"
+                    : "flex-1 cursor-pointer"
+                }
+              >
                 <span className="block text-sm font-medium text-foreground">{c.label}</span>
                 {c.description && (
                   <span className="mt-0.5 block text-xs text-muted-foreground">
@@ -231,35 +261,27 @@ function ScopeGroup({ title, description, checks, selected, onToggle }: GroupPro
 // ────────────────────────────────────────────────────────────────────────────
 //  Custom scope group — user-defined checks with inline add / edit / delete.
 //  Mirrors the layout of `ScopeGroup` but each row gets a small kebab
-//  (pencil + trash) so the user can manage their personal catalog without
-//  leaving the page. The add row lives at the bottom; clicking "+ Add
-//  custom scope" expands an inline form (label + description + recommended
-//  toggle) that commits on Save.
+//  (pencil + trash) so the user can manage the env's custom catalog
+//  without leaving the page. The add row lives at the bottom; clicking
+//  "+ Add custom scope" expands an inline form (label + description +
+//  recommended toggle) that commits on Save — the new row is created
+//  enabled, so it starts running with the next verification.
 // ────────────────────────────────────────────────────────────────────────────
 
 interface CustomGroupProps {
-  recommended: CustomVerificationCheck[];
-  optional: CustomVerificationCheck[];
+  rows: EnvVerificationCheck[];
   selected: Set<string>;
+  readOnly: boolean;
   onToggle: (id: string) => void;
-  onAddCustom: (input: {
-    label: string;
-    description: string;
-    recommended: boolean;
-  }) => CustomVerificationCheck;
-  onUpdateCustom: (
-    id: string,
-    patch: Partial<
-      Pick<CustomVerificationCheck, "label" | "description" | "recommended">
-    >,
-  ) => void;
-  onDeleteCustom: (id: string) => void;
+  onAddCustom: Props["onAddCustom"];
+  onUpdateCustom: Props["onUpdateCustom"];
+  onDeleteCustom: Props["onDeleteCustom"];
 }
 
 function CustomScopeGroup({
-  recommended,
-  optional,
+  rows,
   selected,
+  readOnly,
   onToggle,
   onAddCustom,
   onUpdateCustom,
@@ -272,29 +294,21 @@ function CustomScopeGroup({
           <Sparkles className="h-3 w-3" aria-hidden="true" />
           Custom
         </p>
-        <Badge variant="muted">{recommended.length + optional.length}</Badge>
+        <Badge variant="muted">{rows.length}</Badge>
       </div>
       <p className="text-xs text-muted-foreground">
-        Your own checks. The AI uses the label and description as guidance
-        when running — there's no fixed behaviour for them.
+        Your own checks for this environment. The AI uses the label and
+        description as guidance when running — there's no fixed behaviour
+        for them.
       </p>
-      {(recommended.length > 0 || optional.length > 0) && (
+      {rows.length > 0 && (
         <ul className="space-y-2">
-          {recommended.map((c) => (
+          {rows.map((c) => (
             <CustomScopeRow
               key={c.id}
               check={c}
-              isOn={selected.has(c.id)}
-              onToggle={onToggle}
-              onUpdate={onUpdateCustom}
-              onDelete={onDeleteCustom}
-            />
-          ))}
-          {optional.map((c) => (
-            <CustomScopeRow
-              key={c.id}
-              check={c}
-              isOn={selected.has(c.id)}
+              isOn={selected.has(c.checkId)}
+              readOnly={readOnly}
               onToggle={onToggle}
               onUpdate={onUpdateCustom}
               onDelete={onDeleteCustom}
@@ -302,28 +316,28 @@ function CustomScopeGroup({
           ))}
         </ul>
       )}
-      <AddCustomScopeForm
-        onAdd={(input) => {
-          const created = onAddCustom(input);
-          // Auto-enable the freshly-added scope so the user doesn't
-          // have to remember to tick the box after creating it.
-          onToggle(created.id);
-          return created;
-        }}
-      />
+      {!readOnly && <AddCustomScopeForm onAdd={onAddCustom} />}
     </div>
   );
 }
 
 interface RowProps {
-  check: CustomVerificationCheck;
+  check: EnvVerificationCheck;
   isOn: boolean;
+  readOnly: boolean;
   onToggle: (id: string) => void;
   onUpdate: CustomGroupProps["onUpdateCustom"];
-  onDelete: (id: string) => void;
+  onDelete: CustomGroupProps["onDeleteCustom"];
 }
 
-function CustomScopeRow({ check, isOn, onToggle, onUpdate, onDelete }: RowProps) {
+function CustomScopeRow({
+  check,
+  isOn,
+  readOnly,
+  onToggle,
+  onUpdate,
+  onDelete,
+}: RowProps) {
   // One row in edit mode at a time. We deliberately don't lift this
   // state up — only the row's own inputs need to know.
   const [editing, setEditing] = useState(false);
@@ -331,9 +345,9 @@ function CustomScopeRow({ check, isOn, onToggle, onUpdate, onDelete }: RowProps)
   const [draftDescription, setDraftDescription] = useState(check.description);
   const [draftRecommended, setDraftRecommended] = useState(check.recommended);
 
-  // Re-sync the local form when the underlying check changes from
-  // elsewhere (cross-tab storage event, or another consumer wrote to
-  // localStorage). Same pattern as SecretCard's edit form.
+  // Re-sync the local form when the underlying row changes from
+  // elsewhere (mutation invalidation, another tab). Same pattern as
+  // SecretCard's edit form.
   useEffect(() => {
     if (!editing) {
       setDraftLabel(check.label);
@@ -354,7 +368,7 @@ function CustomScopeRow({ check, isOn, onToggle, onUpdate, onDelete }: RowProps)
   };
   const save = () => {
     if (!canSave) return;
-    onUpdate(check.id, {
+    onUpdate(check, {
       label: trimmedLabel,
       description: draftDescription.trim(),
       recommended: draftRecommended,
@@ -397,7 +411,7 @@ function CustomScopeRow({ check, isOn, onToggle, onUpdate, onDelete }: RowProps)
             checked={draftRecommended}
             onCheckedChange={(v) => setDraftRecommended(v === true)}
           />
-          Enable by default
+          Recommended
         </label>
         <div className="flex items-center justify-end gap-2">
           <Button
@@ -431,10 +445,18 @@ function CustomScopeRow({ check, isOn, onToggle, onUpdate, onDelete }: RowProps)
       <Checkbox
         id={`scope-${check.id}`}
         checked={isOn}
-        onCheckedChange={() => onToggle(check.id)}
+        onCheckedChange={() => onToggle(check.checkId)}
+        disabled={readOnly}
         className="mt-0.5"
       />
-      <Label htmlFor={`scope-${check.id}`} className="flex-1 cursor-pointer">
+      <Label
+        htmlFor={`scope-${check.id}`}
+        className={
+          readOnly
+            ? "flex-1 cursor-default opacity-80"
+            : "flex-1 cursor-pointer"
+        }
+      >
         <span className="flex items-baseline gap-1.5">
           <span className="text-sm font-medium text-foreground">
             {check.label}
@@ -451,38 +473,36 @@ function CustomScopeRow({ check, isOn, onToggle, onUpdate, onDelete }: RowProps)
           </span>
         )}
       </Label>
-      <div className="flex items-center gap-1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={() => setEditing(true)}
-          aria-label={`Edit ${check.label}`}
-          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-        >
-          <Pencil className="h-4 w-4" aria-hidden="true" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={() => onDelete(check.id)}
-          aria-label={`Delete ${check.label}`}
-          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-        >
-          <Trash2 className="h-4 w-4" aria-hidden="true" />
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setEditing(true)}
+            aria-label={`Edit ${check.label}`}
+            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+          >
+            <Pencil className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => onDelete(check)}
+            aria-label={`Delete ${check.label}`}
+            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        </div>
+      )}
     </li>
   );
 }
 
 interface AddFormProps {
-  onAdd: (input: {
-    label: string;
-    description: string;
-    recommended: boolean;
-  }) => CustomVerificationCheck;
+  onAdd: Props["onAddCustom"];
 }
 
 function AddCustomScopeForm({ onAdd }: AddFormProps) {
@@ -560,7 +580,7 @@ function AddCustomScopeForm({ onAdd }: AddFormProps) {
           checked={recommended}
           onCheckedChange={(v) => setRecommended(v === true)}
         />
-        Enable by default
+        Recommended
       </label>
       <div className="flex items-center justify-end gap-2">
         <Button

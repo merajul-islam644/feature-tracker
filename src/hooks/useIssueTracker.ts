@@ -24,6 +24,7 @@
 //     mock seam any more — only the live-verify seam does.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { matchPath, useLocation } from "react-router-dom";
 import { issueTrackerApi } from "@/services/issueTrackerApi";
 import {
   mockInitialChat,
@@ -42,6 +43,7 @@ import {
   useCreateFlow,
   useCreateIssue,
   useCreateProject,
+  useCreateEnvironment,
   useCreateSecret,
   useCreateVerificationTarget,
   useDeleteChatSession,
@@ -67,7 +69,14 @@ import {
   useSaveSecretBindings,
   useUserPreference,
   useSaveUserPreference,
+  useEnvironments,
+  useVerificationChecks,
+  useSetVerificationCheckEnabled,
+  useAddCustomVerificationCheck,
+  useUpdateCustomVerificationCheck,
+  useRemoveCustomVerificationCheck,
 } from "@/lib/blocks/hooks";
+import type { EnvVerificationCheck } from "@/lib/blocks/data";
 import { buildIssueTrackerContext } from "@/lib/issueTrackerContext";
 import {
   readBindings,
@@ -291,10 +300,15 @@ const CLOSED_ISSUE_STATUSES: readonly IssueStatus[] = [
 // can't grow unbounded in the primitive-only Blocks schema.
 const MAX_TRACKED_RUN_IDS = 20;
 
-// Scope + device + activeSession survive reloads via the cloud's
+// Device + activeSession survive reloads via the cloud's
 // `UserPreference` row (one per user). localStorage under
 // `lattice.mirror.userPreference.v1` is the synchronous read fallback so
 // the page boots before the cloud query resolves.
+//
+// The verification SCOPE no longer rides here: under schema v2.1 the
+// per-env selection lives in `blx_VerificationChecks` rows (enabled
+// flags), read through `useVerificationChecks`. The legacy
+// `UserPreference.customChecks` scope list is retired.
 const USER_PREFERENCE_MIRROR_KEY = "lattice.mirror.userPreference.v1";
 const DEVICE_VALUES: ReadonlySet<string> = new Set([
   "desktop",
@@ -303,7 +317,6 @@ const DEVICE_VALUES: ReadonlySet<string> = new Set([
 ]);
 
 interface MirroredUserPreference {
-  scope?: string[];
   device?: string;
   activeSession?: string;
 }
@@ -342,21 +355,6 @@ function writePrefMirror(userId: string, value: MirroredUserPreference): void {
   }
 }
 
-function readStoredScope(
-  fallback: VerificationCheckId[],
-  userId: string,
-): string[] {
-  if (!userId) return fallback;
-  const mirror = readPrefMirror(userId).scope;
-  if (!Array.isArray(mirror)) return fallback;
-  const valid = mirror.filter((x): x is string => typeof x === "string");
-  if (valid.length === 0) return fallback;
-  // Widened to `string[]` to allow custom scopes (see
-  // `useCustomVerificationChecks`). Built-in IDs still match the
-  // `VerificationCheckId` union; custom ones are arbitrary strings.
-  return valid;
-}
-
 function readStoredDevice(userId: string): "desktop" | "mobile" | "tablet" {
   if (!userId) return "desktop";
   const mirror = readPrefMirror(userId).device;
@@ -385,19 +383,73 @@ export function useIssueTracker() {
   // silently mis-file the row.
   const activeEnv = useActiveEnv();
 
-  // User preference row — the canonical store for scope, device,
-  // activeSession. Read+write through `useUserPreference` /
-  // `useSaveUserPreference`. The localStorage mirror under
-  // `lattice.mirror.userPreference.v1` is the synchronous first-paint
-  // fallback. We populate the mirror from the cloud value once it
-  // resolves so cold-boot reads from a synced state.
-  const prefQuery = useUserPreference();
+  // Page-scoped fetching (user directive 2026-10-01: a page should only
+  // issue the data calls its own content needs). The store is mounted
+  // once at AppLayout root, so without these gates every page would pay
+  // for the tracker's reads. Two conditions unlock them:
+  //   - `onTrackerPage` — the URL is one of the Issue Tracker's own
+  //     sub-routes (`targets|secrets|scope|panel|history|issues` under a
+  //     project env), which render this data directly.
+  //   - `assistantOpen` — the floating assistant panel is open, which
+  //     shows targets + session history + runs the tools. GlobalChatAssistant
+  //     reports toggle through `setAssistantOpen`.
+  // Outside both, the env-scoped queries park disabled (env is null off
+  // project-env routes anyway — see ActiveEnvContext — and the
+  // chat/projects/ai-config reads only matter to an open assistant).
+  const location = useLocation();
+  const onTrackerPage = useMemo(() => {
+    const match = matchPath(
+      {
+        path: "/projects/:projectId/:envSlug/:trackerKey",
+        caseSensitive: false,
+        end: false,
+      },
+      location.pathname,
+    );
+    const trackerKey = (match?.params as { trackerKey?: string } | null)
+      ?.trackerKey;
+    return (
+      trackerKey === "targets" ||
+      trackerKey === "secrets" ||
+      trackerKey === "scope" ||
+      trackerKey === "panel" ||
+      trackerKey === "history" ||
+      trackerKey === "issues"
+    );
+  }, [location.pathname]);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const trackerDataGate = onTrackerPage || assistantOpen;
+
+  // Schema v2.1 env resolution: the slug in the URL maps to a
+  // `blx_Environments` row, and the row's ItemId scopes the
+  // verification-check selection (`blx_VerificationChecks.environmentId`).
+  // While the env list is loading (or in the deployment gap) the id stays
+  // empty and the checks query parks disabled. Both reads follow the same
+  // page-scoped gate — the Scope page and the assistant are the only
+  // consumers of the check rows.
+  const envRowsQuery = useEnvironments(activeEnv?.projectId ?? null);
+  const activeEnvironmentId =
+    envRowsQuery.data?.find((e) => e.slug === activeEnv?.envSlug)?.id ?? "";
+  const checksQuery = useVerificationChecks(
+    activeEnv?.projectId ?? null,
+    activeEnvironmentId || null,
+    { enabled: trackerDataGate },
+  );
+  const checkRows = checksQuery.data ?? [];
+
+  // User preference row — the canonical store for device + activeSession.
+  // Read+write through `useUserPreference` / `useSaveUserPreference`. The
+  // localStorage mirror under `lattice.mirror.userPreference.v1` is the
+  // synchronous first-paint fallback. We populate the mirror from the
+  // cloud value once it resolves so cold-boot reads from a synced state.
+  // Gated by the same tracker gate: the device picker (Scope page) and
+  // the session id (assistant) are the only readers.
+  const prefQuery = useUserPreference({ enabled: trackerDataGate });
   const savePref = useSaveUserPreference();
   const userId = currentUser?.id ?? "";
   useEffect(() => {
     if (prefQuery.data && userId) {
       writePrefMirror(userId, {
-        scope: prefQuery.data.customChecks as string[] | undefined,
         device: prefQuery.data.device,
         activeSession: prefQuery.data.activeSession,
       });
@@ -439,18 +491,22 @@ export function useIssueTracker() {
   //  cross-device sessions stay in sync, and the page header pill /
   //  filter counts automatically reflect new findings.
   // ──────────────────────────────────────────────────────────────────────────
-  const targetsQuery = useIssueTrackerTargets();
-  const secretsQuery = useIssueTrackerSecrets();
-  const issuesQuery = useIssueTrackerIssues();
+  const targetsQuery = useIssueTrackerTargets({ enabled: trackerDataGate });
+  const secretsQuery = useIssueTrackerSecrets({ enabled: trackerDataGate });
+  const issuesQuery = useIssueTrackerIssues({ enabled: trackerDataGate });
   // User's saved AI gateway overrides (URL / model / token) — read once
   // here so the chat request below can attach them as `x-ai-gateway-*`
   // headers. Empty fields fall through to the proxy's .env defaults.
-  const aiConfigQuery = useUserAiConfig();
+  // Fetches only while the assistant is open (SettingsPage keeps its own
+  // always-on instance under the same cache key).
+  const aiConfigQuery = useUserAiConfig({ enabled: assistantOpen });
   // Projects come from the same Blocks layer the Projects page uses — the
   // chatbot can create/edit/delete projects, and its CURRENT STATE snapshot
   // needs the real ids so "rename Blocks-Logic" resolves against state
-  // instead of a guess. Small list; TanStack caches it across pages.
-  const projectsQuery = useProjects();
+  // instead of a guess. Same cache key as the Projects page, so on
+  // /projects this is a free cache hit; elsewhere it only fetches while
+  // the assistant panel is open.
+  const projectsQuery = useProjects({ enabled: assistantOpen });
 
   const targets = targetsQuery.data ?? [];
   const secrets = secretsQuery.data ?? [];
@@ -476,7 +532,9 @@ export function useIssueTracker() {
   // hook is the canonical store; the localStorage mirror above is the
   // synchronous read fallback. When the cloud row loads we replace the
   // mirror so cold-boot state syncs from another device.
-  const cloudBindings = useSecretBindings(activeEnv);
+  const cloudBindings = useSecretBindings(activeEnv, {
+    enabled: trackerDataGate,
+  });
   const saveCloudBindings = useSaveSecretBindings();
   useEffect(() => {
     if (cloudBindings.data && activeEnv) {
@@ -554,6 +612,9 @@ export function useIssueTracker() {
   const updateSecret = useUpdateSecret();
   const createIssue = useCreateIssue();
   const changeIssueStatus = useUpdateIssueStatus();
+  // Per-env verification-check row mutation (schema v2.1) — drives the
+  // Scope page toggles AND the chat's `toggle_verification_check` tool.
+  const setCheckEnabled = useSetVerificationCheckEnabled();
   // Partial-update mutation for the dedup/merge path (occurrence bumps,
   // severity escalation, reopen-on-regression).
   const updateIssue = useUpdateIssue();
@@ -563,6 +624,10 @@ export function useIssueTracker() {
   const createProject = useCreateProject();
   const updateProject = useUpdateProject();
   const deleteProject = useDeleteProject();
+  // Env creation for the chat tool — same hook the AddEnvironmentModal
+  // uses (writes a blx_Environments row, seeds its checks, tester/manager
+  // role guard included).
+  const createEnvironment = useCreateEnvironment();
   // Feature / flow mutations for the chat tools. Cascades (cross-env clone
   // rename/delete propagation) live inside these hooks, so chat-driven
   // actions behave exactly like the project page's kebab-menu actions.
@@ -627,32 +692,36 @@ export function useIssueTracker() {
   // repeats count once, here, without a round-trip. Reset alongside
   // completedTargetsRef at the start of every run.
   const seenFingerprintsRef = useRef<Set<string>>(new Set());
-  const [scope, setScope] = useState<string[]>(() =>
-    readStoredScope(idleRun.scope, userId),
-  );
+  // The verification scope is DERIVED from the env's check rows — the
+  // enabled flags in `blx_VerificationChecks` are the source of truth
+  // (schema v2.1; per-env, per-row). Toggling goes through
+  // `useSetVerificationCheckEnabled`; the optimistic onMutate in that
+  // hook keeps the checkboxes instant.
+  //
+  // Fallback: while the rows haven't loaded (or the schema is in the
+  // deployment gap and the query returned empty) the recommended catalog
+  // ids stand in — the same defaults the v2.1 seeds wrote as
+  // `enabled = recommended`, so runs never silently start with zero
+  // checks.
+  const scope = useMemo(() => {
+    if (checkRows.length === 0) {
+      return verificationChecks
+        .filter((c) => c.recommended)
+        .map((c) => c.id);
+    }
+    return checkRows.filter((r) => r.enabled).map((r) => r.checkId);
+  }, [checkRows]);
   // Device emulation for the next run — forwarded through the api layer so
   // the backend sizes the browser context (viewport + touch).
   const [device, setDevice] = useState<"desktop" | "mobile" | "tablet">(() =>
     readStoredDevice(userId),
   );
 
-  // Scope + device survive page reloads (cloud's `UserPreference` row +
+  // Device survives page reloads (cloud's `UserPreference` row +
   // localStorage mirror under `lattice.mirror.userPreference.v1`). The
-  // user's check matrix is a deliberate setup, and losing it to every
-  // HMR refresh or navigation silently shrank full runs to the 8-check
-  // default twice. The cloud write is fire-and-forget — failure doesn't
-  // block the local mirror from being the source of truth.
-  useEffect(() => {
-    if (!userId) return;
-    writePrefMirror(userId, {
-      ...readPrefMirror(userId),
-      scope,
-    });
-    if (prefQuery.data) {
-      void savePref.mutateAsync({ customChecks: scope as unknown[] });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, userId]);
+  // cloud write is fire-and-forget — failure doesn't block the local
+  // mirror from being the source of truth. (Scope no longer persists
+  // here: it lives in the env's check rows, see above.)
   useEffect(() => {
     if (!userId) return;
     writePrefMirror(userId, {
@@ -724,8 +793,13 @@ export function useIssueTracker() {
   const applyChatActionRef = useRef<
     ((action: ChatAction) => Promise<void>) | null
   >(null);
-  const chatHistoryQuery = useChatHistory(sessionId);
-  const chatSessionsQuery = useChatSessions();
+  // History + session list only load while the assistant panel is open —
+  // the closed launcher renders no messages, so reading 500 persisted
+  // rows per mount on every page was pure waste (page-scoped fetching).
+  const chatHistoryQuery = useChatHistory(sessionId, {
+    enabled: assistantOpen,
+  });
+  const chatSessionsQuery = useChatSessions({ enabled: assistantOpen });
   const appendChatMessage = useAppendChatMessage();
   const deleteChatSession = useDeleteChatSession();
   const renameChatSession = useRenameChatSession();
@@ -2050,6 +2124,11 @@ export function useIssueTracker() {
         filters,
         projects,
         activeEnv,
+        // Per-env check labels (custom `custom_*` ids resolve here) —
+        // from the env's verification-check rows, schema v2.1.
+        checkLabels: Object.fromEntries(
+          checkRows.map((r) => [r.checkId, r.label]),
+        ),
         // Pass the localStorage mirror so the AI snapshot's
         // `hasCredential` / `boundToTargetNames` projections match the
         // UI — see issueTrackerBindings.ts for why we don't read
@@ -2174,6 +2253,7 @@ export function useIssueTracker() {
       issues,
       projects,
       scope,
+      checkRows,
       run,
       filters,
       browserTools,
@@ -2292,18 +2372,28 @@ export function useIssueTracker() {
         case "toggle_verification_check": {
           const checkId = tool.input.checkId as VerificationCheckId | undefined;
           if (!checkId) return "Skipped — missing checkId.";
+          // Row-backed under schema v2.1: find the env's row for this
+          // check, flip its enabled flag through the same mutation the
+          // Scope page uses (role guard included).
+          const row = checkRows.find((r) => r.checkId === checkId);
+          if (!row) {
+            return `Skipped — "${checkId}" is not a check on this environment.`;
+          }
           // The tool schema makes `enabled` explicit; if it's absent
           // (offline-fallback or legacy call), fall back to a flip.
-          const enabled = tool.input.enabled as boolean | undefined;
-          setScope((cur) => {
-            const isOn = cur.includes(checkId);
-            const target = enabled !== undefined ? enabled : !isOn;
-            if (target === isOn) return cur;
-            return target
-              ? [...cur, checkId]
-              : cur.filter((x) => x !== checkId);
-          });
-          return `Verification check "${checkId}" ${enabled === undefined ? "toggled" : enabled ? "enabled" : "disabled"}.`;
+          const enabledInput = tool.input.enabled as boolean | undefined;
+          const target = enabledInput ?? !row.enabled;
+          if (target === row.enabled) {
+            return `Verification check "${checkId}" is already ${target ? "enabled" : "disabled"}.`;
+          }
+          try {
+            await setCheckEnabled.mutateAsync({ row, enabled: target });
+            return `Verification check "${checkId}" ${target ? "enabled" : "disabled"}.`;
+          } catch (err) {
+            return `Could not update "${checkId}": ${
+              err instanceof Error ? err.message : "mutation failed."
+            }`;
+          }
         }
         case "set_target_enabled": {
           const targetId = tool.input.targetId as string | undefined;
@@ -2651,31 +2741,17 @@ export function useIssueTracker() {
               .replace(/[^a-z0-9]+/g, "-")
               .replace(/^-+|-+$/g, "");
           if (!slug) return "Skipped — couldn't derive a slug for that label.";
-          // Reject duplicates against BOTH the canonical four and the
-          // project's custom envs. `useAddProjectEnv` appends blindly and
-          // reads the single-project cache (cold when the user never opened
-          // the detail page), so we route through `useUpdateProject` with
-          // the full array from the list row instead — no clobber, and the
-          // same tester/manager role guard applies inside that hook.
-          const existing = new Set([
-            "dev",
-            "stg",
-            "prod",
-            "uat",
-            ...(p.customEnvs?.map((e) => e.slug) ?? []),
-          ]);
-          if (existing.has(slug)) {
-            return `Skipped — environment "${slug}" already exists on this project.`;
-          }
+          // Schema v2.1: environments are blx_Environments rows, not JSON
+          // on the project. `useCreateEnvironment` lists the project's env
+          // rows server-side and throws a clear error on a duplicate slug
+          // (fresher than any cache-derived check here), so the local
+          // duplicate set is gone.
           try {
-            await updateProject.mutateAsync({
-              id: projectId!,
-              patch: {
-                customEnvs: [
-                  ...(p.customEnvs ?? []),
-                  { slug, label, color: "#64748b" },
-                ],
-              },
+            await createEnvironment.mutateAsync({
+              projectId: projectId!,
+              slug,
+              label,
+              color: "#64748b",
             });
             return `Environment "${label}" (${slug}) added to ${p.name}.`;
           } catch (err) {
@@ -3184,9 +3260,12 @@ export function useIssueTracker() {
       targets,
       secrets,
       projects,
+      checkRows,
+      setCheckEnabled,
       createProject,
       updateProject,
       deleteProject,
+      createEnvironment,
       createFeature,
       updateFeature,
       deleteFeature,
@@ -3527,11 +3606,84 @@ Continue.`;
   // ──────────────────────────────────────────────────────────────────────────
   //  Scope
   // ──────────────────────────────────────────────────────────────────────────
-  const toggleScope = useCallback((id: string) => {
-    setScope((cur) =>
-      cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
-    );
-  }, []);
+  // Toggling writes the env's check row (enabled flag flip) through
+  // `setCheckEnabled` (declared with the other mutations above) —
+  // optimistic onMutate keeps the checkbox instant, onSuccess
+  // invalidation reconciles with the cloud. Select all / Clear just
+  // call this per row (N small PATCHes; fine at the catalog's ~11-20
+  // rows per env).
+  const toggleScope = useCallback(
+    (id: string) => {
+      const row = checkRows.find((r) => r.checkId === id);
+      if (!row) return;
+      void setCheckEnabled
+        .mutateAsync({ row, enabled: !row.enabled })
+        .catch(() => {
+          toast.error("Could not update the verification scope.");
+        });
+    },
+    [checkRows, setCheckEnabled, toast],
+  );
+
+  // Custom-check CRUD — per-env rows in `blx_VerificationChecks`
+  // (source "custom"). Creation enables the check immediately (the hook
+  // writes enabled=true), so the old "create then toggle on" dance is
+  // gone. All three throw for non-testers inside the hooks; the Scope
+  // page hides the affordances in addition.
+  const addCustomCheckRow = useAddCustomVerificationCheck();
+  const updateCustomCheckRow = useUpdateCustomVerificationCheck();
+  const removeCustomCheckRow = useRemoveCustomVerificationCheck();
+  const addCustomCheck = useCallback(
+    async (input: { label: string; description: string; recommended: boolean }) => {
+      if (!activeEnv?.projectId || !activeEnvironmentId) {
+        toast.error("No active environment — cannot add a custom check.");
+        return;
+      }
+      try {
+        await addCustomCheckRow.mutateAsync({
+          projectId: activeEnv.projectId,
+          environmentId: activeEnvironmentId,
+          label: input.label,
+          description: input.description,
+          recommended: input.recommended,
+        });
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Could not add the custom check.",
+        );
+      }
+    },
+    [activeEnv, activeEnvironmentId, addCustomCheckRow, toast],
+  );
+  const updateCustomCheck = useCallback(
+    (
+      row: EnvVerificationCheck,
+      patch: { label?: string; description?: string; recommended?: boolean },
+    ) => {
+      void updateCustomCheckRow
+        .mutateAsync({ row, ...patch })
+        .catch((err: unknown) => {
+          toast.error(
+            err instanceof Error
+              ? err.message
+              : "Could not update the custom check.",
+          );
+        });
+    },
+    [updateCustomCheckRow, toast],
+  );
+  const deleteCustomCheck = useCallback(
+    (row: EnvVerificationCheck) => {
+      void removeCustomCheckRow.mutateAsync({ row }).catch((err: unknown) => {
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : "Could not delete the custom check.",
+        );
+      });
+    },
+    [removeCustomCheckRow, toast],
+  );
 
   // Stable clearFilters — without the useCallback wrapper this closure is
   // reallocated on every render, which in turn re-renders `IssueFilters`
@@ -3551,6 +3703,22 @@ Continue.`;
     run,
     runActivityLog,
     scope,
+    // The env's verification-check rows (schema v2.1) — the Scope page
+    // renders from these; `scope` above is just the enabled ids.
+    checks: checkRows,
+    // True once the active env resolved to a row AND the checks query
+    // finished (success or failure). The Scope page parks on a skeleton
+    // until then. Empty data after ready = deployment gap — the page
+    // falls back to a read-only catalog view.
+    checksReady: Boolean(activeEnvironmentId) && !checksQuery.isLoading,
+    // Scope toggles are tester-only QA state — mirrors the mutation
+    // hooks' own throws (defense in depth).
+    checksReadOnly: !(currentUser?.roles?.includes("tester") ?? false),
+    // Assistant panel visibility, reported back by GlobalChatAssistant.
+    // Drives the page-scoped gate above: chat history / sessions /
+    // projects / AI config only fetch while the panel is open.
+    assistantOpen,
+    setAssistantOpen,
     chat,
     filters,
     selectedIssueId,
@@ -3599,6 +3767,9 @@ Continue.`;
     resumeVerification,
     stopVerification,
     toggleScope,
+    addCustomCheck,
+    updateCustomCheck,
+    deleteCustomCheck,
     device,
     setDevice,
     exportRunReport,

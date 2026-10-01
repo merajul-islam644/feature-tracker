@@ -648,12 +648,15 @@ function toInboxItem(n: CloudNotification): InboxItem | null {
 // exceeds this, bump the constant; the bell + detail page already
 // cope with whatever the array holds.
 const INBOX_PAGE_SIZE = 60;
-// How often the bell re-fetches the inbox. 5s matches
-// `useAnnouncements` and `useDirectMessages` so all three ambient
-// surfaces refresh on the same cadence — a tester who has the app
-// open learns about a manager action within seconds of the action
-// landing.
-const INBOX_POLL_MS = 5_000;
+
+// How often the bell re-fetches the inbox. Was 5s (matched the old
+// announcements/direct-messages cadence) — page-scoped fetching policy
+// (user directive 2026-10-01) cut the ambient pollers down because 12
+// calls/min per surface is the definition of an unnecessary call. 30s
+// keeps the bell feeling live while dropping the steady-state cost to 2
+// calls/min; the hidden-tab skip and the mark-all cooldown still apply
+// on top.
+const INBOX_POLL_MS = 30_000;
 
 export function useNotificationInbox() {
   const { currentUser } = useAuth();

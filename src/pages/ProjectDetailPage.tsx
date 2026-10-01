@@ -1,18 +1,18 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { Plus, GitBranch, Pencil, Rocket } from "lucide-react";
+import { useParams } from "react-router-dom";
+import { Plus, GitBranch, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
 import { FeatureList } from "@/components/feature/FeatureList";
 import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
 import { AddFlowModal } from "@/components/flow/AddFlowModal";
-import { RenameEnvModal } from "@/components/project/RenameEnvModal";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BootstrapDialog } from "@/components/project/BootstrapDialog";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import {
+  useEnvironments,
   useProject,
   useProjectFeatures,
   useProjectFlows,
@@ -25,7 +25,12 @@ import {
   type CanonicalEnvSlug,
 } from "@/lib/validation";
 import { envChipStyle } from "@/components/ui/color-picker";
-import type { Project, ProjectCustomEnv } from "@/lib/blocks/data";
+import type {
+  Environment,
+  EnvironmentKind,
+  Project,
+  ProjectCustomEnv,
+} from "@/lib/blocks/data";
 
 // Canonical env slugs that are always available on every project. Order
 // matches the dev→uat pipeline order; the page uses this for the chip and
@@ -68,10 +73,28 @@ export const PROJECT_ENV_META: Record<CanonicalEnvSlug, CanonicalEnvMeta> = {
   },
   uat: {
     label: "User Acceptance Testing",
-    shortLabel: "Uat",
+    shortLabel: "UAT",
     i18nKey: "projectEnv.envUat",
     className: "border-transparent bg-violet-500/10 text-violet-700",
   },
+};
+
+// Chip/badge styling per Environment.kind — the row-based successor to the
+// slug-keyed PROJECT_ENV_META lookup. Under schema v2.1 the env list is
+// data (blx_Environments rows): a canonical env's visual treatment comes
+// from its `kind`, custom envs tint via their own hex `color`, and none of
+// it depends on the slug (which is a renameable display cache).
+export const ENV_KIND_META: Record<
+  EnvironmentKind,
+  { className: string } | null
+> = {
+  dev: { className: "border-transparent bg-muted text-muted-foreground" },
+  stg: { className: "border-transparent bg-amber-500/10 text-amber-700" },
+  prod: { className: "border-transparent bg-emerald-500/10 text-emerald-700" },
+  uat: { className: "border-transparent bg-violet-500/10 text-violet-700" },
+  // Custom envs have no fixed class — the resolvers build an inline style
+  // from the row's color instead.
+  custom: null,
 };
 
 // Resolved metadata for *any* env — used by both the page header and the
@@ -85,6 +108,17 @@ export interface ResolvedEnvMeta {
   className?: string;
   customStyle?: React.CSSProperties;
   isCustom: boolean;
+  // The env's row identity (blx_Environments.ItemId) when the metadata was
+  // resolved from the env list — set by `resolveEnvMetaFromEnvs` only. Callers
+  // that scope per-env data (verification checks, active-env preference) use
+  // this instead of the slug; undefined means the row list wasn't available
+  // and the legacy project-JSON resolver answered.
+  environmentId?: string;
+  // True when the label is row data and must render verbatim — i18n lookups
+  // would hide a user's rename behind the translation. Set by the row-based
+  // resolver; the legacy resolver leaves it undefined so canonical labels
+  // keep translating.
+  verbatim?: boolean;
   // True when the canonical-env label is sourced from
   // `project.envLabelOverrides` rather than the i18n default. Callers
   // that pipe the label through the i18n translator should render the
@@ -151,6 +185,51 @@ export function resolveEnvMeta(
   };
 }
 
+// Row-based env metadata — the schema v2.1 resolver. Reads display data
+// straight off the blx_Environments row: the label is always verbatim user
+// data (seeded short forms for the canonical four, then renameable), the
+// styling keys off `kind`, and `environmentId` rides along so callers can
+// scope per-env data to the row identity instead of the slug. Unknown
+// slugs get the same neutral badge as the legacy resolver so a deep-link
+// to a deleted env doesn't blank the header.
+export function resolveEnvMetaFromEnvs(
+  slug: string | undefined,
+  envs: Environment[],
+): ResolvedEnvMeta | null {
+  if (!slug) return null;
+  const env = envs.find((e) => e.slug === slug);
+  if (!env) {
+    return {
+      slug,
+      label: slug,
+      shortLabel: slug,
+      className: "border-transparent bg-muted text-muted-foreground",
+      isCustom: false,
+    };
+  }
+  const kindMeta = ENV_KIND_META[env.kind];
+  if (kindMeta) {
+    return {
+      slug: env.slug,
+      label: env.label,
+      shortLabel: env.label,
+      className: kindMeta.className,
+      isCustom: false,
+      environmentId: env.id,
+      verbatim: true,
+    };
+  }
+  return {
+    slug: env.slug,
+    label: env.label,
+    shortLabel: env.label,
+    customStyle: envChipStyle(env.color || "#0ea5e9"),
+    isCustom: true,
+    environmentId: env.id,
+    verbatim: true,
+  };
+}
+
 // Resolve a display label for an env slug WITHOUT requiring project
 // context. Used by the AddFeature/AddFlow modals, which only know
 // `envSlug` (they don't take a `project` prop). Canonical envs map to
@@ -183,13 +262,18 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
   const envSlug = envSlugProp ?? params.envSlug;
 
   const projectQuery = useProject(projectId);
+  // The env list — schema v2.1's source of truth for every env surface on
+  // this page (header badge, dev-only gates, rename modal identity). While
+  // the query is in flight (or in the deployment gap) the page falls back
+  // to the legacy project-JSON resolution, so nothing flashes.
+  const environmentsQuery = useEnvironments(projectId ?? null);
+  const envRows = environmentsQuery.data ?? [];
   // Pass the env from the URL to scope the feature read. On the env-less
   // page (no envSlug), the hook returns every feature for the project,
   // including legacy records without an envSlug — see hooks.ts.
   const featuresQuery = useProjectFeatures(projectId, envSlug);
   const flowsQuery = useProjectFlows(projectId, envSlug);
   const t = useT();
-  const navigate = useNavigate();
   // Mirror the URL-resolved (projectId, envSlug) into the Issue Tracker
   // env context so the Targets/Secrets/Issues hooks can scope their reads
   // and mutations. We push even when envSlug is missing: the env-less
@@ -246,7 +330,6 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
 
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
-  const [renameEnvOpen, setRenameEnvOpen] = useState(false);
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
 
@@ -280,7 +363,28 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
     );
   }
 
-  const envMeta = resolveEnvMeta(envSlug, project);
+  // Row-based resolution once the env list lands; the legacy project-JSON
+  // resolver covers the load window (and the deployment gap) so the header
+  // never flashes the unknown-slug fallback for a slug that exists.
+  const envMeta = envRows.length
+    ? resolveEnvMetaFromEnvs(envSlug, envRows)
+    : resolveEnvMeta(envSlug, project);
+
+  // The authoring env is whichever row carries kind "dev" — usually slug
+  // "dev", but slugs are renameable under v2.1, so the gate keys off the
+  // row kind. `envSlug === undefined` is the legacy /projects/:id landing —
+  // treated as dev, same as before. While the env rows are still loading
+  // (or in the deployment gap) the canonical slug check stands in.
+  const isDevEnv =
+    envSlug === undefined ||
+    (envRows.length
+      ? envRows.find((e) => e.slug === envSlug)?.kind === "dev"
+      : envSlug === "dev");
+
+  // Badge label rule now lives inside EnvHeaderChip (verbatim row data →
+  // i18n for canonical defaults). This page only resolves envMeta to gate
+  // the chip's presence (unknown-slug/deployment-gap → no chip), matching
+  // the pre-chip behavior where the badge block vanished for null meta.
 
   return (
     <div className="space-y-6" key={retryKey}>
@@ -293,62 +397,13 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
           </h1>
           {envMeta && (
             <>
-              <Badge
-                className={envMeta.className}
-                style={envMeta.customStyle}
-                aria-label={
-                  envMeta.isCustom || envMeta.hasOverride
-                    ? envMeta.label
-                    : t(
-                        PROJECT_ENV_META[envMeta.slug as CanonicalEnvSlug]
-                          .i18nKey,
-                        envMeta.label,
-                      )
-                }
-              >
-                {/* Custom-env labels are user input — render verbatim.
-                    Canonical-env labels render the i18n translation
-                    UNLESS the user has set a per-project override, in
-                    which case the override wins (it's user-provided
-                    text, not a translation key). Without the
-                    `hasOverride` branch the override would be hidden
-                    behind the i18n lookup — `t()` returns the localised
-                    label whenever the key resolves, ignoring the
-                    fallback. */}
-                {envMeta.isCustom || envMeta.hasOverride
-                  ? envMeta.label
-                  : t(
-                      PROJECT_ENV_META[envMeta.slug as CanonicalEnvSlug]
-                        .i18nKey,
-                      envMeta.label,
-                    )}
-              </Badge>
-              {/* Pencil trigger for the inline env rename modal. Same
-                  visual treatment as the kebab trigger on ProjectCard,
-                  scaled down (`h-7 w-7`) to fit alongside the header
-                  chip without crowding it. Hidden entirely outside the
-                  dev environment page — non-dev envs (uat, prod,
-                  custom, etc.) are read-only views of what was
-                  authored in dev, and the per-env display label is
-                  set on the dev page via this modal. The undefined
-                  envSlug case is the legacy /projects/:id landing —
-                  treat as dev so the pencil still shows there. Also
-                  hidden for non-managers; `useRenameProjectEnv`
-                  throws the same error if reached another way. The
-                  `envSlug === undefined || envSlug === "dev"` check
-                  mirrors the Add Feature / Add Flow gate a few lines
-                  below, so all "dev-only" authoring affordances stay
-                  consistent. */}
-              {isManager && (envSlug === undefined || envSlug === "dev") && (
-                <button
-                  type="button"
-                  onClick={() => setRenameEnvOpen(true)}
-                  aria-label={t("env.renameTitle", "Rename Environment")}
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-              )}
+              {/* Badge + pencil + trash — the shared header chip (same
+                  component every env page renders). The icons are
+                  manager-only inside the chip; under v2.1 they show on
+                  EVERY env (slugs and labels are editable per row, and
+                  delete takes the env's children with it), not just dev
+                  — the old isDevEnv gate predated row-based envs. */}
+              <EnvHeaderChip />
             </>
           )}
         </div>
@@ -368,9 +423,9 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
           </Button>
           {/* Add Feature / Add Flow only appear on the dev environment.
               Other envs (uat, prod, custom) are read-only views of
-              what was authored in dev. The undefined envSlug case is
-              the legacy /projects/:id landing — treat as dev. */}
-          {(envSlug === undefined || envSlug === "dev") && (
+              what was authored in dev. The bare /projects/:id landing
+              counts as dev (see `isDevEnv`). */}
+          {isDevEnv && (
             <>
               {/* Flow authoring is the TESTER-only affordance on this
                   page (mirroring the inline "+ Add another flow"
@@ -424,7 +479,7 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
       </header>
 
       {features.length === 0 ? (
-        envSlug === undefined || envSlug === "dev" ? (
+        isDevEnv ? (
           // Only pass `onAdd` for managers — the empty state should
           // not surface a CTA non-managers can't act on. `useCreateFeature`
           // throws if they reach it some other way.
@@ -440,7 +495,7 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
       ) : (
         <FeatureList
           features={features}
-          readOnly={!(envSlug === undefined || envSlug === "dev")}
+          readOnly={!isDevEnv}
           envSlug={envSlug}
         />
       )}
@@ -463,40 +518,6 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
         projectId={project.id}
         envSlug={envSlug}
       />
-
-      {envMeta && (
-        <RenameEnvModal
-          open={renameEnvOpen}
-          onClose={() => setRenameEnvOpen(false)}
-          project={project}
-          envSlug={envMeta.slug}
-          isCustom={envMeta.isCustom}
-          currentLabel={envMeta.label}
-          onRenamed={(result) => {
-            // When the slug changed, the URL the user is currently on
-            // (e.g. /projects/:id/<oldSlug>) no longer resolves to a
-            // valid env — the page header would render the
-            // "unknown slug" fallback and the feature list would be
-            // empty. Redirect to the new slug so the rename lands in
-            // place. Skipped when only the label changed; in that case
-            // the envMeta refresh from the query invalidation already
-            // updates the visible label.
-            if (
-              result.oldSlug &&
-              result.oldSlug !== result.newSlug
-            ) {
-              // Land on the canonical env-menu URL (`/features`)
-              // after a slug rename, matching the env-chip click
-              // target on the project card — same destination, same
-              // URL shape, no separate in-app affordance for the
-              // bare `/projects/:id/:envSlug` route. The plain
-              // ProjectDetailPage still mounts at that URL via
-              // route definition, but no menu surfaces it.
-              navigate(`/projects/${project.id}/${result.newSlug}/features`);
-            }
-          }}
-        />
-      )}
     </div>
   );
 }
