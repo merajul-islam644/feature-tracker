@@ -231,6 +231,28 @@
       "requiredOn": "Both",
       "fields": [],
       "validationRule": null
+    },
+    {
+      "name": "environmentId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Environment.ItemId — env identity, stamped by the verification agent at detection time from the resolved env row. envSlug remains the display cache. requiredOn None until migration backfills, then tightened to Both.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "targetId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "VerificationTarget.ItemId the defect was found on — a hard link that survives URL edits, unlike the `url` string which is display-only. Empty on legacy rows (matched by url text).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
     }
   ],
   "schemaName": "Issue",

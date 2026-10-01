@@ -33,6 +33,8 @@ import {
   directMessagesCollection,
   callSignalsCollection,
   announcementsCollection,
+  environmentsCollection,
+  verificationChecksCollection,
   issuesCollection,
   secretsCollection,
   flowCommentsCollection,
@@ -52,6 +54,7 @@ import {
   toCallSignal,
   toChatMessage,
   toDirectMessage,
+  toEnvironment,
   toFeature,
   toFlow,
   toFlowCommentRow,
@@ -67,6 +70,7 @@ import {
   toUserNote,
   toUserPreference,
   toUserProfilePic,
+  toVerificationCheck,
   toVerificationTarget,
   type Announcement,
   type CallSignal,
@@ -75,6 +79,7 @@ import {
   type CloudAnnouncement,
   type CloudCallSignal,
   type CloudDirectMessage,
+  type CloudEnvironment,
   type CloudFeature,
   type CloudFlow,
   type CloudFlowComment,
@@ -89,7 +94,11 @@ import {
   type CloudUserNote,
   type CloudUserPreference,
   type CloudUserProfile,
+  type CloudVerificationCheck,
   type DirectMessage,
+  type Environment,
+  type EnvironmentKind,
+  type EnvVerificationCheck,
   type Feature,
   type Flow,
   type FlowCommentRow,
@@ -115,6 +124,10 @@ import {
   presignUpload,
   uploadToPresignedUrl,
 } from "./files";
+// Builtin verification-check catalog — the seed source for the per-env
+// blx_VerificationChecks rows (schema v2.1). Labels/descriptions stay code
+// constants; only `enabled` round-trips through the cloud.
+import { verificationChecks } from "../../data/issueTrackerConstants";
 import { notifyAssignedFeature, notifyRole } from "./notifier";
 import {
   useHiddenAnnouncementIds,
@@ -460,6 +473,13 @@ export const queryKeys = {
   // — different cache key so an invalidation of the AI config never
   // flushes the preferences and vice versa.
   userPreference: (userId: string) => ["user-preference", userId] as const,
+  // Environments (schema v2.1) — keyed per-project: every env page renders
+  // one project's env rows, and a project switch must not share stale rows.
+  environments: (projectId: string) => ["environments", projectId] as const,
+  // Env-scoped verification checks — keyed per-(project, environment) since
+  // the Scope page reads exactly one env's rows. See `useVerificationChecks`.
+  verificationChecks: (projectId: string, environmentId: string) =>
+    ["verification-checks", projectId, environmentId] as const,
   // Per-user hidden-announcement inbox — list of announcement ids the
   // user dismissed. Keyed per-user, same shape as `notifications` /
   // `directMessages`.
@@ -3308,6 +3328,14 @@ export function useCreateProject(): UseMutationResult<
         CreatedDate: now,
         LastUpdatedDate: now,
       };
+      // Schema v2.1: every project starts with the four canonical envs
+      // (dev/stg/prod/uat) as real Environment rows, each seeded with the
+      // 11 builtin verification checks (enabled = recommended). Best-effort
+      // with the deployment-gap swallow — blx_Environments /
+      // blx_VerificationChecks 400 until their schema deploy lands, and a
+      // failed seed must never fail the project create (the migration
+      // script backfills the same rows for pre-existing projects).
+      await seedCanonicalEnvs(itemId);
       return toProject(item);
     },
   });
@@ -6319,6 +6347,9 @@ export function useSaveUserAvatarConfig(): UseMutationResult<
 export interface SecretBindingScope {
   projectId: string;
   envSlug: string;
+  // Owning Environment.ItemId — echoed onto the row when the caller has
+  // resolved it; empty on pre-migration writes.
+  environmentId?: string;
 }
 
 export function useSecretBindings(
@@ -6354,6 +6385,7 @@ export function useSecretBindings(
           id: "",
           projectId: "",
           envSlug: "",
+          environmentId: "",
           bindings: {},
           updatedBy: null,
         };
@@ -6370,6 +6402,7 @@ export function useSecretBindings(
             id: "",
             projectId: scope.projectId,
             envSlug: scope.envSlug,
+            environmentId: scope.environmentId ?? "",
             bindings: {},
             updatedBy: null,
           };
@@ -6389,6 +6422,7 @@ export function useSecretBindings(
           id: "",
           projectId: scope.projectId,
           envSlug: scope.envSlug,
+          environmentId: scope.environmentId ?? "",
           bindings: {},
           updatedBy: null,
         };
@@ -6428,6 +6462,7 @@ export function useSaveSecretBindings(): UseMutationResult<
       const baseFields = {
         projectId: input.scope.projectId,
         envSlug: input.scope.envSlug,
+        environmentId: input.scope.environmentId ?? "",
         bindingsJson: JSON.stringify(input.bindings),
         updatedBy: input.updatedBy ?? userId,
       };
@@ -6440,6 +6475,7 @@ export function useSaveSecretBindings(): UseMutationResult<
         id: existing?.ItemId ?? "",
         projectId: input.scope.projectId,
         envSlug: input.scope.envSlug,
+        environmentId: input.scope.environmentId ?? "",
         bindings: input.bindings,
         updatedBy: input.updatedBy ?? userId,
       };
@@ -6489,6 +6525,7 @@ export function useUserPreference(): UseQueryResult<UserPreference> {
         customChecks: [],
         repoBrowserPath: "",
         githubCredentialId: "",
+        activeEnvironmentId: "",
       };
       try {
         const raw = await userPreferencesCollection.list({
@@ -6544,6 +6581,7 @@ export function useSaveUserPreference(): UseMutationResult<
             customChecks: [],
             repoBrowserPath: "",
             githubCredentialId: "",
+            activeEnvironmentId: "",
           };
       const next = { ...current, ...input };
       const baseFields = {
@@ -6554,6 +6592,7 @@ export function useSaveUserPreference(): UseMutationResult<
         customChecksJson: JSON.stringify(next.customChecks),
         repoBrowserPath: next.repoBrowserPath,
         githubCredentialId: next.githubCredentialId,
+        activeEnvironmentId: next.activeEnvironmentId,
       };
       if (existing) {
         await userPreferencesCollection.update(existing.ItemId, baseFields);
@@ -7541,4 +7580,551 @@ export function useRegisterMailAddress(): UseMutationResult<
       return { address: body.address };
     },
   });
+}
+
+// --- Environments (schema v2.1) ----------------------------------------------
+//
+// Env identity rows (blx_Environments). The four canonical kinds are seeded
+// at project creation (`useCreateProject` → `seedCanonicalEnvs`); users add
+// `custom` envs through `useCreateEnvironment`. Every env-scoped row
+// (Feature/Flow/Target/Secret/Issue/Binding/Check) points at its env by
+// ItemId via `environmentId` — the slug is only the URL/display cache and
+// stays renameable.
+
+/** Sparse ordering so custom envs sort after the canonical four. */
+export const CANONICAL_ENV_SEEDS = [
+  { slug: "dev", label: "Dev", kind: "dev", order: 0, color: "" },
+  { slug: "stg", label: "Stg", kind: "stg", order: 10, color: "" },
+  { slug: "prod", label: "Prod", kind: "prod", order: 20, color: "" },
+  { slug: "uat", label: "UAT", kind: "uat", order: 30, color: "" },
+] as const;
+
+/** Creates one Environment row; returns the new ItemId (or null). */
+async function createEnvironmentRow(
+  projectId: string,
+  seed: {
+    slug: string;
+    label: string;
+    kind: string;
+    order: number;
+    color?: string;
+  },
+): Promise<string | null> {
+  const created = await environmentsCollection.create({
+    projectId,
+    slug: seed.slug,
+    label: seed.label,
+    color: seed.color ?? "",
+    order: String(seed.order),
+    kind: seed.kind,
+  });
+  return extractInsertedItemId(created, "insertEnvironment");
+}
+
+/** Seeds the 11 builtin checks for one env (enabled = recommended). */
+async function seedBuiltinChecks(
+  projectId: string,
+  environmentId: string,
+): Promise<void> {
+  for (const check of verificationChecks) {
+    await verificationChecksCollection.create({
+      projectId,
+      environmentId,
+      source: "builtin",
+      checkId: check.id,
+      label: check.label,
+      description: check.description,
+      recommended: String(check.recommended),
+      enabled: String(check.recommended),
+    });
+  }
+}
+
+/**
+ * Best-effort canonical-env seed for a fresh project. Deployment-gap safe:
+ * while blx_Environments / blx_VerificationChecks are not yet deployed the
+ * gateway 400s — we warn and move on, and the migration script backfills
+ * the same rows. A failed seed must never fail the project create itself.
+ */
+async function seedCanonicalEnvs(projectId: string): Promise<void> {
+  try {
+    for (const seed of CANONICAL_ENV_SEEDS) {
+      const envId = await createEnvironmentRow(projectId, seed);
+      if (envId) await seedBuiltinChecks(projectId, envId);
+    }
+  } catch (err) {
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[seedCanonicalEnvs] env seed failed; migration will backfill",
+        { projectId, err },
+      );
+    }
+  }
+}
+
+export function useEnvironments(
+  projectId: string | null,
+): UseQueryResult<Environment[]> {
+  return useQuery({
+    queryKey: queryKeys.environments(projectId ?? ""),
+    enabled: Boolean(projectId),
+    // Envs change rarely (create/rename only); keep warm across navigations
+    // so the env sidebar doesn't re-fetch on every page switch.
+    staleTime: 5 * 60_000,
+    retry: false,
+    queryFn: async () => {
+      try {
+        const raw = await environmentsCollection.list({
+          filter: { projectId: projectId! },
+          pageNo: 1,
+          pageSize: 100,
+        });
+        const rows = unwrapPaged<CloudEnvironment>(raw).items.map(
+          toEnvironment,
+        );
+        // `order` is the sparse sort key the seeds write (0/10/20/30;
+        // custom envs +10 past the max) — an ascending sort is all the
+        // env pages need.
+        return rows.sort((a, b) => a.order - b.order);
+      } catch (err) {
+        // Deployment-gap: the schema isn't deployed yet → HTTP 400. Warn
+        // and hand back empty; the env pages synthesize the canonical four
+        // client-side until the deploy + migration land. Same retry-off /
+        // warn-once policy as the other deployment-gap hooks.
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useEnvironments] cloud read failed; returning empty",
+            { projectId, err },
+          );
+        }
+        return [];
+      }
+    },
+  });
+}
+
+export interface CreateEnvironmentInput {
+  projectId: string;
+  /** URL segment + display cache — normalized to lowercase-kebab here. */
+  slug: string;
+  label: string;
+  color?: string;
+}
+
+export function useCreateEnvironment(): UseMutationResult<
+  Environment,
+  Error,
+  CreateEnvironmentInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  // Manager-only guard — mirrors `useAddProjectEnv` /
+  // `useRenameProjectEnv`. Env management is a project-structure change,
+  // the same class of action as creating a project; the UI hides the
+  // control for non-managers, this is the defense-in-depth throw.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot add environments. Ask a manager for access.",
+        );
+      }
+      const slug = input.slug
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-");
+      if (!slug) throw new Error("Environment slug is required.");
+      const raw = await environmentsCollection.list({
+        filter: { projectId: input.projectId },
+        pageNo: 1,
+        pageSize: 100,
+      });
+      const existing = unwrapPaged<CloudEnvironment>(raw).items;
+      // Slug uniqueness is client-checked: the flat gateway filter has no
+      // uniqueness rule, so list the project's envs and compare here
+      // (labels may repeat; slugs may not — they're the URL segment).
+      if (existing.some((e) => (e.slug ?? "") === slug)) {
+        throw new Error(
+          `An environment with slug "${slug}" already exists in this project.`,
+        );
+      }
+      // Custom envs sort after the canonical four (whose seeds stop at 30).
+      const maxOrder = existing.reduce(
+        (m, e) => Math.max(m, Number(e.order ?? 0) || 0),
+        30,
+      );
+      const order = maxOrder + 10;
+      const label = input.label.trim() || slug;
+      const envId = await createEnvironmentRow(input.projectId, {
+        slug,
+        label,
+        kind: "custom",
+        order,
+        color: input.color,
+      });
+      if (!envId) {
+        throw new Error(
+          "Could not create environment — no itemId in response.",
+        );
+      }
+      // Seed the new env's builtin checks — same best-effort policy as the
+      // project-create seed (a failed seed never fails the create).
+      try {
+        await seedBuiltinChecks(input.projectId, envId);
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useCreateEnvironment] builtin check seed failed; migration will backfill",
+            { projectId: input.projectId, environmentId: envId, err },
+          );
+        }
+      }
+      const now = new Date().toISOString();
+      return {
+        id: envId,
+        projectId: input.projectId,
+        slug,
+        label,
+        color: input.color || undefined,
+        order,
+        kind: "custom" as const,
+        createdAt: now,
+        updatedAt: now,
+      };
+    },
+    onSuccess: (_env, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.environments(input.projectId),
+      });
+    },
+  });
+}
+
+export interface UpdateEnvironmentInput {
+  id: string;
+  projectId: string;
+  label?: string;
+  /** Slug rename — identity stays the ItemId, so every `environmentId`
+   *  pointer survives untouched. That is the whole point of schema v2.1. */
+  slug?: string;
+  color?: string;
+  order?: number;
+}
+
+export function useUpdateEnvironment(): UseMutationResult<
+  void,
+  Error,
+  UpdateEnvironmentInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  // Manager-only guard — same class of action as `useCreateEnvironment`.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (isTester) {
+        throw new Error(
+          "Testers cannot rename environments. Ask a manager for access.",
+        );
+      }
+      // Read the row first: the requiredOn "Both" columns (projectId, slug,
+      // label, kind) must be echoed on every PATCH or the gateway rejects
+      // the write with VALIDATION_ERROR (the IssueTracker requiredOn:3
+      // lesson). The same list also powers the slug-uniqueness check.
+      const raw = await environmentsCollection.list({
+        filter: { projectId: input.projectId },
+        pageNo: 1,
+        pageSize: 100,
+      });
+      const items = unwrapPaged<CloudEnvironment>(raw).items;
+      const row = items.find((e) => e.ItemId === input.id);
+      if (!row) {
+        throw new Error(
+          "Environment not found — it may have been deleted in another tab.",
+        );
+      }
+      const nextSlug = input.slug !== undefined
+        ? input.slug.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-")
+        : (row.slug ?? "");
+      if (!nextSlug) throw new Error("Environment slug is required.");
+      if (nextSlug !== (row.slug ?? "")) {
+        const clash = items.some(
+          (e) => e.ItemId !== input.id && (e.slug ?? "") === nextSlug,
+        );
+        if (clash) {
+          throw new Error(
+            `An environment with slug "${nextSlug}" already exists in this project.`,
+          );
+        }
+      }
+      const nextLabel = input.label !== undefined
+        ? input.label.trim()
+        : (row.label ?? "");
+      if (!nextLabel) throw new Error("Environment label is required.");
+      await environmentsCollection.update(input.id, {
+        projectId: row.projectId ?? input.projectId,
+        slug: nextSlug,
+        label: nextLabel,
+        color: input.color !== undefined
+          ? (input.color ?? "")
+          : (row.color ?? ""),
+        order: input.order !== undefined
+          ? String(input.order)
+          : (row.order ?? ""),
+        kind: row.kind ?? "custom",
+      });
+    },
+    onSuccess: (_res, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.environments(input.projectId),
+      });
+    },
+  });
+}
+
+// --- Env-scoped verification checks ------------------------------------------
+//
+// One row per check per environment (blx_VerificationChecks). Builtin rows
+// mirror the 11-check catalog; `enabled` is the per-env selection that used
+// to live (entangled with the definitions) in UserPreference.customChecksJson.
+
+export function useVerificationChecks(
+  projectId: string | null,
+  environmentId: string | null,
+): UseQueryResult<EnvVerificationCheck[]> {
+  return useQuery({
+    queryKey: queryKeys.verificationChecks(
+      projectId ?? "",
+      environmentId ?? "",
+    ),
+    enabled: Boolean(projectId && environmentId),
+    staleTime: 5 * 60_000,
+    retry: false,
+    queryFn: async () => {
+      try {
+        // Flat {projectId, environmentId} filter — both columns are in the
+        // collection's fields selector (the selector-gating rule).
+        const raw = await verificationChecksCollection.list({
+          filter: {
+            projectId: projectId!,
+            environmentId: environmentId!,
+          },
+          pageNo: 1,
+          pageSize: 200,
+        });
+        const rows = unwrapPaged<CloudVerificationCheck>(raw).items.map(
+          toVerificationCheck,
+        );
+        // Builtin checks first (catalog order is the Scope page's menu
+        // order), then custom rows newest-last.
+        return rows.sort((a, b) => {
+          if (a.source !== b.source) return a.source === "builtin" ? -1 : 1;
+          return a.createdAt.localeCompare(b.createdAt);
+        });
+      } catch (err) {
+        // Deployment-gap: 400 until the schema deploys — the Scope page
+        // falls back to its localStorage mirror, same as today.
+        if (typeof console !== "undefined") {
+          console.warn(
+            "[useVerificationChecks] cloud read failed; returning empty",
+            { projectId, environmentId, err },
+          );
+        }
+        return [];
+      }
+    },
+  });
+}
+
+export function useSetVerificationCheckEnabled(): UseMutationResult<
+  EnvVerificationCheck,
+  Error,
+  { row: EnvVerificationCheck; enabled: boolean }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  // Tester-only guard — the per-env check selection IS QA state (same
+  // policy as the flow-row chips: read-only for every non-tester role).
+  // The Scope page hides the toggles; this is the defense-in-depth throw.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async ({ row, enabled }) => {
+      if (!isTester) {
+        throw new Error(
+          "Only testers can change the verification scope for an environment.",
+        );
+      }
+      // Echo every requiredOn "Both" column — projectId, environmentId,
+      // source, checkId, label, enabled — or the gateway rejects the PATCH
+      // with VALIDATION_ERROR (the requiredOn:3 echo rule).
+      await verificationChecksCollection.update(row.id, {
+        projectId: row.projectId,
+        environmentId: row.environmentId,
+        source: row.source,
+        checkId: row.checkId,
+        label: row.label,
+        enabled: String(enabled),
+      });
+      return { ...row, enabled };
+    },
+    onSuccess: (next) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.verificationChecks(
+          next.projectId,
+          next.environmentId,
+        ),
+      });
+    },
+  });
+}
+
+export interface AddCustomCheckInput {
+  projectId: string;
+  environmentId: string;
+  label: string;
+  description?: string;
+}
+
+export function useAddCustomVerificationCheck(): UseMutationResult<
+  EnvVerificationCheck,
+  Error,
+  AddCustomCheckInput
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  // Tester-only guard — same QA-state policy as the enable toggle above.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async (input) => {
+      if (!isTester) {
+        throw new Error(
+          "Only testers can define custom verification checks.",
+        );
+      }
+      const label = input.label.trim();
+      if (!label) throw new Error("Check name is required.");
+      // Identity is (environmentId, checkId). Derive the checkId from the
+      // label, then de-clash within the env with a short random suffix —
+      // labels are editable, so they can never be the identity.
+      const raw = await verificationChecksCollection.list({
+        filter: {
+          projectId: input.projectId,
+          environmentId: input.environmentId,
+        },
+        pageNo: 1,
+        pageSize: 200,
+      });
+      const existing = unwrapPaged<CloudVerificationCheck>(raw).items;
+      const base = `custom_${
+        label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ||
+        "check"
+      }`;
+      let checkId = base;
+      while (existing.some((c) => (c.checkId ?? "") === checkId)) {
+        checkId = `${base}_${Math.random().toString(36).slice(2, 6)}`;
+      }
+      const created = await verificationChecksCollection.create({
+        projectId: input.projectId,
+        environmentId: input.environmentId,
+        source: "custom",
+        checkId,
+        label,
+        description: input.description?.trim() ?? "",
+        recommended: "false",
+        // A check the user just defined is on by default — they created it
+        // because they want it running in this env.
+        enabled: "true",
+      });
+      const id = extractInsertedItemId(created, "insertVerificationCheck");
+      if (!id) {
+        throw new Error(
+          "Could not create check — no itemId in response.",
+        );
+      }
+      const now = new Date().toISOString();
+      return {
+        id,
+        projectId: input.projectId,
+        environmentId: input.environmentId,
+        source: "custom" as const,
+        checkId,
+        label,
+        description: input.description?.trim() ?? "",
+        recommended: false,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+    },
+    onSuccess: (next) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.verificationChecks(
+          next.projectId,
+          next.environmentId,
+        ),
+      });
+    },
+  });
+}
+
+export function useRemoveCustomVerificationCheck(): UseMutationResult<
+  void,
+  Error,
+  { row: EnvVerificationCheck }
+> {
+  const { currentUser } = useAuth();
+  const qc = useQueryClient();
+  // Tester-only guard — same QA-state policy as the enable toggle above.
+  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  return useMutation({
+    mutationFn: async ({ row }) => {
+      if (!isTester) {
+        throw new Error(
+          "Only testers can remove custom verification checks.",
+        );
+      }
+      // Builtin rows are catalog-owned — they're toggled, never deleted.
+      // (Role gate lands with the Scope page flip; see the chipsReadOnly
+      // precedent for the non-tester hard gate.)
+      if (row.source !== "custom") {
+        throw new Error(
+          "Built-in checks can only be enabled or disabled, not removed.",
+        );
+      }
+      await verificationChecksCollection.delete(row.id);
+    },
+    onSuccess: (_res, { row }) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.verificationChecks(
+          row.projectId,
+          row.environmentId,
+        ),
+      });
+    },
+  });
+}
+
+// --- Active environment -------------------------------------------------------
+//
+// The user's current env (UserPreference.activeEnvironmentId). Replaces the
+// SecretBinding `__active__::` sentinel row and the
+// `lattice.mirror.active-env.v1` localStorage mirror — the active env is a
+// user preference, not a binding, and it should survive devices (the mirror
+// didn't). Read side rides the existing useUserPreference row, so the
+// deployment-gap fallback (empty string while the schema is undeployed)
+// comes for free.
+export function useActiveEnvironment() {
+  const prefQuery = useUserPreference();
+  const save = useSaveUserPreference();
+  const activeEnvironmentId = prefQuery.data?.activeEnvironmentId ?? "";
+  const setActiveEnvironment = (environmentId: string) => {
+    save.mutate({ activeEnvironmentId: environmentId });
+  };
+  return {
+    activeEnvironmentId,
+    setActiveEnvironment,
+    /** True while the preference write is in flight. */
+    isSaving: save.isPending,
+  };
 }

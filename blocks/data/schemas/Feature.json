@@ -121,6 +121,17 @@
       "requiredOn": "None",
       "fields": [],
       "validationRule": null
+    },
+    {
+      "name": "environmentId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Environment.ItemId — the env identity this feature lives under. Stamped by the app layer on create from the resolved env row; envSlug stays as a display cache. Legacy rows keep it empty and stay visible on the env-less project landing. Deliberately requiredOn None until the migration backfills every row, then tightened to Both.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
     }
   ],
   "schemaName": "Feature",

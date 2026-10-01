@@ -77,6 +77,17 @@
       "requiredOn": "None",
       "fields": [],
       "validationRule": null
+    },
+    {
+      "name": "activeEnvironmentId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Environment.ItemId the user is currently working in. Replaces the SecretBinding __active__:: sentinel row + lattice.mirror.active-env.v1 mirror — the active env is a user preference, not a binding. Empty string when off-env.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
     }
   ],
   "schemaName": "UserPreference",

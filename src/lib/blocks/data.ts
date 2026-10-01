@@ -41,6 +41,11 @@ export interface CloudFeature {
   // custom env. Optional because legacy records predating env-scoped
   // features may not have this field set.
   envSlug?: string;
+  // Owning Environment.ItemId — the env *identity*. envSlug is only the
+  // display/URL cache (renameable); scoping keys off this id so env
+  // renames never orphan rows. Optional until the migration backfills,
+  // then stamped from the resolved env row on every create.
+  environmentId?: string;
   // ItemId of the dev feature this record was cloned from. Stamped on
   // insert by the sibling-create in `useCloneFeature` — the cross-env
   // sync feature (delete + rename on dev) uses this to find sibling
@@ -93,6 +98,10 @@ export interface CloudFlow {
   // Owning environment slug — copied from the parent Feature on creation
   // so the gateway can filter flows by env without joining tables.
   envSlug?: string;
+  // Owning Environment.ItemId — ALWAYS copied from the parent Feature's
+  // environmentId by the create hook (same rule as envSlug). No code path
+  // may set it independently; the flow lives where its feature lives.
+  environmentId?: string;
   // ItemId of the dev flow this record was cloned from. Stamped on insert
   // by the flow-cascade in `useCloneFeature` — the cross-env sync feature
   // (delete + rename on dev) uses this to find sibling flows in other envs.
@@ -348,6 +357,10 @@ export interface CloudVerificationTarget {
   // filter in `useIssueTracker`.
   projectId?: string;
   envSlug?: string;
+  // Owning Environment.ItemId — env identity; envSlug stays the display
+  // cache. Stamped from the resolved env row at creation; empty on
+  // pre-migration rows.
+  environmentId?: string;
   applicationName: string;
   url: string;
   environment: string;
@@ -366,6 +379,9 @@ export interface CloudSecret {
   // Per-environment scoping — see Secret (UI type) for the rationale.
   projectId?: string;
   envSlug?: string;
+  // Owning Environment.ItemId — env identity; envSlug stays the display
+  // cache. Stamped from the resolved env row at creation.
+  environmentId?: string;
   name: string;
   email: string;
   passwordMasked: string;
@@ -405,6 +421,13 @@ export interface CloudIssue {
   // Set by the verification agent at detection time.
   projectId?: string;
   envSlug?: string;
+  // Owning Environment.ItemId — env identity; envSlug stays the display
+  // cache. Stamped by the verification agent from the resolved env row.
+  environmentId?: string;
+  // VerificationTarget.ItemId the defect was found on — a hard link that
+  // survives URL edits (the `url` string is display-only). Empty on
+  // legacy rows, which match by url text instead.
+  targetId?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
@@ -450,6 +473,9 @@ export interface Feature {
   // Owning env slug. Optional so legacy records (created before env-scoped
   // features) still type-check; only the env-less project page surfaces them.
   envSlug?: string;
+  // Owning Environment.ItemId — env identity; envSlug is only the
+  // display/URL cache. Optional until migration backfills.
+  environmentId?: string;
   // ItemId of the dev feature this was cloned from. Set by the
   // sibling-create in `useCloneFeature`; the cross-env sync feature uses
   // it to find sibling features when the dev feature is renamed or
@@ -527,6 +553,9 @@ export interface Flow {
   // Mirrors the parent feature's envSlug at creation. Optional for legacy
   // records; flows inherit the env of the feature they sit under.
   envSlug?: string;
+  // Owning Environment.ItemId — env identity; mirrors the parent feature's
+  // environmentId (the create hook copies it alongside envSlug).
+  environmentId?: string;
   createdAt: string;
   updatedAt: string;
   /** Lifecycle + test-result status. Defaults to "active" for legacy records. */
@@ -614,6 +643,7 @@ export function toFeature(f: CloudFeature, projectId: string): Feature {
     projectId: projectId || f.projectId,
     name: f.title,
     envSlug: f.envSlug,
+    environmentId: f.environmentId,
     clonedFromFeatureId: f.clonedFromFeatureId,
     developerIds: f.developerIds,
     qaIds: f.qaIds,
@@ -660,6 +690,7 @@ export function toFlow(fl: CloudFlow, projectId: string): Flow {
     featureId: fl.featureId,
     name: fl.title,
     envSlug: fl.envSlug,
+    environmentId: fl.environmentId,
     createdAt: fl.CreatedDate,
     updatedAt: fl.LastUpdatedDate,
     status,
@@ -793,6 +824,7 @@ export function toVerificationTarget(
     // unfiltered read.
     projectId: t.projectId ?? "",
     envSlug: t.envSlug ?? "",
+    environmentId: t.environmentId ?? "",
     applicationName: t.applicationName ?? "",
     url: t.url ?? "",
     environment: narrowOr<TargetEnvironment>(
@@ -817,6 +849,7 @@ export function toSecret(s: CloudSecret): Secret {
     // Same scoping story as VerificationTarget above.
     projectId: s.projectId ?? "",
     envSlug: s.envSlug ?? "",
+    environmentId: s.environmentId ?? "",
     name: s.name ?? "",
     email: s.email ?? "",
     passwordMasked: s.passwordMasked ?? "••••••••••",
@@ -875,6 +908,8 @@ export function toIssue(i: CloudIssue): Issue {
     // legacy rows without them are dropped by `useIssueTracker`.
     projectId: i.projectId ?? "",
     envSlug: i.envSlug ?? "",
+    environmentId: i.environmentId ?? "",
+    targetId: i.targetId,
   };
 }
 
@@ -1664,6 +1699,8 @@ export interface CloudSecretBinding {
   ItemId: string;
   projectId: string;
   envSlug: string;
+  /** Owning Environment.ItemId — env identity; empty on legacy rows. */
+  environmentId?: string;
   /** JSON-encoded Record<secretId, targetId[]>. */
   bindingsJson?: string;
   updatedBy?: string;
@@ -1678,6 +1715,8 @@ export interface SecretBindings {
   id: string;
   projectId: string;
   envSlug: string;
+  /** Owning Environment.ItemId; "" on legacy rows. */
+  environmentId: string;
   /** Parsed map; empty object when none. */
   bindings: Record<string, string[]>;
   updatedBy: string | null;
@@ -1707,6 +1746,7 @@ export function toSecretBinding(c: CloudSecretBinding): SecretBindings {
     id: c.ItemId,
     projectId: c.projectId ?? "",
     envSlug: c.envSlug ?? "",
+    environmentId: c.environmentId ?? "",
     bindings,
     updatedBy: c.updatedBy || null,
   };
@@ -1735,6 +1775,10 @@ export interface CloudUserPreference {
   repoBrowserPath?: string;
   /** MCP /api/secrets id for the GitHub PAT. Empty string when none. */
   githubCredentialId?: string;
+  /** Environment.ItemId the user is currently working in. Empty string
+   *  when off-env. Replaces the SecretBinding `__active__::` sentinel row
+   *  and the lattice.mirror.active-env.v1 mirror. */
+  activeEnvironmentId?: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
@@ -1751,6 +1795,8 @@ export interface UserPreference {
   customChecks: unknown[];
   repoBrowserPath: string;
   githubCredentialId: string;
+  /** Environment.ItemId the user is currently working in; "" when off-env. */
+  activeEnvironmentId: string;
 }
 
 export function toUserPreference(c: CloudUserPreference): UserPreference {
@@ -1773,6 +1819,7 @@ export function toUserPreference(c: CloudUserPreference): UserPreference {
     customChecks,
     repoBrowserPath: c.repoBrowserPath ?? "",
     githubCredentialId: c.githubCredentialId ?? "",
+    activeEnvironmentId: c.activeEnvironmentId ?? "",
   };
 }
 
@@ -1925,7 +1972,7 @@ export const featuresCollection = blocksClient.data.collection<CloudFeature>("Fe
   // omitted fields are dropped from the read response AND from any
   // filter the gateway might receive later. These are the multi-value
   // replacements for the old `developerId` / `qaId` singular fields.
-  fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "clonedFromFeatureId", "developerIds", "qaIds", "githubLink", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "environmentId", "clonedFromFeatureId", "developerIds", "qaIds", "githubLink", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
   // `CreatedBy` is included in the field list so the per-user filter at
@@ -1937,7 +1984,7 @@ export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
   // to it as no-ops, silently dropping sibling rows out of the result.
   // `LastUpdatedBy` rides along so the drawer's "Updated by" reads real
   // data rather than the "—" fallback.
-  fields: ["title", "description", "steps", "status", "stack", "featureId", "envSlug", "clonedFromFlowId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  fields: ["title", "description", "steps", "status", "stack", "featureId", "envSlug", "environmentId", "clonedFromFlowId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 export const chatMessagesCollection = blocksClient.data.collection<CloudChatMessage>("ChatMessage", {
   fields: ["sessionId", "role", "content", "actionsJson", "CreatedDate", "LastUpdatedDate"],
@@ -2122,7 +2169,7 @@ export const memberProjectsCollection = blocksClient.data.collection<CloudMember
 // collection. `bindingsJson` rides along because `toSecretBinding` parses
 // it; `updatedBy` is selected so the audit column round-trips.
 export const secretBindingsCollection = blocksClient.data.collection<CloudSecretBinding>("SecretBinding", {
-  fields: ["projectId", "envSlug", "bindingsJson", "updatedBy", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  fields: ["projectId", "envSlug", "environmentId", "bindingsJson", "updatedBy", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be selected — `useUserPreference` reads + upserts by
 // `filter: { userId }`, and an unselected filter column is silently
@@ -2130,7 +2177,7 @@ export const secretBindingsCollection = blocksClient.data.collection<CloudSecret
 // reads it; an unselected column would silently arrive as `undefined` and
 // the consumer would lose that preference's saved value.
 export const userPreferencesCollection = blocksClient.data.collection<CloudUserPreference>("UserPreference", {
-  fields: ["userId", "scope", "device", "activeSession", "customChecksJson", "repoBrowserPath", "githubCredentialId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
+  fields: ["userId", "scope", "device", "activeSession", "customChecksJson", "repoBrowserPath", "githubCredentialId", "activeEnvironmentId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be selected — the inbox read filters on
 // `filter: { userId: <me> }`, same as Notification. `announcementId`
@@ -2165,6 +2212,11 @@ export const verificationTargetsCollection = blocksClient.data.collection<CloudV
       // out of the scoped view.
       "projectId",
       "envSlug",
+      // Owning Environment.ItemId — MUST stay selected: once the Scope
+      // page and walker filter by environmentId, an unselected column
+      // would silently drop every row out of the scoped view (the
+      // recurring selector-gating lesson).
+      "environmentId",
       "applicationName",
       "url",
       "environment",
@@ -2186,6 +2238,7 @@ export const secretsCollection = blocksClient.data.collection<CloudSecret>(
       // Per-environment scoping — same rule as VerificationTarget.
       "projectId",
       "envSlug",
+      "environmentId",
       "name",
       "email",
       "passwordMasked",
@@ -2224,8 +2277,12 @@ export const issuesCollection = blocksClient.data.collection<CloudIssue>(
       "assignedDeveloperIdsJson",
       "approvedById",
       // Per-environment scoping — same rule as VerificationTarget.
+      // `targetId` rides along for the hard target link (survives URL
+      // edits); empty on legacy rows.
       "projectId",
       "envSlug",
+      "environmentId",
+      "targetId",
       "CreatedBy",
       "CreatedDate",
       "LastUpdatedBy",
@@ -2254,6 +2311,182 @@ export const testCasesCollection = blocksClient.data.collection<CloudTestCase>(
       "order",
       "tags",
       "isDeletable",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
+
+// --- Environments -------------------------------------------------------------
+//
+// Env identity entity (schema v2.1). One row per env per project: the four
+// canonical kinds (dev/stg/prod/uat) are seeded at project creation, and the
+// user can add `custom` envs later. `slug` is the URL segment + display cache
+// and IS renameable; `ItemId` is the identity every env-scoped row points at
+// via its `environmentId` column, so a rename never orphans data. Replaces
+// the Project.customEnvs + Project.envLabelOverrides JSON blobs.
+export type EnvironmentKind = "dev" | "stg" | "prod" | "uat" | "custom";
+
+export const ENVIRONMENT_KINDS: EnvironmentKind[] = [
+  "dev",
+  "stg",
+  "prod",
+  "uat",
+  "custom",
+];
+
+export interface CloudEnvironment {
+  ItemId: string;
+  projectId: string;
+  /** URL segment + display cache — renameable, never an identity. */
+  slug: string;
+  label: string;
+  color?: string;
+  /** Sparse ordering key — "0"/"10"/"20"; absent rows sort last. */
+  order?: string;
+  /** dev | stg | prod | uat | custom — drives the env badge treatment. */
+  kind: string;
+  CreatedBy?: string;
+  CreatedDate: string;
+  LastUpdatedBy?: string;
+  LastUpdatedDate: string;
+}
+
+export interface Environment {
+  id: string;
+  projectId: string;
+  slug: string;
+  label: string;
+  color?: string;
+  order: number;
+  kind: EnvironmentKind;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toEnvironment(e: CloudEnvironment): Environment {
+  // Unknown kind (hand-edited row) falls back to "custom" so the badge
+  // renders the generic treatment instead of crashing the switch.
+  const kind = (ENVIRONMENT_KINDS as readonly string[]).includes(e.kind ?? "")
+    ? (e.kind as EnvironmentKind)
+    : "custom";
+  return {
+    id: e.ItemId,
+    projectId: e.projectId ?? "",
+    slug: e.slug ?? "",
+    label: e.label ?? e.slug ?? "",
+    color: e.color || undefined,
+    order: e.order ? Number(e.order) || 0 : 0,
+    kind,
+    createdAt: e.CreatedDate,
+    updatedAt: e.LastUpdatedDate,
+  };
+}
+
+// `projectId` MUST be selected — every env page filters with a flat
+// `{ projectId }` and the gateway silently drops unselected filter columns
+// (the recurring selector-gating lesson). `slug` rides along as the
+// display/URL cache during the transition; `kind` + `order` drive the badge
+// and sort order.
+export const environmentsCollection = blocksClient.data.collection<CloudEnvironment>(
+  "Environment",
+  {
+    fields: [
+      "projectId",
+      "slug",
+      "label",
+      "color",
+      "order",
+      "kind",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
+
+// --- Verification checks (env-scoped) -----------------------------------------
+//
+// One row per check per environment (blx_VerificationChecks). `source:
+// "builtin"` rows mirror the 11-id catalog in src/types/issue-tracker.ts —
+// the catalog's labels/descriptions stay code constants and only `enabled`
+// round-trips. `source: "custom"` rows carry a `custom_`-prefixed `checkId`
+// and are the user-defined scopes formerly stored as definitions in
+// UserPreference.customChecksJson. Identity for dedup/lookup is
+// (environmentId, checkId) — never the editable label.
+export interface CloudVerificationCheck {
+  ItemId: string;
+  projectId: string;
+  environmentId: string;
+  /** builtin | custom. */
+  source: string;
+  /** Catalog id (builtin) or `custom_<slug>` (custom) — the match key. */
+  checkId: string;
+  label: string;
+  description?: string;
+  /** "true"/"false" on the wire — seeding default for `enabled`. */
+  recommended?: string;
+  /** "true"/"false" on the wire — the per-env selection. */
+  enabled: string;
+  CreatedBy?: string;
+  CreatedDate: string;
+  LastUpdatedBy?: string;
+  LastUpdatedDate: string;
+}
+
+export interface EnvVerificationCheck {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  source: "builtin" | "custom";
+  checkId: string;
+  label: string;
+  description: string;
+  recommended: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toVerificationCheck(
+  c: CloudVerificationCheck,
+): EnvVerificationCheck {
+  return {
+    id: c.ItemId,
+    projectId: c.projectId ?? "",
+    environmentId: c.environmentId ?? "",
+    source: c.source === "custom" ? "custom" : "builtin",
+    checkId: c.checkId ?? "",
+    label: c.label ?? "",
+    description: c.description ?? "",
+    recommended: String(c.recommended ?? "false").toLowerCase() === "true",
+    // Anything but an explicit "false" reads enabled — a missing flag must
+    // not silently disable a seeded builtin check.
+    enabled: String(c.enabled ?? "true").toLowerCase() !== "false",
+    createdAt: c.CreatedDate,
+    updatedAt: c.LastUpdatedDate,
+  };
+}
+
+// `projectId` + `environmentId` MUST be selected — the Scope page filters
+// with the flat `{ projectId, environmentId }` pair and unselected filter
+// columns are silently dropped by the gateway. `checkId` is the identity
+// the migration and the toggle hook match on.
+export const verificationChecksCollection = blocksClient.data.collection<CloudVerificationCheck>(
+  "VerificationCheck",
+  {
+    fields: [
+      "projectId",
+      "environmentId",
+      "source",
+      "checkId",
+      "label",
+      "description",
+      "recommended",
+      "enabled",
       "CreatedBy",
       "CreatedDate",
       "LastUpdatedBy",
