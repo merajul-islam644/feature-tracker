@@ -8,6 +8,7 @@
 
 import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
 import { SecretsPanel } from "@/components/issue-tracker/SecretsPanel";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
@@ -29,9 +30,12 @@ export function SecretsPage() {
       <BackToProjectsLink />
 
       <div>
-        <h1 className="text-xl font-semibold text-foreground">
-          {t("nav.issueTracker.secrets", "Secrets")}
-        </h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-foreground">
+            {t("nav.issueTracker.secrets", "Secrets")}
+          </h1>
+          <EnvHeaderChip />
+        </div>
         <p className="mt-1 text-sm text-muted-foreground">
           {t(
             "issueTracker.secrets.description",

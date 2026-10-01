@@ -39,15 +39,22 @@ import { RenameProjectModal } from "./RenameProjectModal";
 import { DeleteProjectDialog } from "./DeleteProjectDialog";
 import { useLocale, useT } from "@/lib/blocks/i18n";
 import { useIsRole } from "@/hooks/useAuth";
-import type { Project } from "@/lib/blocks/data";
+import type { Environment, Project } from "@/lib/blocks/data";
 import type { ProjectsCounts } from "./ProjectList";
 
 interface ProjectListRowsProps {
   projects: Project[];
   counts: ProjectsCounts;
+  /** Workspace-wide env rows grouped by project id — forwarded into each
+   *  row so the list costs one env read total, not one per row. */
+  envsByProject?: Map<string, Environment[]>;
 }
 
-export function ProjectListRows({ projects, counts }: ProjectListRowsProps) {
+export function ProjectListRows({
+  projects,
+  counts,
+  envsByProject,
+}: ProjectListRowsProps) {
   // `space-y-2` matches the skeleton wrapper exactly — same vertical
   // rhythm between rows whether we're loading or loaded.
   return (
@@ -58,6 +65,7 @@ export function ProjectListRows({ projects, counts }: ProjectListRowsProps) {
           project={project}
           featureCount={counts.get(project.id)?.features ?? 0}
           flowCount={counts.get(project.id)?.flows ?? 0}
+          envs={envsByProject?.get(project.id)}
         />
       ))}
     </div>
@@ -68,10 +76,12 @@ function ProjectListRow({
   project,
   featureCount,
   flowCount,
+  envs,
 }: {
   project: Project;
   featureCount: number;
   flowCount: number;
+  envs?: Environment[];
 }) {
   const navigate = useNavigate();
   const { formatRelativeTime } = useLocale();
@@ -79,8 +89,6 @@ function ProjectListRow({
   const isManager = useIsRole("manager");
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-
-  const customEnvs = project.customEnvs ?? [];
 
   return (
     // Container matches `ProjectsPage.tsx`'s loading skeleton:
@@ -108,13 +116,10 @@ function ProjectListRow({
       {/* Middle cluster: env chips. `flex-1` claims the remaining
           horizontal space so the chips sit centered between the name
           and the counts. Chips wrap to a 2nd line if there are >4
-          envs. */}
+          envs. The chip list feeds itself from the project's
+          Environment rows (see EnvironmentChips). */}
       <div className="flex min-w-0 flex-1 items-center justify-center">
-        <EnvironmentChips
-          customEnvs={customEnvs}
-          mode="link"
-          projectId={project.id}
-        />
+        <EnvironmentChips mode="link" projectId={project.id} envs={envs} />
       </div>
 
       {/* Right cluster: feature/flow counts + kebab. Counts collapse

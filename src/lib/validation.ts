@@ -53,8 +53,10 @@ export function validateFeatureName(
   return null;
 }
 
-// The four canonical envs are auto-included on every project card and
-// cannot be redefined through the Add Environment modal.
+// The four canonical env kinds. Projects no longer seed them by default —
+// users add them explicitly through the Add Environment modal, whose Kind
+// select offers these; a canonical slug stays reserved UNLESS it matches
+// the chosen kind (see `validateEnvSlug`).
 export const CANONICAL_ENV_SLUGS = ["dev", "stg", "prod", "uat"] as const;
 export type CanonicalEnvSlug = (typeof CANONICAL_ENV_SLUGS)[number];
 
@@ -74,9 +76,17 @@ export const envSlugSchema = z
 
 // Helper for validating an env slug against a project's current env list.
 // Returns the first error message, or `null` if the slug is acceptable.
+//
+// `kind` relaxes the canonical-slug reservation: a canonical slug is only
+// reserved when it DOESN'T match the chosen kind, so the Add Environment
+// modal can create a real `dev` env (kind "dev", slug "dev") now that
+// projects no longer seed default envs. The existing-slugs check still
+// applies in every case — a project can never hold two rows with the
+// same slug.
 export function validateEnvSlug(
   slug: string,
   existingSlugs: readonly string[],
+  kind?: string,
 ): string | null {
   const trimmed = slug.trim();
   const formatCheck = envSlugSchema.safeParse(trimmed);
@@ -84,7 +94,10 @@ export function validateEnvSlug(
     return formatCheck.error.issues[0]?.message ?? "Invalid slug";
   }
   const lower = trimmed.toLowerCase();
-  if ((CANONICAL_ENV_SLUGS as readonly string[]).includes(lower)) {
+  if (
+    (CANONICAL_ENV_SLUGS as readonly string[]).includes(lower) &&
+    kind !== lower
+  ) {
     return `${lower} is reserved. Choose a different slug.`;
   }
   if (existingSlugs.some((s) => s.toLowerCase() === lower)) {

@@ -1,0 +1,73 @@
+{
+  "collectionName": "blx_Environments",
+  "fields": [
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Project.ItemId. Echoed on every PATCH — same requiredOn rule as Feature.projectId.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "slug",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "URL segment under /projects/:projectId/:slug (dev/stg/prod/uat or custom). Renameable — identity is ItemId, not this value. Uniqueness per project is enforced app-side (AddEnvironmentModal / rename modal); the cloud has no unique constraint.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "label",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display text for the env chip/badge (e.g. 'Local Dev'). Replaces Project.envLabelOverrides — the override map is retired once every env row carries its own label.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "color",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Hex color for the chip tint and badge accent. Empty string falls back to the canonical env palette.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "order",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Sparse stringified integer ('0','10','20') controlling chip order — same convention as TestCase.order. Canonical envs seed as 0/10/20/30.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "kind",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "dev | stg | prod | uat | custom — semantic kind used for icon and defaults. 'custom' for user-added envs.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "Environment",
+  "schemaType": 1
+}

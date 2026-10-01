@@ -7,8 +7,21 @@
 //   - Anything beyond that collapses behind a `+N` trigger button on
 //     the right; clicking opens a Radix dropdown listing the rest with
 //     identical chip styling.
-//   - Canonical envs use Tailwind classes from PROJECT_ENV_META; custom
-//     envs use a hex-tinted inline style via envChipStyle.
+//   - Envs whose `kind` is canonical (dev/stg/prod/uat) use the fixed
+//     Tailwind classes from ENV_KIND_META; custom envs use a hex-tinted
+//     inline style via envChipStyle.
+//
+// Data source (schema v2.1): the project's blx_Environments rows via
+// `useEnvironments(projectId)` — the component feeds itself, so callers
+// only pass the project id. The row list includes custom envs naturally
+// (they're rows too), ordered by `order`.
+//
+// Label rule (user asked, 2026-10-01): the card surface (`link` mode)
+// shows the kind-derived SHORT form for canonical envs — Dev/Stg/Prod/
+// UAT from PROJECT_ENV_META, whatever the row label says — while custom
+// envs keep their row label. The static surface (project info page)
+// keeps the full row label; it's a details view. The row label always
+// rides along as `fullLabel` for the hover title / accessible name.
 //
 // The two surface modes differ only in what clicking a chip does:
 //   - `mode="link"` renders each chip as a <button> that calls onSelect(slug).
@@ -27,73 +40,93 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { envChipStyle } from "@/components/ui/color-picker";
-import { PROJECT_ENVS, PROJECT_ENV_META } from "@/pages/ProjectDetailPage";
-import { useLocale, useT } from "@/lib/blocks/i18n";
-import type { CanonicalEnvSlug } from "@/lib/validation";
-import type { ProjectCustomEnv } from "@/lib/blocks/data";
+import {
+  ENV_KIND_META,
+  PROJECT_ENV_META,
+  type CanonicalEnvSlug,
+} from "@/pages/ProjectDetailPage";
+import { useEnvironments } from "@/lib/blocks/hooks";
+import { useT } from "@/lib/blocks/i18n";
+import type { Environment } from "@/lib/blocks/data";
 
 const VISIBLE_LIMIT = 4;
 
-interface ChipEntryCommon {
+export interface EnvChipEntry {
   slug: string;
   label: string;
+  /** The row label as stored — the accessible name / hover title, even
+   *  when `label` renders a derived short form (canonical envs on the
+   *  card surface). */
+  fullLabel: string;
+  /** The env's row identity — available to callers that need it. */
+  environmentId: string;
+  /** Tailwind classes for canonical kinds; undefined for custom envs. */
+  className?: string;
+  /** Hex color for custom envs (inline-tinted); undefined for canonical. */
+  color?: string;
 }
 
-export type EnvChip =
-  | (ChipEntryCommon & {
-      kind: "canonical";
-      className: string;
-    })
-  | (ChipEntryCommon & {
-      kind: "custom";
-      color: string;
-    });
-
 interface EnvironmentChipsProps {
-  customEnvs: ProjectCustomEnv[];
   /**
    * `link` — render each chip as a button that navigates to
    *   `/projects/:projectId/:slug` (project card).
    * `static` — render each chip as a non-interactive span (info page).
    */
   mode: "link" | "static";
-  /** Required when mode === "link". */
+  /** Project whose env rows the chips render. */
   projectId?: string;
+  /** Row override for callers that already hold the env list (skips the
+   *  internal query — pass an empty array for "known no envs" so the
+   *  internal read doesn't fire either). */
+  envs?: Environment[];
 }
 
 export function EnvironmentChips({
-  customEnvs,
   mode,
   projectId,
+  envs: envsProp,
 }: EnvironmentChipsProps) {
   const navigate = useNavigate();
-  const { t } = useLocale();
+  const t = useT();
 
-  // Build the full env list once in display order (canonical → custom)
-  // so the chip row and the dropdown see the same sequence. Canonical
-  // labels use the *short* form (Dev/Stg/Prod/Uat) on both surfaces —
-  // the long-form "projectEnv.env*" keys describe the full env name and
-  // are not what a chip should show.
-  const allEnvs: EnvChip[] = [
-    ...PROJECT_ENVS.map((slug) => {
-      const meta = PROJECT_ENV_META[slug as CanonicalEnvSlug];
+  // When the caller supplies rows, the internal per-project read is
+  // disabled entirely (projectId → null flips `enabled` off) — the
+  // /projects page passes a workspace-wide map so N cards/rows cost one
+  // env read total, not one each.
+  const envsQuery = useEnvironments(
+    envsProp !== undefined ? null : projectId ?? null,
+  );
+  const envs = envsProp ?? envsQuery.data ?? [];
+
+  // Build the full env list once in row order (the `order` column —
+  // canonical seeds 0/10/20/30, custom envs +10 past the max). Link
+  // mode (project card) swaps a canonical env's row label for the
+  // kind-derived short form; static mode (info page) keeps the row
+  // label. `fullLabel` preserves the stored name either way.
+  const allEnvs: EnvChipEntry[] = envs.map((env) => {
+    const kindMeta = ENV_KIND_META[env.kind];
+    if (kindMeta) {
+      const shortLabel =
+        mode === "link"
+          ? PROJECT_ENV_META[env.kind as CanonicalEnvSlug]?.shortLabel ??
+            env.label
+          : env.label;
       return {
-        kind: "canonical" as const,
-        slug,
-        label: t(
-          `projectCard.env${slug.charAt(0).toUpperCase() + slug.slice(1)}`,
-          meta.shortLabel,
-        ),
-        className: meta.className,
+        slug: env.slug,
+        label: shortLabel,
+        fullLabel: env.label,
+        environmentId: env.id,
+        className: kindMeta.className,
       };
-    }),
-    ...customEnvs.map((env) => ({
-      kind: "custom" as const,
+    }
+    return {
       slug: env.slug,
-      label: env.label || env.slug,
+      label: env.label,
+      fullLabel: env.label,
+      environmentId: env.id,
       color: env.color || "#0ea5e9",
-    })),
-  ];
+    };
+  });
 
   const visible = allEnvs.slice(0, VISIBLE_LIMIT);
   const overflow = allEnvs.slice(VISIBLE_LIMIT);
@@ -176,7 +209,7 @@ export function EnvironmentChips({
 const EnvChipButton = forwardRef<
   HTMLButtonElement,
   {
-    env: EnvChip;
+    env: EnvChipEntry;
     mode: "link" | "static";
     onActivate?: () => void;
   } & React.ButtonHTMLAttributes<HTMLButtonElement>
@@ -184,8 +217,6 @@ const EnvChipButton = forwardRef<
   { env, mode, onActivate, className: passedClassName, ...rest },
   ref,
 ) {
-  const t = useT();
-
   // Merge the slot-injected className (e.g. DropdownMenuItem's
   // `cursor-default …` on the overflow path) WITH the chip's own
   // classes. Order matters here: `cn()` runs tailwind-merge which
@@ -200,7 +231,7 @@ const EnvChipButton = forwardRef<
   const className = cn(
     passedClassName,
     "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium transition-colors",
-    env.kind === "canonical"
+    env.className
       ? `${env.className} hover:brightness-95 active:brightness-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`
       : "border-transparent hover:brightness-95 active:brightness-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
     // `<button type="button">` doesn't get `cursor: pointer` by default
@@ -210,16 +241,7 @@ const EnvChipButton = forwardRef<
     mode === "link" && "cursor-pointer",
   );
 
-  const style =
-    env.kind === "custom" ? envChipStyle(env.color) : undefined;
-
-  const ariaLabel =
-    env.kind === "canonical"
-      ? t(
-          `projectCard.env${env.slug.charAt(0).toUpperCase() + env.slug.slice(1)}`,
-          env.label,
-        )
-      : env.label;
+  const style = env.color ? envChipStyle(env.color) : undefined;
 
   if (mode === "link") {
     return (
@@ -227,10 +249,10 @@ const EnvChipButton = forwardRef<
         ref={ref}
         type="button"
         onClick={onActivate}
-        aria-label={ariaLabel}
+        aria-label={env.fullLabel}
         className={className}
         style={style}
-        title={env.label}
+        title={env.fullLabel}
         {...rest}
       >
         {env.label}

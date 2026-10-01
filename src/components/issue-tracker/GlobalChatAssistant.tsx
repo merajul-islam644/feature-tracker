@@ -29,6 +29,7 @@ export function GlobalChatAssistant() {
     switchSession,
     deleteSession,
     renameSession,
+    setAssistantOpen,
   } = useIssueTrackerStore();
 
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -43,6 +44,7 @@ export function GlobalChatAssistant() {
 
   return (
     <ChatLauncher
+      onOpenChange={setAssistantOpen}
       messages={chat}
       sending={sendingMessage}
       retryStatus={aiRetryStatus}

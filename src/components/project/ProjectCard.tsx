@@ -27,7 +27,7 @@ import {
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { useLocale, useT } from "@/lib/blocks/i18n";
-import type { Project } from "@/lib/blocks/data";
+import type { Environment, Project } from "@/lib/blocks/data";
 import { useIsRole } from "@/hooks/useAuth";
 import { RenameProjectModal } from "./RenameProjectModal";
 import { DeleteProjectDialog } from "./DeleteProjectDialog";
@@ -38,12 +38,16 @@ interface ProjectCardProps {
   project: Project;
   featureCount: number;
   flowCount: number;
+  /** Env rows for this project, handed down from the page's single
+   *  workspace-wide env read — skips the chips' internal query. */
+  envs?: Environment[];
 }
 
 export function ProjectCard({
   project,
   featureCount,
   flowCount,
+  envs,
 }: ProjectCardProps) {
   const { formatRelativeTime } = useLocale();
   const t = useT();
@@ -66,11 +70,6 @@ export function ProjectCard({
     e.stopPropagation();
   };
 
-  // Custom envs are user-defined per-project. Canonical envs are always
-  // shown first (dev→uat) so the chip layout is identical across the
-  // workspace; user-added envs follow in the order they were added.
-  const customEnvs = project.customEnvs ?? [];
-
   return (
     <div className="group relative">
       <Card className="h-full">
@@ -89,17 +88,14 @@ export function ProjectCard({
             </p>
             {/* Environment chips — each one is a real button that routes
                 to `/projects/:id/<slug>`. The card body itself is not
-                clickable; chips are the entry point. Canonical envs use
-                Tailwind classes from PROJECT_ENV_META; user-added envs
-                apply a hex-tinted style via envChipStyle. When the
-                project has more than 4 envs the extras collapse behind
-                a `+N` overflow button (shared with the info page). */}
+                clickable; chips are the entry point. The chip list feeds
+                itself from the project's Environment rows (canonical
+                kinds use fixed classes; custom envs tint via their row
+                color). When the project has more than 4 envs the extras
+                collapse behind a `+N` overflow button (shared with the
+                info page). */}
             <div className="mt-2">
-              <EnvironmentChips
-                customEnvs={customEnvs}
-                mode="link"
-                projectId={project.id}
-              />
+              <EnvironmentChips mode="link" projectId={project.id} envs={envs} />
             </div>
           </div>
         </div>

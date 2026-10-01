@@ -1,33 +1,34 @@
 // Active project environment — the (projectId, envSlug) pair that the
-// Issue Tracker is currently scoped to. Set by ProjectDetailPage when
-// the URL resolves to `/projects/:projectId/:envSlug`, and read by
-// the Issue Tracker data hooks to filter targets / secrets / issues
-// to the right env.
+// Issue Tracker is currently scoped to. Set by EnvSync (and the
+// ProjectDetailPage tree) when the URL resolves to
+// `/projects/:projectId/:envSlug`, and read by the Issue Tracker data
+// hooks to filter targets / secrets / issues to the right env.
 //
-// The provider lives at the AppLayout root so it survives navigation
-// between `/projects/:id/:envSlug` and the Issue Tracker sub-routes
-// (`/projects/:id/:envSlug/<key>`). Once set, the env stays active
-// until the user navigates away from both — the consumer decides
-// whether to clear (e.g. on `/dashboard`) or keep (e.g. on
-// `/projects/:id/:envSlug/<key>`). Today nothing clears it: leaving
-// the project simply means the Issue Tracker menu hides (URL-based
-// gate in AppSidebar) and the hook filter is a no-op because no
-// consumer is reading.
+// URL is the ONLY source of truth (page-scoped fetching policy, user
+// directive 2026-10-01: a page should only issue the data calls its own
+// content needs). EnvSync clears the context on every non-env route, so
+// `env` is non-null exactly while a project-env route is mounted — the
+// env-scoped tracker queries never fire on /projects, /dashboard, /chat,
+// etc. There is deliberately NO localStorage-mirror hydration and NO
+// cloud→local promote: both used to resurrect a stale pair on pages that
+// had no env in their URL, which made the app-wide tracker reads fire
+// against a project the current page never asked about. A hard refresh
+// on a 4-segment tracker route doesn't need a mirror — the URL carries
+// the pair and EnvSync re-applies it on mount.
 //
-// Outside a project env the context returns `null`. Hooks that depend
-// on it should treat `null` as "no data" (empty list, no mutations
-// allowed) rather than throwing — callers already handle this in
-// production.
+// Persistence (v2.1): `UserPreference.activeEnvironmentId` — the env's
+// row identity in `blx_Environments`, via `useActiveEnvironment` — is
+// still WRITTEN here (local → cloud) so the user's last env follows them
+// across devices and the walker can read it. The sync is one-directional
+// by design: nothing on the read path promotes the stored id back into
+// session state. The preference + env-row reads are gated on `env` being
+// set, so pages without an env issue zero preference/env-table reads.
 //
-// Persistence (v2): the canonical store is the `SecretBinding` row at
-// the `__active__::` sentinel scope (see `useActiveEnvSelection` in
-// `src/lib/blocks/hooks.ts`). The active env is per-user — same
-// reasoning as the notepad / custom verification checks — so we keep
-// the row inside `SecretBinding` instead of adding a fifth schema.
-// A `lattice.mirror.active-env.v1` mirror under the same shape is
-// written synchronously on each set so cold-boot reads it before the
-// cloud query resolves. Cross-tab sync via the `storage` event is
-// retained for the mirror.
+// Loop safety: `setEnv` only touches local state — the cloud write
+// happens in a reconcile effect that fires only when the resolved row id
+// actually differs from the persisted preference, and `setEnv` is
+// referentially stable so downstream URL-sync effects fire once per
+// navigation, not per render.
 
 import {
   createContext,
@@ -40,8 +41,8 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import {
-  useActiveEnvSelection,
-  useSaveActiveEnvSelection,
+  useActiveEnvironment,
+  useAllEnvironments,
 } from "@/lib/blocks/hooks";
 
 export interface ActiveEnv {
@@ -54,117 +55,52 @@ interface ActiveEnvContextValue {
   setEnv: (env: ActiveEnv | null) => void;
 }
 
-const ACTIVE_ENV_MIRROR_KEY = "lattice.mirror.active-env.v1";
-
-function readMirrorEnv(): ActiveEnv | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(ACTIVE_ENV_MIRROR_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      typeof (parsed as ActiveEnv).projectId === "string" &&
-      typeof (parsed as ActiveEnv).envSlug === "string"
-    ) {
-      return {
-        projectId: (parsed as ActiveEnv).projectId,
-        envSlug: (parsed as ActiveEnv).envSlug,
-      };
-    }
-  } catch {
-    // Corrupt JSON / private mode — fall through to null.
-  }
-  return null;
-}
-
-function writeMirrorEnv(env: ActiveEnv | null): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (env === null) {
-      window.localStorage.removeItem(ACTIVE_ENV_MIRROR_KEY);
-    } else {
-      window.localStorage.setItem(
-        ACTIVE_ENV_MIRROR_KEY,
-        JSON.stringify(env),
-      );
-    }
-  } catch {
-    // best-effort
-  }
-}
-
 const ActiveEnvContext = createContext<ActiveEnvContextValue | null>(null);
 
 export function ActiveEnvProvider({ children }: { children: ReactNode }) {
-  // Hydrate from the localStorage mirror so a hard refresh on
-  // `/projects/:id/:envSlug/<key>` (or any other env-only path that
-  // doesn't carry the (projectId, envSlug) pair in the URL) doesn't
-  // kick the user out of their env. The cloud read below replaces the
-  // value once it resolves — so a different device sees the right env
-  // on next load.
-  const [env, setEnvState] = useState<ActiveEnv | null>(() => readMirrorEnv());
+  // No hydration from storage — the URL (via EnvSync) is the only writer.
+  // First paint on any page starts with `null`; on env routes EnvSync's
+  // effect applies the URL pair within the same commit cycle.
+  const [env, setEnvState] = useState<ActiveEnv | null>(null);
 
-  const cloudSelection = useActiveEnvSelection();
-  const saveCloudSelection = useSaveActiveEnvSelection();
+  // Preference id (UserPreference.activeEnvironmentId) + its setter, and
+  // the full Environment row list the pair↔id resolution needs. Both
+  // reads are gated on `env` — they only matter while an env is actually
+  // active, so pages outside a project env issue neither call.
+  const envActive = env !== null;
+  const { activeEnvironmentId, setActiveEnvironment } = useActiveEnvironment({
+    enabled: envActive,
+  });
+  const allEnvsQuery = useAllEnvironments({ enabled: envActive });
+  const allEnvs = allEnvsQuery.data ?? [];
 
-  // Hold the latest `mutateAsync` in a ref so `setEnv`'s identity is
-  // stable across renders. Without this, the `useCallback` below would
-  // recreate `setEnv` whenever TanStack Query hands us a new mutation
-  // object, which would re-fire downstream effects that depend on
-  // `setEnv` (e.g. ProjectDetailPage's URL→context effect), which would
-  // re-fire this mutation, which would re-invalidate, which would
-  // re-fetch the cloud read — a feedback loop that surfaces as
-  // "Maximum update depth exceeded" on any project env URL.
-  const mutateRef = useRef(saveCloudSelection.mutateAsync);
+  // Hold the latest setter in a ref so the reconcile effect can fire the
+  // preference write without depending on its (render-churned) identity.
+  const saveRef = useRef(setActiveEnvironment);
   useEffect(() => {
-    mutateRef.current = saveCloudSelection.mutateAsync;
-  }, [saveCloudSelection.mutateAsync]);
+    saveRef.current = setActiveEnvironment;
+  }, [setActiveEnvironment]);
 
-  // Promote the cloud read into local state + mirror once it resolves.
-  // Guard against identity churn: only commit when the cloud value
-  // actually differs from the current local state — otherwise a
-  // refetch after the user pushes a new env would just re-create the
-  // state object reference and trip downstream effects (see above).
+  // Local → cloud: when the active env changes (URL navigation) and its
+  // row has resolved, persist the row id. Null is NOT persisted — a
+  // cleared session env is transient; the preference keeps the last env
+  // so another device (or the walker) can see where the user was.
   useEffect(() => {
-    if (cloudSelection.data === undefined) return;
-    setEnvState((prev) => {
-      const next = cloudSelection.data;
-      if (
-        (prev === null && next === null) ||
-        (prev !== null &&
-          next !== null &&
-          prev.projectId === next.projectId &&
-          prev.envSlug === next.envSlug)
-      ) {
-        return prev;
-      }
-      writeMirrorEnv(next);
-      return next;
-    });
-  }, [cloudSelection.data]);
+    if (!env) return;
+    const row = allEnvs.find(
+      (e) => e.projectId === env.projectId && e.slug === env.envSlug,
+    );
+    if (row && row.id !== activeEnvironmentId) {
+      saveRef.current(row.id);
+    }
+  }, [env, allEnvs, activeEnvironmentId]);
 
-  // Stable setter — never recreated. Reads the latest `mutateAsync`
-  // through `mutateRef.current` so callers don't depend on the
-  // mutation object's identity either.
+  // Stable setter — local state only. No mutation identity in the
+  // closure, so `setEnv` never changes (downstream effects that depend
+  // on it — e.g. ProjectDetailPage's URL→context sync — fire once per
+  // navigation, not per render).
   const setEnv = useCallback((next: ActiveEnv | null) => {
     setEnvState(next);
-    writeMirrorEnv(next);
-    void mutateRef.current(next);
-  }, []);
-
-  // Cross-tab sync. The `storage` event fires ONLY on the tabs that
-  // didn't write the change, so within-tab updates keep flowing
-  // through `setEnv` above without retriggering this handler.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onStorage = (e: StorageEvent) => {
-      if (e.key !== ACTIVE_ENV_MIRROR_KEY) return;
-      setEnvState(readMirrorEnv());
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const value = useMemo<ActiveEnvContextValue>(

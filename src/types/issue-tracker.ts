@@ -91,6 +91,10 @@ export interface VerificationTarget {
   // Issue Tracker scoping change.
   projectId: string;
   envSlug: string;
+  // Owning Environment.ItemId — env identity (envSlug is the display
+  // cache). Optional until the active-env context resolves env rows;
+  // construction sites pre-resolution simply omit it.
+  environmentId?: string;
   applicationName: string;
   url: string;
   environment: TargetEnvironment;
@@ -116,6 +120,9 @@ export interface Secret {
   // dropped from the UI per the scoping policy.
   projectId: string;
   envSlug: string;
+  // Owning Environment.ItemId — env identity; optional pre-resolution,
+  // same policy as VerificationTarget above.
+  environmentId?: string;
   name: string;
   email: string;
   // Masked display string only. The real value lives in component state for
@@ -188,6 +195,14 @@ export interface Issue {
   // from the UI per the scoping policy.
   projectId: string;
   envSlug: string;
+  // Owning Environment.ItemId — env identity (envSlug is the display
+  // cache). Stamped by the verification agent from the resolved env row;
+  // "" on pre-migration rows.
+  environmentId?: string;
+  // VerificationTarget.ItemId the defect was found on — a hard link that
+  // survives URL edits (the `url` string is display-only). Undefined on
+  // legacy rows, which match by url text instead.
+  targetId?: string;
   // Future-ready linking into existing Project/Feature/Flow hierarchy.
   // Distinct from `projectId` above: `projectId` is the env-scope key,
   // `featureId` / `flowId` are domain-level drill-downs the user can

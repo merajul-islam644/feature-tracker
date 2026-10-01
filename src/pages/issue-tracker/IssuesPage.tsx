@@ -14,6 +14,7 @@ import { IssueSummary } from "@/components/issue-tracker/IssueSummary";
 import { IssueFilters } from "@/components/issue-tracker/IssueFilters";
 import { IssueList } from "@/components/issue-tracker/IssueList";
 import { IssueDetailsDrawer } from "@/components/issue-tracker/IssueDetailsDrawer";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useT } from "@/lib/blocks/i18n";
 
@@ -86,9 +87,12 @@ export function IssuesPage() {
       <BackToProjectsLink />
 
       <div>
-        <h1 className="text-xl font-semibold text-foreground">
-          {t("issueTracker.issues.title", "Issues")}
-        </h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-foreground">
+            {t("issueTracker.issues.title", "Issues")}
+          </h1>
+          <EnvHeaderChip />
+        </div>
         <p className="mt-1 text-sm text-muted-foreground">
           {t(
             "issueTracker.issues.description",

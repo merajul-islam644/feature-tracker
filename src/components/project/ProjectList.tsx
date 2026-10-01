@@ -4,7 +4,7 @@
 // instead of one round trip per project.
 
 import { ProjectCard } from "./ProjectCard";
-import type { Project } from "@/lib/blocks/data";
+import type { Environment, Project } from "@/lib/blocks/data";
 
 export type ProjectsCounts = Map<
   string,
@@ -14,9 +14,16 @@ export type ProjectsCounts = Map<
 interface ProjectListProps {
   projects: Project[];
   counts: ProjectsCounts;
+  /** Workspace-wide env rows grouped by project id — forwarded into each
+   *  card so the grid costs one env read total, not one per card. */
+  envsByProject?: Map<string, Environment[]>;
 }
 
-export function ProjectList({ projects, counts }: ProjectListProps) {
+export function ProjectList({
+  projects,
+  counts,
+  envsByProject,
+}: ProjectListProps) {
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {projects.map((project) => (
@@ -25,6 +32,7 @@ export function ProjectList({ projects, counts }: ProjectListProps) {
           project={project}
           featureCount={counts.get(project.id)?.features ?? 0}
           flowCount={counts.get(project.id)?.flows ?? 0}
+          envs={envsByProject?.get(project.id)}
         />
       ))}
     </div>

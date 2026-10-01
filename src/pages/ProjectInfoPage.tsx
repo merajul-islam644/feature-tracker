@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import {
+  useEnvironments,
   useProject,
   useProjectFeatures,
   useProjectFlows,
@@ -21,15 +22,13 @@ import {
 import { useLocale, useT } from "@/lib/blocks/i18n";
 import { cn } from "@/lib/utils";
 import { envChipStyle } from "@/components/ui/color-picker";
-import {
-  PROJECT_ENVS,
-  PROJECT_ENV_META,
-} from "./ProjectDetailPage";
-import type { CanonicalEnvSlug } from "@/lib/validation";
-import type { ProjectCustomEnv } from "@/lib/blocks/data";
+import { ENV_KIND_META } from "./ProjectDetailPage";
 
 interface EnvCount {
   slug: string;
+  /** Row identity — features/flows carrying a matching `environmentId`
+   *  group here first; the slug match is the legacy-row fallback. */
+  environmentId: string;
   label: string;
   features: number;
   flows: number;
@@ -50,6 +49,8 @@ export function ProjectInfoPage() {
   // project resolves. Legacy records (no envSlug) are still in scope.
   const featuresQuery = useProjectFeatures(projectId);
   const flowsQuery = useProjectFlows(projectId);
+  // The env list — one row per environment (canonical + custom), ordered.
+  const environmentsQuery = useEnvironments(projectId ?? null);
 
   if (projectQuery.isLoading) {
     return (
@@ -79,59 +80,59 @@ export function ProjectInfoPage() {
     );
   }
 
-  const customEnvs: ProjectCustomEnv[] = project.customEnvs ?? [];
+  const envRows = environmentsQuery.data ?? [];
   const features = featuresQuery.data ?? [];
   const flows = flowsQuery.data ?? [];
 
-  // Build the per-env count table: canonical first (dev→uat) so the
-  // order matches the chip list on the card, then user-defined envs in
-  // the order they were added. A trailing "Unassigned" row catches
-  // legacy records with no envSlug — they exist today and would
+  // Build the per-env count table straight from the Environment rows, in
+  // row order (canonical seeds 0/10/20/30, custom envs +10 past the max).
+  // A trailing "Unassigned" row catches legacy records with neither an
+  // environmentId nor a matching slug — they exist today and would
   // otherwise disappear from the page.
-  const counts: EnvCount[] = [
-    ...PROJECT_ENVS.map((slug) => {
-      const meta = PROJECT_ENV_META[slug as CanonicalEnvSlug];
-      return {
-        slug,
-        label: t(
-          `projectCard.env${slug.charAt(0).toUpperCase() + slug.slice(1)}`,
-          meta.shortLabel,
-        ),
-        features: 0,
-        flows: 0,
-        isCustom: false,
-        className: meta.className,
-      };
-    }),
-    ...customEnvs.map((env) => ({
+  const counts: EnvCount[] = envRows.map((env) => {
+    const kindMeta = ENV_KIND_META[env.kind];
+    return {
       slug: env.slug,
-      label: env.label || env.slug,
+      environmentId: env.id,
+      label: env.label,
       features: 0,
       flows: 0,
-      isCustom: true,
-      customColor: env.color || "#0ea5e9",
-    })),
-  ];
+      isCustom: !kindMeta,
+      customColor: env.color,
+      className: kindMeta?.className,
+    };
+  });
   let unassignedFeatures = 0;
   let unassignedFlows = 0;
 
+  // Group by the row identity first (the stamped `environmentId`), falling
+  // back to the slug match for rows created before the stamp landed.
+  const groupIndex = (
+    environmentId: string | undefined,
+    slug: string | undefined,
+  ): number => {
+    if (environmentId) {
+      const byId = counts.findIndex((c) => c.environmentId === environmentId);
+      if (byId !== -1) return byId;
+    }
+    if (slug) return counts.findIndex((c) => c.slug === slug);
+    return -1;
+  };
+
   for (const f of features) {
-    const idx = f.envSlug
-      ? counts.findIndex((c) => c.slug === f.envSlug)
-      : -1;
+    const idx = groupIndex(f.environmentId, f.envSlug);
     if (idx === -1) unassignedFeatures += 1;
     else counts[idx].features += 1;
   }
   for (const fl of flows) {
-    const idx = fl.envSlug
-      ? counts.findIndex((c) => c.slug === fl.envSlug)
-      : -1;
+    const idx = groupIndex(fl.environmentId, fl.envSlug);
     if (idx === -1) unassignedFlows += 1;
     else counts[idx].flows += 1;
   }
   if (unassignedFeatures > 0 || unassignedFlows > 0) {
     counts.push({
       slug: "",
+      environmentId: "",
       label: t("projectInfo.unassignedEnv", "Unassigned"),
       features: unassignedFeatures,
       flows: unassignedFlows,
