@@ -7,6 +7,7 @@
 //   POST   /verify/runs/:id/stop       → cancel the agent loop
 //   GET    /secrets                    → list masked secrets
 //   POST   /secrets                    → create encrypted secret
+//   GET    /secrets/:id                → plaintext credential (LOOPBACK ONLY)
 //   DELETE /secrets/:id                → delete secret
 //   GET    /playwright/tools           → official Playwright MCP tool catalog
 //   POST   /playwright/call            → forward a tool call to Playwright MCP
@@ -22,7 +23,7 @@ import cors from "@fastify/cors";
 import { z } from "zod";
 import { appendEvent, eventsAfter, getRun, listRuns, requestStop, setStatus, startRun, waitForEvents } from "./runs.js";
 import { runAgent, testConnection } from "./agent.js";
-import { listSecrets, createSecret, deleteSecret } from "./secrets.js";
+import { listSecrets, createSecret, deleteSecret, resolveCredentialForTarget } from "./secrets.js";
 import { listPlaywrightTools, callPlaywrightTool } from "./playwrightMcp.js";
 import { resolveEvidence } from "./evidence.js";
 import type { StartVerificationRequest } from "./types.js";
@@ -240,6 +241,22 @@ app.post("/secrets", async (req, reply) => {
   if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
   const created = createSecret(parsed.data);
   return reply.code(201).send(created);
+});
+
+// Loopback-only plaintext read. The env-walk walker's IAM login is the
+// consumer: it resolves the "IAM Walker Login" secret and logs in without
+// any credential sitting in an .env file. Trust model: a caller on
+// 127.0.0.1 could read `data/secrets.enc` from disk anyway — loopback adds
+// no new exposure. Every other peer (LAN, other containers) is refused
+// before the id is even looked up, and the response is never logged.
+app.get<{ Params: { id: string } }>("/secrets/:id", async (req, reply) => {
+  const ip = (req.ip ?? "").replace(/^::ffff:/, "");
+  if (ip !== "127.0.0.1" && ip !== "::1") {
+    return reply.code(403).send({ error: "loopback only" });
+  }
+  const cred = resolveCredentialForTarget(req.params.id);
+  if (!cred) return reply.code(404).send({ error: "not found" });
+  return { id: req.params.id, email: cred.email, password: cred.password };
 });
 
 app.delete<{ Params: { id: string } }>("/secrets/:id", async (req, reply) => {

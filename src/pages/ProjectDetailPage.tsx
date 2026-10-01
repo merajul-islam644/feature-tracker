@@ -507,9 +507,12 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
         envSlug={envSlug}
       />
 
+      {/* projectId + envSlug pin the walk scope into the copied prompt. */}
       <BootstrapDialog
         open={bootstrapOpen}
         onClose={() => setBootstrapOpen(false)}
+        projectId={project.id}
+        envSlug={envSlug}
       />
 
       <AddFlowModal

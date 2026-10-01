@@ -154,9 +154,12 @@ export function FeaturesPage() {
         envSlug={envSlug}
       />
 
+      {/* projectId + envSlug pin the walk scope into the copied prompt. */}
       <BootstrapDialog
         open={bootstrapOpen}
         onClose={() => setBootstrapOpen(false)}
+        projectId={projectId}
+        envSlug={envSlug}
       />
     </div>
   );
