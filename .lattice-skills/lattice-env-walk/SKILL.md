@@ -1,8 +1,3 @@
----
-name: lattice-env-walk
-description: "Add any application as a verification target in Lattice's Issue Tracker and walk it end-to-end — every page, every interactive element, every form, every state — to surface real defects. Works for any URL the user adds, public or login-protected. Drives the live app, files defects to the cloud Issue collection, and deletes any false positives the walker catches later. Use when the user says 'verify this app', 'add this target', 'walk through the app', 'প্রতিটা env walk করো', 'issue খুঁজে বের করো', or hands you a target URL to verify."
----
-
 # Lattice — Verify Any App End-to-End
 
 ## Purpose
@@ -47,7 +42,7 @@ Walker never navigates the Lattice UI to read configuration. **All reads go thro
 - `VITE_BLOCKS_OIDC_URL` — OIDC discovery URL (e.g. `https://iam.seliseblocks.com`)
 - `VITE_BLOCKS_OIDC_CLIENT_ID` — OIDC client id (public, safe to read)
 - `VITE_BLOCKS_KEY` — Blocks tenant key (public, safe to read)
-- `Email` — IAM login email (e.g. `merajzoarder6@gmail.com`)
+- `Email` — IAM login email (per-user: ask whoever is running the skill for theirs, same as the password — never assume one specific person's)
 - `Password` — IAM login password (used for programmatic login, see step 3)
 
 No bearer token is read from the user. **Walker logs in itself** via the OIDC password-equivalent endpoint:
