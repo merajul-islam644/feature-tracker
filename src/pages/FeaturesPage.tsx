@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { Plus, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,6 +8,7 @@ import { ErrorState } from "@/components/ui/error-state";
 import { FeatureList } from "@/components/feature/FeatureList";
 import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
+import { BootstrapDialog } from "@/components/project/BootstrapDialog";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import { useProject, useProjectFeatures } from "@/lib/blocks/hooks";
 import { useIsRole } from "@/hooks/useAuth";
@@ -45,6 +46,7 @@ export function FeaturesPage() {
   const isManager = useIsRole("manager");
   const t = useT();
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
 
   if (projectQuery.isLoading) {
@@ -98,19 +100,33 @@ export function FeaturesPage() {
             </Badge>
           )}
         </div>
-        {/* Manager + dev only — mirrors `ProjectDetailPage`:395. The
-            Add Feature CTA is intentionally absent on non-dev envs
-            and for non-managers; the empty state's `onAdd` follows
-            the same rule. `useCreateFeature` throws the same error
-            if reached through any other path. */}
-        {isDevEnv && isManager && (
+        {/* Bootstrap renders on EVERY env page, for every role — the
+            project card's env chips land here, so this is the page the
+            "Bootstrap with an AI agent" handoff lives on. Read-only
+            prompt generator: no mutation, no role gate, unlike the
+            Add Feature CTA next to it. */}
+        <div className="flex flex-wrap items-center gap-2">
           <Button
-            onClick={() => setAddFeatureOpen(true)}
-            leftIcon={<Plus className="h-4 w-4" />}
+            variant="outline"
+            onClick={() => setBootstrapOpen(true)}
+            leftIcon={<Rocket className="h-4 w-4" />}
           >
-            {t("projectDetail.addFeature", "Add Feature")}
+            {t("projectDetail.bootstrap", "Bootstrap")}
           </Button>
-        )}
+          {/* Manager + dev only — mirrors `ProjectDetailPage`:395. The
+              Add Feature CTA is intentionally absent on non-dev envs
+              and for non-managers; the empty state's `onAdd` follows
+              the same rule. `useCreateFeature` throws the same error
+              if reached through any other path. */}
+          {isDevEnv && isManager && (
+            <Button
+              onClick={() => setAddFeatureOpen(true)}
+              leftIcon={<Plus className="h-4 w-4" />}
+            >
+              {t("projectDetail.addFeature", "Add Feature")}
+            </Button>
+          )}
+        </div>
       </header>
 
       {features.length === 0 ? (
@@ -132,6 +148,11 @@ export function FeaturesPage() {
         onClose={() => setAddFeatureOpen(false)}
         projectId={project.id}
         envSlug={envSlug}
+      />
+
+      <BootstrapDialog
+        open={bootstrapOpen}
+        onClose={() => setBootstrapOpen(false)}
       />
     </div>
   );

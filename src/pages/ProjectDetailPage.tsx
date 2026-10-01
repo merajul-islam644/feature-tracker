@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Plus, GitBranch, Pencil } from "lucide-react";
+import { Plus, GitBranch, Pencil, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,6 +10,7 @@ import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
 import { AddFlowModal } from "@/components/flow/AddFlowModal";
 import { RenameEnvModal } from "@/components/project/RenameEnvModal";
+import { BootstrapDialog } from "@/components/project/BootstrapDialog";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
 import {
   useProject,
@@ -246,6 +247,7 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
   const [renameEnvOpen, setRenameEnvOpen] = useState(false);
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
 
   if (projectQuery.isLoading) {
@@ -351,6 +353,19 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {/* Bootstrap renders on EVERY env page, for every role — unlike
+              the authoring CTAs below it's a read-only prompt generator
+              (the Blocks OS portal's "Bootstrap with an AI agent" handoff),
+              so it needs neither the dev-only nor the role gate. On dev it
+              sits left of Add Flow / Add Feature; on non-dev envs (which
+              render no authoring buttons at all) it's the only action. */}
+          <Button
+            variant="outline"
+            onClick={() => setBootstrapOpen(true)}
+            leftIcon={<Rocket className="h-4 w-4" />}
+          >
+            {t("projectDetail.bootstrap", "Bootstrap")}
+          </Button>
           {/* Add Feature / Add Flow only appear on the dev environment.
               Other envs (uat, prod, custom) are read-only views of
               what was authored in dev. The undefined envSlug case is
@@ -435,6 +450,11 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
         onClose={() => setAddFeatureOpen(false)}
         projectId={project.id}
         envSlug={envSlug}
+      />
+
+      <BootstrapDialog
+        open={bootstrapOpen}
+        onClose={() => setBootstrapOpen(false)}
       />
 
       <AddFlowModal
