@@ -1,8 +1,9 @@
-// "Bootstrap with an AI agent" — mirrors the Blocks OS portal's Bootstrap
-// dialog: a canned, copy-paste prompt that hands the project key to an AI
-// agent (Claude Code, Codex, …) and points it at the blocks-skills
-// BOOTSTRAP.md runbook. Pure client-side — no API call, nothing mutates,
-// so unlike the authoring CTAs it needs no role gate.
+// "Bootstrap with an AI agent" — a canned, copy-paste prompt for an AI
+// agent (Claude Code, Codex, …). The target repo is assumed already
+// bootstrapped (the upstream blocks-skills BOOTSTRAP.md flow ran when the
+// project was created), so the prompt only installs the Lattice env-walk
+// skill. Pure client-side — no API call, nothing mutates, so unlike the
+// authoring CTAs it needs no role gate.
 
 import { useEffect, useState } from "react";
 import { Check, Copy } from "lucide-react";
@@ -19,21 +20,18 @@ import {
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/useToast";
 import { useT } from "@/lib/blocks/i18n";
-import { blocksConfig } from "@/lib/blocks/config";
 
-const BOOTSTRAP_URL =
-  "https://raw.githubusercontent.com/SELISEdigitalplatforms/blocks-skills/main/BOOTSTRAP.md";
-
-// The lattice-env-walk skill's committed copy. The bootstrap prompt tells the
+// The lattice-env-walk skill's committed copy. The copied prompt tells the
 // target agent to fetch and install it, so "verify this app" works in any
-// bootstrapped repo without the user explaining anything. Points at `main` —
-// 404s until .lattice-skills is pushed and merged there.
+// repo without the user explaining anything. Points at `main`.
 const ENV_WALK_SKILL_URL =
   "https://raw.githubusercontent.com/merajul-islam644/feature-tracker/main/.lattice-skills/lattice-env-walk/SKILL.md";
 
-/** The exact plain text "Copy instructions" puts on the clipboard. */
-export function buildBootstrapPrompt(projectKey: string): string {
-  return `Read ${BOOTSTRAP_URL} and follow it to bootstrap this repo, then get me set up on project ${projectKey} and show me what's already there. Then also read ${ENV_WALK_SKILL_URL} and install it as a skill in this repo — save it to .agents/skills/lattice-env-walk/SKILL.md and add a stub at .claude/skills/lattice-env-walk/SKILL.md pointing to it — and follow that skill whenever I ask you to verify or walk an app, or to find issues.`;
+/** The exact plain text "Copy instructions" puts on the clipboard — one
+ * line, deliberately. The skill carries every instruction; the agent just
+ * reads it and works. */
+export function buildBootstrapPrompt(): string {
+  return `Read ${ENV_WALK_SKILL_URL} and do your job.`;
 }
 
 interface BootstrapDialogProps {
@@ -56,9 +54,7 @@ export function BootstrapDialog({ open, onClose }: BootstrapDialogProps) {
   // a 1.5s Copy→Check flip on the trigger.
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(
-        buildBootstrapPrompt(blocksConfig.xBlocksKey),
-      );
+      await navigator.clipboard.writeText(buildBootstrapPrompt());
       setCopied(true);
       toast.success(
         t(
@@ -87,35 +83,10 @@ export function BootstrapDialog({ open, onClose }: BootstrapDialogProps) {
           <DialogTitle>
             {t("projectDetail.bootstrapTitle", "Bootstrap with an AI agent")}
           </DialogTitle>
-          {/* The prompt itself is the description, translated as segments
-              around the (untranslatable) URLs and the project key so the
-              links stay real <a>s in every locale. The clipboard text comes
-              from buildBootstrapPrompt — plain URLs, no links. */}
+          {/* The description mirrors the clipboard text verbatim, split so
+              the skill URL stays a real <a> in every locale. */}
           <DialogDescription>
-            {t("projectDetail.bootstrapBodyBefore", "Read")}{" "}
-            <a
-              href={BOOTSTRAP_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="break-all font-medium text-primary underline underline-offset-2"
-            >
-              {BOOTSTRAP_URL}
-            </a>{" "}
-            {t(
-              "projectDetail.bootstrapBodyMiddle",
-              "and follow it to bootstrap this repo, then get me set up on project",
-            )}{" "}
-            <span className="font-mono text-foreground">
-              {blocksConfig.xBlocksKey}
-            </span>{" "}
-            {t(
-              "projectDetail.bootstrapBodyAfter",
-              "and show me what's already there.",
-            )}{" "}
-            {t(
-              "projectDetail.bootstrapSkillBefore",
-              "It also installs the env-walk verification skill from",
-            )}{" "}
+            {t("projectDetail.bootstrapSkillBefore", "Read")}{" "}
             <a
               href={ENV_WALK_SKILL_URL}
               target="_blank"
@@ -124,17 +95,14 @@ export function BootstrapDialog({ open, onClose }: BootstrapDialogProps) {
             >
               {ENV_WALK_SKILL_URL}
             </a>{" "}
-            {t(
-              "projectDetail.bootstrapSkillAfter",
-              "so afterwards you can just ask the agent to verify or walk an app.",
-            )}
+            {t("projectDetail.bootstrapSkillAfter", "and do your job.")}
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             {t(
               "projectDetail.bootstrapHint",
-              "Paste this into your AI agent (Claude Code, Codex, Cursor, …) inside the repo you want to bootstrap.",
+              "Paste this into your AI agent (Claude Code, Codex, Cursor, …) inside the repo where you want the skill installed.",
             )}
           </p>
         </DialogBody>
