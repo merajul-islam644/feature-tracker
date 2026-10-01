@@ -1,0 +1,133 @@
+# Cloud Build pipeline for the Feature Tracker Vite SPA.
+#
+# Trigger configuration:
+#   1. Cloud Console → Cloud Build → Triggers → Create trigger.
+#   2. Source: connect this repo (merajul-islam644/feature-tracker), branch
+#      `^pre-dev$` (or whatever you want to deploy from).
+#   3. Configuration: Type = "Cloud Build configuration file (yaml or json)",
+#      Location = `cloudbuild.yaml` (do NOT use "Dockerfile" type — that
+#      switches the trigger to invoke kaniko directly with a single --dockerfile
+#      flag, which is what was failing before with
+#      "error resolving dockerfile path").
+#   4. Substitutions: set the ones listed under `substitutions:` below. The
+#      `_VITE_BLOCKS_*` values must come from your tenant's config (resolve
+#      via `blocks projects get --json` and
+#      `blocks auth oidc-clients list --json` from a terminal).
+#   5. Service account: needs Artifact Registry Writer + Cloud Run Admin
+#      (the latter only if you set `_SERVICE`).
+#
+# Pipeline:
+#   1. npm ci              — installs deps from package-lock.json
+#   2. tsc --noEmit        — type-check (fails fast on type errors)
+#   3. vite build          — produces dist/, inlines VITE_BLOCKS_* env
+#   4. docker build        — multi-stage Dockerfile; nginx serves dist/
+#   5. docker push         — to Artifact Registry (declared in images:)
+#
+# Required substitutions:
+#   _VITE_BLOCKS_API_URL          e.g. https://blocksapi.slsblx.com
+#   _VITE_BLOCKS_KEY              tenant key (x-blocks-key)
+#   _VITE_BLOCKS_OIDC_CLIENT_ID   public OIDC client id
+#   _VITE_BLOCKS_OIDC_URL         tenant OIDC discovery URL
+#   _VITE_BLOCKS_APP_DOMAIN       e.g. https://dbeegi.slsblx.com
+# Optional:
+#   _VITE_BLOCKS_OIDC_SCOPE       defaults to "openid profile"
+#   _REGION                       defaults to us-central1
+#   _REPOSITORY                   defaults to feature-tracker
+
+# Top-level substitutions. Defaults fill in only when the trigger doesn't
+# pass a value of its own.
+substitutions:
+  _VITE_BLOCKS_OIDC_SCOPE: "openid profile"
+  _REGION: "us-central1"
+  _REPOSITORY: "feature-tracker"
+
+# Top-level images — Cloud Build pushes these after the build succeeds.
+# The tag uses branch + short SHA + build id so every build is unique.
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/feature-tracker:${BRANCH_NAME##*/}-${SHORT_SHA}-${BUILD_ID}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  # Default disk is 100GB; npm + node_modules doesn't need that much.
+  diskSizeGb: 20
+
+steps:
+  # ── 1. install ──────────────────────────────────────────────────────────
+  - id: install
+    name: gcr.io/cloud-builders/npm
+    entrypoint: npm
+    args: ["ci"]
+    dir: "."
+
+  # ── 2. typecheck ────────────────────────────────────────────────────────
+  - id: typecheck
+    name: gcr.io/cloud-builders/npm
+    entrypoint: npm
+    args: ["run", "typecheck"]
+    dir: "."
+    waitFor: ["install"]
+
+  # ── 3. build the static SPA into dist/ ──────────────────────────────────
+  # Vite inlines VITE_BLOCKS_* env at build time — these MUST be set as
+  # build-step env vars, not as runtime Cloud Run env vars (the bundle has
+  # no access to those).
+  - id: build
+    name: gcr.io/cloud-builders/npm
+    entrypoint: npm
+    args: ["run", "build"]
+    dir: "."
+    env:
+      - "VITE_BLOCKS_API_URL=${_VITE_BLOCKS_API_URL}"
+      - "VITE_BLOCKS_KEY=${_VITE_BLOCKS_KEY}"
+      - "VITE_BLOCKS_OIDC_CLIENT_ID=${_VITE_BLOCKS_OIDC_CLIENT_ID}"
+      - "VITE_BLOCKS_OIDC_URL=${_VITE_BLOCKS_OIDC_URL}"
+      - "VITE_BLOCKS_OIDC_SCOPE=${_VITE_BLOCKS_OIDC_SCOPE}"
+      - "VITE_BLOCKS_APP_DOMAIN=${_VITE_BLOCKS_APP_DOMAIN}"
+    waitFor: ["typecheck"]
+
+  # ── 4. build the container image ────────────────────────────────────────
+  # The Dockerfile is multi-stage (deps → build → nginx runtime); passing
+  # the same VITE_BLOCKS_* values as --build-arg means the image's nginx
+  # stage serves a bundle that already has them inlined. No rebuild is
+  # needed at image-run time.
+  - id: image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/feature-tracker:${BRANCH_NAME##*/}-${SHORT_SHA}-${BUILD_ID}"
+      - "--build-arg=VITE_BLOCKS_API_URL=${_VITE_BLOCKS_API_URL}"
+      - "--build-arg=VITE_BLOCKS_KEY=${_VITE_BLOCKS_KEY}"
+      - "--build-arg=VITE_BLOCKS_OIDC_CLIENT_ID=${_VITE_BLOCKS_OIDC_CLIENT_ID}"
+      - "--build-arg=VITE_BLOCKS_OIDC_URL=${_VITE_BLOCKS_OIDC_URL}"
+      - "--build-arg=VITE_BLOCKS_OIDC_SCOPE=${_VITE_BLOCKS_OIDC_SCOPE}"
+      - "--build-arg=VITE_BLOCKS_APP_DOMAIN=${_VITE_BLOCKS_APP_DOMAIN}"
+      - "--file=Dockerfile"
+      - "."
+    dir: "."
+    waitFor: ["build"]
+
+  # ── 5. push to Artifact Registry ─────────────────────────────────────────
+  # Implicit: declared in `images:` at the top of this file.
+
+  # ── 6. optional Cloud Run deploy ─────────────────────────────────────────
+  # Runs only when the trigger passes a _SERVICE substitution. Same
+  # pipeline serves both "build image only" (omitting _SERVICE) and
+  # "build + deploy" workflows without duplicating config.
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: sh
+    args:
+      - "-c"
+      - |
+        if [ -n "${_SERVICE}" ]; then
+          gcloud run deploy "${_SERVICE}" \
+            --image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/feature-tracker:${BRANCH_NAME##*/}-${SHORT_SHA}-${BUILD_ID}" \
+            --region="${_REGION}" \
+            --platform=managed \
+            --allow-unauthenticated
+        else
+          echo "_SERVICE not set — skipping Cloud Run deploy"
+        fi
+    dir: "."
+    waitFor: ["image"]

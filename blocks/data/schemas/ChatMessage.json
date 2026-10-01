@@ -1,0 +1,51 @@
+{
+  "collectionName": "blx_ChatMessages",
+  "fields": [
+    {
+      "name": "sessionId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Conversation thread id. One session per user for now; reserved for future multi-thread history.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "role",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "user | assistant | system",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "content",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Message text.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "actionsJson",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "JSON-encoded ChatAction[] for assistant messages (kept as a string to satisfy the schema's primitive field types).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "ChatMessage",
+  "schemaType": 1
+}

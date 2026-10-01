@@ -1,7 +1,6 @@
-import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Plus, GitBranch } from "lucide-react";
-import { useDataStore } from "@/store/dataStore";
+import { useEffect, useState } from "react";
+import { useParams } from "react-router-dom";
+import { Plus, GitBranch, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
@@ -9,41 +8,332 @@ import { FeatureList } from "@/components/feature/FeatureList";
 import { FeatureEmptyState } from "@/components/feature/FeatureEmptyState";
 import { AddFeatureModal } from "@/components/feature/AddFeatureModal";
 import { AddFlowModal } from "@/components/flow/AddFlowModal";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
+import { BootstrapDialog } from "@/components/project/BootstrapDialog";
+import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
+import {
+  useEnvironments,
+  useProject,
+  useProjectFeatures,
+  useProjectFlows,
+} from "@/lib/blocks/hooks";
+import { useIsRole } from "@/hooks/useAuth";
+import { useActiveEnvContext } from "@/contexts/ActiveEnvContext";
+import { useT } from "@/lib/blocks/i18n";
+import {
+  CANONICAL_ENV_SLUGS,
+  type CanonicalEnvSlug,
+} from "@/lib/validation";
+import { envChipStyle } from "@/components/ui/color-picker";
+import type {
+  Environment,
+  EnvironmentKind,
+  Project,
+  ProjectCustomEnv,
+} from "@/lib/blocks/data";
 
-export function ProjectDetailPage() {
-  const { projectId } = useParams<{ projectId: string }>();
-  const isHydrated = useDataStore((s) => s.isHydrated);
-  const project = useDataStore((s) =>
-    projectId ? s.getProject(projectId) : undefined
-  );
-  // Subscribe to the raw arrays (stable references) and derive the filtered
-  // views with useMemo. Subscribing directly to the selector results causes
-  // useSyncExternalStore to see a new array reference on every render and
-  // loop forever, because getProjectFeatures returns a fresh .filter() result.
-  const allFeatures = useDataStore((s) => s.features);
-  const allFlows = useDataStore((s) => s.flows);
+// Canonical env slugs that are always available on every project. Order
+// matches the dev→uat pipeline order; the page uses this for the chip and
+// the card uses it to seed the chip list before custom envs are appended.
+export const PROJECT_ENVS: readonly CanonicalEnvSlug[] = CANONICAL_ENV_SLUGS;
 
-  const features = useMemo(
-    () =>
-      projectId ? allFeatures.filter((f) => f.projectId === projectId) : [],
-    [allFeatures, projectId]
+// Re-export so call sites that need to narrow `string` → `CanonicalEnvSlug`
+// (e.g. the Environment chip's canonical-env colour lookup) don't have to
+// import the validation module directly.
+export type { CanonicalEnvSlug };
+
+// One row of metadata per canonical env. Custom envs derive their chip
+// color from a user-supplied hex via `envChipStyle` and don't appear in
+// this table.
+export interface CanonicalEnvMeta {
+  label: string;
+  shortLabel: string;
+  i18nKey: string;
+  className: string;
+}
+
+export const PROJECT_ENV_META: Record<CanonicalEnvSlug, CanonicalEnvMeta> = {
+  dev: {
+    label: "Development",
+    shortLabel: "Dev",
+    i18nKey: "projectEnv.envDev",
+    className: "border-transparent bg-muted text-muted-foreground",
+  },
+  stg: {
+    label: "Staging",
+    shortLabel: "Stg",
+    i18nKey: "projectEnv.envStg",
+    className: "border-transparent bg-amber-500/10 text-amber-700",
+  },
+  prod: {
+    label: "Production",
+    shortLabel: "Prod",
+    i18nKey: "projectEnv.envProd",
+    className: "border-transparent bg-emerald-500/10 text-emerald-700",
+  },
+  uat: {
+    label: "User Acceptance Testing",
+    shortLabel: "UAT",
+    i18nKey: "projectEnv.envUat",
+    className: "border-transparent bg-violet-500/10 text-violet-700",
+  },
+};
+
+// Chip/badge styling per Environment.kind — the row-based successor to the
+// slug-keyed PROJECT_ENV_META lookup. Under schema v2.1 the env list is
+// data (blx_Environments rows): a canonical env's visual treatment comes
+// from its `kind`, custom envs tint via their own hex `color`, and none of
+// it depends on the slug (which is a renameable display cache).
+export const ENV_KIND_META: Record<
+  EnvironmentKind,
+  { className: string } | null
+> = {
+  dev: { className: "border-transparent bg-muted text-muted-foreground" },
+  stg: { className: "border-transparent bg-amber-500/10 text-amber-700" },
+  prod: { className: "border-transparent bg-emerald-500/10 text-emerald-700" },
+  uat: { className: "border-transparent bg-violet-500/10 text-violet-700" },
+  // Custom envs have no fixed class — the resolvers build an inline style
+  // from the row's color instead.
+  custom: null,
+};
+
+// Resolved metadata for *any* env — used by both the page header and the
+// card chip so the visual treatment of canonical vs. custom envs is in
+// one place. Custom envs lose the i18n key (label is stored verbatim) and
+// render via inline style instead of a Tailwind class.
+export interface ResolvedEnvMeta {
+  slug: string;
+  label: string;
+  shortLabel: string;
+  className?: string;
+  customStyle?: React.CSSProperties;
+  isCustom: boolean;
+  // The env's row identity (blx_Environments.ItemId) when the metadata was
+  // resolved from the env list — set by `resolveEnvMetaFromEnvs` only. Callers
+  // that scope per-env data (verification checks, active-env preference) use
+  // this instead of the slug; undefined means the row list wasn't available
+  // and the legacy project-JSON resolver answered.
+  environmentId?: string;
+  // True when the label is row data and must render verbatim — i18n lookups
+  // would hide a user's rename behind the translation. Set by the row-based
+  // resolver; the legacy resolver leaves it undefined so canonical labels
+  // keep translating.
+  verbatim?: boolean;
+  // True when the canonical-env label is sourced from
+  // `project.envLabelOverrides` rather than the i18n default. Callers
+  // that pipe the label through the i18n translator should render the
+  // `label` verbatim instead, otherwise the override would be hidden
+  // behind a translation that always wins. Custom envs are always
+  // verbatim (the user provided the label directly), so this is set on
+  // the page for canonical-with-override only.
+  hasOverride?: boolean;
+}
+
+// Look up metadata for a single env slug. `project` is required for
+// custom-env resolution; pass `undefined` to fall back to a plain
+// "slug-as-label" rendering for an unknown slug.
+//
+// Canonical env labels consult `project.envLabelOverrides` first so the
+// user can rename a built-in env (e.g. dev → "Local Dev") for a single
+// project without touching the global i18n label.
+export function resolveEnvMeta(
+  slug: string | undefined,
+  project: Project | null | undefined,
+): ResolvedEnvMeta | null {
+  if (!slug) return null;
+  const canonical = (PROJECT_ENVS as readonly string[]).includes(slug);
+  if (canonical) {
+    const meta = PROJECT_ENV_META[slug as CanonicalEnvSlug];
+    const override = project?.envLabelOverrides?.[slug];
+    // Per-project override wins over the i18n default. Empty string
+    // would mean "explicitly cleared" — fall back to the i18n label
+    // so the user can never blank out the header. Capture the trimmed
+    // value in its own variable so the ternary below resolves to a
+    // narrow `string` (the raw `override` is `string | undefined`).
+    const trimmedOverride = override && override.trim() ? override : "";
+    const hasOverride = trimmedOverride.length > 0;
+    return {
+      slug,
+      label: hasOverride ? trimmedOverride : meta.label,
+      shortLabel: meta.shortLabel,
+      className: meta.className,
+      isCustom: false,
+      hasOverride,
+    };
+  }
+  const custom = project?.customEnvs?.find(
+    (e: ProjectCustomEnv) => e.slug === slug,
   );
-  const flowCount = useMemo(
-    () =>
-      projectId ? allFlows.filter((f) => f.projectId === projectId).length : 0,
-    [allFlows, projectId]
-  );
+  if (custom) {
+    const label = custom.label || slug;
+    return {
+      slug,
+      label,
+      shortLabel: label,
+      customStyle: envChipStyle(custom.color || "#0ea5e9"),
+      isCustom: true,
+    };
+  }
+  // Unknown slug — render a neutral badge so a deep-link to a deleted
+  // env doesn't blank out the page header.
+  return {
+    slug,
+    label: slug,
+    shortLabel: slug,
+    className: "border-transparent bg-muted text-muted-foreground",
+    isCustom: false,
+  };
+}
+
+// Row-based env metadata — the schema v2.1 resolver. Reads display data
+// straight off the blx_Environments row: the label is always verbatim user
+// data (seeded short forms for the canonical four, then renameable), the
+// styling keys off `kind`, and `environmentId` rides along so callers can
+// scope per-env data to the row identity instead of the slug. Unknown
+// slugs get the same neutral badge as the legacy resolver so a deep-link
+// to a deleted env doesn't blank the header.
+export function resolveEnvMetaFromEnvs(
+  slug: string | undefined,
+  envs: Environment[],
+): ResolvedEnvMeta | null {
+  if (!slug) return null;
+  const env = envs.find((e) => e.slug === slug);
+  if (!env) {
+    return {
+      slug,
+      label: slug,
+      shortLabel: slug,
+      className: "border-transparent bg-muted text-muted-foreground",
+      isCustom: false,
+    };
+  }
+  const kindMeta = ENV_KIND_META[env.kind];
+  if (kindMeta) {
+    return {
+      slug: env.slug,
+      label: env.label,
+      shortLabel: env.label,
+      className: kindMeta.className,
+      isCustom: false,
+      environmentId: env.id,
+      verbatim: true,
+    };
+  }
+  return {
+    slug: env.slug,
+    label: env.label,
+    shortLabel: env.label,
+    customStyle: envChipStyle(env.color || "#0ea5e9"),
+    isCustom: true,
+    environmentId: env.id,
+    verbatim: true,
+  };
+}
+
+// Resolve a display label for an env slug WITHOUT requiring project
+// context. Used by the AddFeature/AddFlow modals, which only know
+// `envSlug` (they don't take a `project` prop). Canonical envs map to
+// the same labels used by the page header; custom envs and unknown
+// slugs fall back to the slug itself — close enough for the modal's
+// read-only "Environment: <label>" row. The page header is the source
+// of truth for custom env rendering.
+export function envLabelFromSlug(slug: string | undefined): string {
+  if (!slug) return "";
+  if ((PROJECT_ENVS as readonly string[]).includes(slug)) {
+    return PROJECT_ENV_META[slug as CanonicalEnvSlug].label;
+  }
+  return slug;
+}
+
+interface ProjectDetailPageProps {
+  // Optional env slug passed as a prop. Routes `/projects/:projectId` and
+  // `/projects/:projectId/:envSlug` both mount this component — the env,
+  // when present, is read from props (not from `useParams`) so the prop
+  // shape stays stable across both routes.
+  envSlug?: string;
+}
+
+export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPageProps = {}) {
+  const params = useParams<{ projectId: string; envSlug?: string }>();
+  const projectId = params.projectId;
+  // Prefer the prop (set by the legacy routing path) over the URL param.
+  // Reading from the URL keeps the catch-all `/projects/:projectId/:envSlug`
+  // working without a wrapper page.
+  const envSlug = envSlugProp ?? params.envSlug;
+
+  const projectQuery = useProject(projectId);
+  // The env list — schema v2.1's source of truth for every env surface on
+  // this page (header badge, dev-only gates, rename modal identity). While
+  // the query is in flight (or in the deployment gap) the page falls back
+  // to the legacy project-JSON resolution, so nothing flashes.
+  const environmentsQuery = useEnvironments(projectId ?? null);
+  const envRows = environmentsQuery.data ?? [];
+  // Pass the env from the URL to scope the feature read. On the env-less
+  // page (no envSlug), the hook returns every feature for the project,
+  // including legacy records without an envSlug — see hooks.ts.
+  const featuresQuery = useProjectFeatures(projectId, envSlug);
+  const flowsQuery = useProjectFlows(projectId, envSlug);
+  const t = useT();
+  // Mirror the URL-resolved (projectId, envSlug) into the Issue Tracker
+  // env context so the Targets/Secrets/Issues hooks can scope their reads
+  // and mutations. We push even when envSlug is missing: the env-less
+  // /projects/:id route counts as "active env context" too (filtered to
+  // legacy rows), because the user is on a project page. Pushing an empty
+  // envSlug would be a per-env-scoping bug — the schema demands a real
+  // slug. Skipping the push leaves the previous env mounted, which is
+  // harmless given the sidebar gates Issue Tracker sub-routes by URL and
+  // the Issue Tracker reads also check the URL via the hook layer.
+  const { setEnv } = useActiveEnvContext();
+  useEffect(() => {
+    // Only stamp when both pieces are present. The legacy env-less
+    // /projects/:id route doesn't push — readers see the previous
+    // value (or null on first load), and the gate in AppSidebar hides
+    // the Issue Tracker menu so the user can't reach Issue Tracker
+    // sub-routes from the env-less landing in the first place.
+    //
+    // Cleanup intentionally does NOT clear the context: the Issue
+    // Tracker sub-routes (`/projects/:id/:envSlug/<key>` where
+    // `<key>` is one of targets/secrets/scope/panel/issues/history)
+    // live outside this component tree but still need the env to
+    // scope their reads / mutations. Without this, navigating from a
+    // project env into the Issue Tracker would unmount
+    // ProjectDetailPage, drop the env to null, and trip the
+    // `add_failed_no_env` guard at every mutation. The next time the
+    // user enters a project env, the effect re-runs and overwrites
+    // whatever was there.
+    if (projectId && envSlug) {
+      setEnv({ projectId, envSlug });
+    }
+  }, [projectId, envSlug, setEnv]);
+  // Role gates for the header CTAs:
+  //
+  //   * "Add Feature" (just below) is manager-only — the workspace
+  //     curation surface. `useCreateFeature` throws the same error
+  //     for stale modals / programmatic callers.
+  //
+  //   * "Add Flow" (also below) is TESTER-only. The previous policy
+  //     was "non-manager (developer + tester) inline authoring";
+  //     narrowing it to testers aligns the page-level entry with the
+  //     flow-row kebab Rename/Delete policy in `FeatureItem` (also
+  //     tester-only) — managers curate via chat tools and developers
+  //     author features but not flows. `useCreateFlow` has no role
+  //     guard because the chat tools call it on behalf of any role;
+  //     this is UI enforcement only.
+  //
+  //   * The env-rename pencil stays manager-only — same rationale as
+  //     `useRenameProjectEnv`.
+  //
+  // Mirrors ProjectCard / ProjectsPage / FeatureItem — same
+  // `useIsRole` hooks, same single-source role resolution.
+  const isManager = useIsRole("manager");
+  const isTester = useIsRole("tester");
 
   const [addFeatureOpen, setAddFeatureOpen] = useState(false);
   const [addFlowOpen, setAddFlowOpen] = useState(false);
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
 
-  const featureFlowOptions = useMemo(
-    () => features.map((f) => ({ value: f.id, label: f.name })),
-    [features]
-  );
-
-  if (!isHydrated) {
+  if (projectQuery.isLoading) {
     return (
       <div className="space-y-4">
         <Skeleton className="h-6 w-32" />
@@ -53,81 +343,184 @@ export function ProjectDetailPage() {
     );
   }
 
+  const project = projectQuery.data;
+  const features = featuresQuery.data ?? [];
+  const flowCount = flowsQuery.data?.length ?? 0;
+
   if (!project) {
     return (
       <ErrorState
-        title="Project not found"
-        message="The project you're looking for doesn't exist or was removed."
-        onRetry={() => setRetryKey((k) => k + 1)}
+        title={t("projects.notFound", "Project not found")}
+        message={t(
+          "projects.notFoundMessage",
+          "The project you're looking for doesn't exist or was removed.",
+        )}
+        onRetry={() => {
+          setRetryKey((k) => k + 1);
+          projectQuery.refetch();
+        }}
       />
     );
   }
 
+  // Row-based resolution once the env list lands; the legacy project-JSON
+  // resolver covers the load window (and the deployment gap) so the header
+  // never flashes the unknown-slug fallback for a slug that exists.
+  const envMeta = envRows.length
+    ? resolveEnvMetaFromEnvs(envSlug, envRows)
+    : resolveEnvMeta(envSlug, project);
+
+  // The authoring env is whichever row carries kind "dev" — usually slug
+  // "dev", but slugs are renameable under v2.1, so the gate keys off the
+  // row kind. `envSlug === undefined` is the legacy /projects/:id landing —
+  // treated as dev, same as before. While the env rows are still loading
+  // (or in the deployment gap) the canonical slug check stands in.
+  const isDevEnv =
+    envSlug === undefined ||
+    (envRows.length
+      ? envRows.find((e) => e.slug === envSlug)?.kind === "dev"
+      : envSlug === "dev");
+
+  // Badge label rule now lives inside EnvHeaderChip (verbatim row data →
+  // i18n for canonical defaults). This page only resolves envMeta to gate
+  // the chip's presence (unknown-slug/deployment-gap → no chip), matching
+  // the pre-chip behavior where the badge block vanished for null meta.
+
   return (
     <div className="space-y-6" key={retryKey}>
-      <div>
-        <Link
-          to="/projects"
-          className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-          Projects
-        </Link>
-      </div>
+      <BackToProjectsLink />
 
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-900">
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold text-foreground">
             {project.name}
           </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            {features.length} feature{features.length === 1 ? "" : "s"} •{" "}
-            {flowCount} flow{flowCount === 1 ? "" : "s"}
-          </p>
+          {envMeta && (
+            <>
+              {/* Badge + pencil + trash — the shared header chip (same
+                  component every env page renders). The icons are
+                  manager-only inside the chip; under v2.1 they show on
+                  EVERY env (slugs and labels are editable per row, and
+                  delete takes the env's children with it), not just dev
+                  — the old isDevEnv gate predated row-based envs. */}
+              <EnvHeaderChip />
+            </>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {/* Bootstrap renders on EVERY env page, for every role — unlike
+              the authoring CTAs below it's a read-only prompt generator
+              (the Blocks OS portal's "Bootstrap with an AI agent" handoff),
+              so it needs neither the dev-only nor the role gate. On dev it
+              sits left of Add Flow / Add Feature; on non-dev envs (which
+              render no authoring buttons at all) it's the only action. */}
           <Button
-            variant="secondary"
-            onClick={() => setAddFlowOpen(true)}
-            leftIcon={<GitBranch className="h-4 w-4" />}
-            disabled={features.length === 0}
-            title={
-              features.length === 0
-                ? "Add at least one feature before creating a flow"
-                : undefined
-            }
+            variant="outline"
+            onClick={() => setBootstrapOpen(true)}
+            leftIcon={<Rocket className="h-4 w-4" />}
           >
-            Add Flow
+            {t("projectDetail.bootstrap", "Bootstrap")}
           </Button>
-          <Button
-            onClick={() => setAddFeatureOpen(true)}
-            leftIcon={<Plus className="h-4 w-4" />}
-          >
-            Add Feature
-          </Button>
+          {/* Add Feature / Add Flow only appear on the dev environment.
+              Other envs (uat, prod, custom) are read-only views of
+              what was authored in dev. The bare /projects/:id landing
+              counts as dev (see `isDevEnv`). */}
+          {isDevEnv && (
+            <>
+              {/* Flow authoring is the TESTER-only affordance on this
+                  page (mirroring the inline "+ Add another flow"
+                  button and the empty-state "Add Flow" CTA inside
+                  `FeatureItem`). Managers and developers fall into
+                  the read-only branch: managers curate flows via
+                  chat tools / kebab create actions, developers
+                  author features but not flows. The button stays
+                  disabled when there are no features yet — that's
+                  a structural guard, not a role check, and applies
+                  to testers too (who would otherwise land on the
+                  modal with no parent feature to attach to). */}
+              {isTester && (
+                <Button
+                  variant="secondary"
+                  onClick={() => setAddFlowOpen(true)}
+                  leftIcon={<GitBranch className="h-4 w-4" />}
+                  disabled={features.length === 0}
+                  title={
+                    features.length === 0
+                      ? t(
+                          "projectDetail.addFeatureFirstTooltip",
+                          "Add at least one feature before creating a flow",
+                        )
+                      : undefined
+                  }
+                >
+                  {t("projectDetail.addFlow", "Add Flow")}
+                </Button>
+              )}
+              {/* Hidden for non-managers — `useCreateFeature` throws the
+                  same error if reached through any other path. The
+                  top "Add Flow" button (just above) is hidden for
+                  managers + developers (tester-only) in the inverse
+                  direction: managers author flows via chat tools,
+                  developers don't author flows at all — only
+                  testers get the inline creation entry points
+                  (header button, "+ Add another flow", empty-state
+                  "Add Flow" CTA). */}
+              {isManager && (
+                <Button
+                  onClick={() => setAddFeatureOpen(true)}
+                  leftIcon={<Plus className="h-4 w-4" />}
+                >
+                  {t("projectDetail.addFeature", "Add Feature")}
+                </Button>
+              )}
+            </>
+          )}
         </div>
       </header>
 
       {features.length === 0 ? (
-        <FeatureEmptyState onAdd={() => setAddFeatureOpen(true)} />
+        isDevEnv ? (
+          // Only pass `onAdd` for managers — the empty state should
+          // not surface a CTA non-managers can't act on. `useCreateFeature`
+          // throws if they reach it some other way.
+          <FeatureEmptyState
+            {...(isManager ? { onAdd: () => setAddFeatureOpen(true) } : {})}
+          />
+        ) : (
+          // Non-dev envs show a read-only empty state when no features
+          // exist there yet — features are authored under dev first,
+          // so other envs being empty isn't an actionable situation.
+          <FeatureEmptyState />
+        )
       ) : (
-        <FeatureList features={features} />
+        <FeatureList
+          features={features}
+          readOnly={!isDevEnv}
+          envSlug={envSlug}
+        />
       )}
 
       <AddFeatureModal
         open={addFeatureOpen}
         onClose={() => setAddFeatureOpen(false)}
         projectId={project.id}
+        envSlug={envSlug}
       />
 
-      {/* Hide unused variable warning by referencing it via a no-op */}
-      {featureFlowOptions && (
-        <AddFlowModal
-          open={addFlowOpen}
-          onClose={() => setAddFlowOpen(false)}
-          projectId={project.id}
-        />
-      )}
+      {/* projectId + envSlug pin the walk scope into the copied prompt. */}
+      <BootstrapDialog
+        open={bootstrapOpen}
+        onClose={() => setBootstrapOpen(false)}
+        projectId={project.id}
+        envSlug={envSlug}
+      />
+
+      <AddFlowModal
+        open={addFlowOpen}
+        onClose={() => setAddFlowOpen(false)}
+        projectId={project.id}
+        envSlug={envSlug}
+      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { LogOut, User as UserIcon } from "lucide-react";
-import { Avatar } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/UserAvatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,7 +28,7 @@ export function Topbar() {
   };
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-border bg-background/80 px-4 backdrop-blur md:px-6">
+    <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-border bg-surface px-4 md:px-6">
       {/* Left: hamburger toggle + brand */}
       <div className="flex items-center gap-2">
         {/* <SidebarTrigger
@@ -52,6 +52,11 @@ export function Topbar() {
       {/* Right: utility icons + profile avatar */}
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-0.5">
+          {/* Announcements broadcast entry moved to the Dashboard's
+              top-right pill (see `DashboardPage`). The topbar keeps
+              the rest of the utility chrome — language, notifications,
+              theme — and intentionally drops the speaker icon to avoid
+              two entry points for the same surface. */}
           <LanguageSwitcher />
           <NotificationBell />
           <ThemeToggler />
@@ -67,12 +72,34 @@ export function Topbar() {
               aria-label="Open user menu"
               className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
-              <Avatar name={currentUser.name} size="md" />
+              <UserAvatar userId={currentUser.id} name={currentUser.name} size="md" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-44">
-            <DropdownMenuLabel className="capitalize">
-              {currentUser.name}
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="space-y-0.5">
+              <div className="truncate font-semibold capitalize text-foreground">
+                {currentUser.name}
+              </div>
+              {currentUser.email && (
+                <div
+                  className="truncate text-xs font-normal text-muted-foreground"
+                  title={currentUser.email}
+                >
+                  {currentUser.email}
+                </div>
+              )}
+              {currentUser.roles.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {currentUser.roles.map((r) => (
+                    <span
+                      key={r}
+                      className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+                    >
+                      {r}
+                    </span>
+                  ))}
+                </div>
+              )}
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem

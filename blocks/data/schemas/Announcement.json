@@ -1,0 +1,29 @@
+{
+  "collectionName": "blx_Announcements",
+  "fields": [
+    {
+      "name": "authorId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM sub of the posting manager. Duplicates CreatedBy for the same self-documenting reason as DirectMessage.senderId — explicit column, explicit filter.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "content",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Announcement text, e.g. 'Hello team, today we are going to prod'.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "Announcement",
+  "schemaType": 1
+}

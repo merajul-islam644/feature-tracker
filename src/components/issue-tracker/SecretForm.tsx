@@ -2,30 +2,63 @@
 // toggle. The plaintext password only lives in this component's local state —
 // it is forwarded once to the parent's addSecret callback and immediately
 // dropped (spec section 12.2 & 12.3).
+//
+// A target dropdown lets the user bind the secret to one or more configured
+// verification targets at creation time. Binding is optional — secrets can
+// also be saved without any target and bound later via the SecretCard row.
 
 import { useState, type FormEvent } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Link2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { TargetSelect } from "./TargetSelect";
+import type { VerificationTarget } from "@/types/issue-tracker";
 
 interface Props {
-  onSubmit: (payload: { name: string; email: string; password: string }) => Promise<void>;
+  onSubmit: (payload: {
+    name: string;
+    email: string;
+    password: string;
+    // Optional — empty/missing array means "do not bind to any target
+    // right now". The parent's `addSecret` accepts the array and
+    // binds to each requested target via the same diff-based dispatch
+    // used by `bindSecret`.
+    targetIds?: string[];
+  }) => Promise<void>;
+  // List of configured targets shown in the dropdown. May be empty — the
+  // dropdown then renders an empty-state message instead of options.
+  targets?: VerificationTarget[];
+  // Optional map targetId → name of the currently-bound secret. Used to warn
+  // the user before they overwrite an existing binding.
+  boundSecretByTargetId?: Record<string, string>;
 }
 
-export function SecretForm({ onSubmit }: Props) {
+export function SecretForm({
+  onSubmit,
+  targets = [],
+  boundSecretByTargetId = {},
+}: Props) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
+  // Selected targetIds — empty array means "no binding". Multi-select
+  // is now first-class; one credential can land on several targets.
+  const [targetIds, setTargetIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [errors, setErrors] = useState<{ name?: string; email?: string; password?: string }>({});
+  const [errors, setErrors] = useState<{
+    name?: string;
+    email?: string;
+    password?: string;
+  }>({});
 
   const validate = () => {
     const next: typeof errors = {};
     if (!name.trim()) next.name = "Name is required.";
     if (!email.trim()) next.email = "Email is required.";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) next.email = "Enter a valid email.";
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      next.email = "Enter a valid email.";
     if (!password) next.password = "Password is required.";
     else if (password.length < 6) next.password = "Use at least 6 characters.";
     setErrors(next);
@@ -37,15 +70,38 @@ export function SecretForm({ onSubmit }: Props) {
     setEmail("");
     setPassword("");
     setShow(false);
+    setTargetIds([]);
     setErrors({});
   };
+
+  // Surface existing bindings the user is trying to take. The
+  // invariant is one-target-one-secret, so any target already bound to
+  // another credential BLOCKS the save — the user must unbind first
+  // (from that other secret's row). List every other-secret-held
+  // target the user has checked, joined by commas.
+  const displacedSecrets = Array.from(
+    new Set(
+      targetIds
+        .map((id) => boundSecretByTargetId[id])
+        .filter((name): name is string => Boolean(name)),
+    ),
+  );
+  const targetWarning =
+    displacedSecrets.length > 0
+      ? `Cannot bind — these targets are already held by "${displacedSecrets.join('", "')}". Unbind them from that credential first.`
+      : null;
 
   const onSubmitForm = async (e: FormEvent) => {
     e.preventDefault();
     if (!validate()) return;
     setBusy(true);
     try {
-      await onSubmit({ name: name.trim(), email: email.trim(), password });
+      await onSubmit({
+        name: name.trim(),
+        email: email.trim(),
+        password,
+        targetIds: targetIds.length > 0 ? targetIds : undefined,
+      });
       reset();
     } catch {
       // parent surfaces the toast
@@ -133,6 +189,35 @@ export function SecretForm({ onSubmit }: Props) {
           Passwords are kept only for the current session and never written to local storage.
         </p>
       </div>
+
+      {/* Target binding — optional. The credential can be created without
+          a binding and bound later from the secret row. */}
+      <div className="space-y-1">
+        <Label
+          htmlFor="secret-target"
+          className="flex items-center gap-1.5"
+        >
+          <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Bind to target (optional)
+        </Label>
+        <TargetSelect
+          id="secret-target"
+          value={targetIds}
+          onChange={setTargetIds}
+          targets={targets}
+          boundSecretByTargetId={boundSecretByTargetId}
+        />
+        {targetWarning && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {targetWarning}
+          </p>
+        )}
+        <p className="text-xs text-muted-foreground">
+          Each credential can only be used by the target it's bound to. The
+          verification agent will not pass this secret to any other URL.
+        </p>
+      </div>
+
       <div className="flex justify-end">
         <Button type="submit" size="sm" disabled={busy}>
           {busy ? "Adding…" : "Add Secret"}

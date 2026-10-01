@@ -1,0 +1,62 @@
+{
+  "collectionName": "blx_UserAiConfigs",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id (OIDC sub) this config belongs to. One row per user; the read+write hooks filter by currentUser.id so only the owner reads/writes.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "provider",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Provider id: 'anthropic' (default) or 'openai'. Empty/missing is treated as 'anthropic' by the proxy. Maps to the `x-ai-chat-provider` request header on `/api/ai/chat`.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "gatewayUrl",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Override for AI_GATEWAY_URL / ANTHROPIC_BASE_URL. For Anthropic, the Messages API base (e.g. https://api.anthropic.com). For OpenAI, the Chat Completions base (e.g. https://api.openai.com/v1). Empty string means 'use server default'.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "model",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Override for AI_GATEWAY_MODEL / ANTHROPIC_MODEL. Empty string means 'use server default'.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "token",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": true,
+      "isUniqueData": false,
+      "description": "Override for AI_GATEWAY_TOKEN / ANTHROPIC_AUTH_TOKEN. Empty string means 'use server default'. Marked PII because it is a credential.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "UserAiConfig",
+  "schemaType": 1
+}

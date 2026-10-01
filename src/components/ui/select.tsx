@@ -40,10 +40,16 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
           aria-invalid={error ? "true" : undefined}
           aria-describedby={error ? errorId : undefined}
           className={cn(
-            "flex h-10 w-full appearance-none rounded-md border border-input bg-background px-3 pr-9 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+            // Order matters here: `bg-background` MUST come after the
+            // `bg-[url(...)]` arbitrary-value utilities, otherwise
+            // `tailwind-merge` (used by `cn`) treats the arbitrary
+            // background-image shorthand as a `bg-` conflict and
+            // strips `bg-background` — which leaves the trigger white
+            // in dark mode (white background + light text = invisible).
+            "flex h-10 w-full appearance-none rounded-md border border-input px-3 pr-9 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
             error && "border-destructive focus-visible:ring-destructive",
             "disabled:cursor-not-allowed disabled:opacity-50",
-            "bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22currentColor%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22><polyline points=%226 9 12 15 18 9%22/></svg>')] bg-[length:12px_12px] bg-[position:right_0.75rem_center] bg-no-repeat",
+            "bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22currentColor%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22><polyline points=%226 9 12 15 18 9%22/></svg>')] bg-[length:12px_12px] bg-[position:right_0.75rem_center] bg-no-repeat bg-background",
             className
           )}
           required={required}

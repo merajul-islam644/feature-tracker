@@ -1,0 +1,95 @@
+{
+  "collectionName": "blx_VerificationChecks",
+  "fields": [
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Project.ItemId — kept alongside environmentId so the flat gateway filter {projectId, environmentId} works (the gateway has no joins).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "environmentId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Environment.ItemId. Checks are env-scoped: every check (built-in seed or user-defined) is one row per environment, so definition and selection live on the same row.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "source",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "builtin | custom. 'builtin' rows are seeded from the shipped 11-check catalog; 'custom' rows are user-defined.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "checkId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Row identity within the env: the stable catalog id (page_load, navigation, ...) for builtin rows, or the custom_<slug> id for custom rows. The migration and the toggle hook dedup/match on (environmentId, checkId) — never on label, which is editable.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "label",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Check name shown in the Scopes page list.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "description",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "What the check does — the AI agent uses this as guidance during a verification run.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "recommended",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "true | false (string — Blocks Data fields are primitives). Seeding default for `enabled`.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "enabled",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "true | false (string). The per-env selection: only enabled checks run in this environment's verification runs. Replaces UserPreference.customChecksJson selection storage and Environment.checksJson.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "VerificationCheck",
+  "schemaType": 1
+}

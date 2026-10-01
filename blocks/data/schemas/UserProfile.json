@@ -1,0 +1,29 @@
+{
+  "collectionName": "blx_UserProfiles",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id (OIDC `sub`) this profile belongs to. The app layer treats it as unique — upsert semantics, not append.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "imageFileId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Blocks Data Storage file id of the user's profile picture (returned by the presign/upload flow). Empty while the user hasn't uploaded one — surfaces render the initials fallback.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "UserProfile",
+  "schemaType": 1
+}

@@ -4,7 +4,74 @@ dist-ssr
 *.local
 .env
 .env.local
+# Per-environment dotenv files — keep secrets out of the repo. The matching
+# `.env.*.example` files are committed as documentation templates.
+.env.production
+.env.staging
+.env.development
+# mail-server bridge state — holds mail.tm account credentials per user
+mail-server/.bridge-accounts.json
+# walker bearer-token cache (live credential)
+.walker-token-cache.json
 .vscode
 .idea
 .DS_Store
 *.log
+
+# Local dev / debugging artifacts (keep repo clean going forward)
+.playwright-mcp/
+cert/
+npm-cache/
+server/
+prompt/
+
+# Root-level debug screenshots and ad-hoc state dumps from local sessions
+/*.png
+/*.jpeg
+/network-requests.txt
+/*.jpg
+/*.gif
+/*.mp4
+/dryrun-*
+/current-*
+/fresh-*
+/after-*-clone.json
+/projects-*.json
+/env-workflow-arrow-state.json
+/vite.config.js.bak
+docs/platform-bug-notifier-enumeration.md
+
+# One-off debug JSON / text dumps from local probes and agent advice
+/*.json~?
+/chatgpt-*.txt
+/test-connection-response.txt
+/data-perm.json
+/file-perm.json
+/all-data-perms.json
+/issues-response.json
+/p.json
+/p2.json
+/perm.json
+/roles.json
+
+# TypeScript incremental build cache — generated, never source of truth
+tsconfig.tsbuildinfo
+tsconfig.*.tsbuildinfo
+
+# MCP verification agent — secret material, runtime data, screenshots must not be checked in
+mcp-server/node_modules/
+mcp-server/dist/
+mcp-server/data/secrets.enc
+mcp-server/data/.master.key
+mcp-server/data/evidence/
+mcp-server/runs-store.json
+mcp-server/*.png
+mcp-server/*.jpeg
+mcp-server/*.jpg
+
+# Local MCP / verification scratch directories
+/.verify-monitor/
+/verify-dev-studio/
+
+.claude
+.codex

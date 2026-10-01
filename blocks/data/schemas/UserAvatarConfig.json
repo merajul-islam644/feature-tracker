@@ -1,0 +1,51 @@
+{
+  "collectionName": "blx_UserAvatarConfigs",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "IAM user id (OIDC sub) this config belongs to. One row per user; the read+write hooks filter by currentUser.id so only the owner reads/writes. Completely separate from UserAiConfig — this row only powers the AI-generated profile picture flow.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "provider",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Provider id for the avatar generator. Currently 'replicate' (the only model we ship styles for: fofr/face-to-many). Empty/missing is treated as 'replicate' by the proxy. Maps to the `x-ai-avatar-provider` request header on `/api/ai/avatar`.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "token",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": true,
+      "isUniqueData": false,
+      "description": "Bearer token for the avatar provider (Replicate API token). Required for AI avatar generation. No server-side fallback — if missing the AI avatar button is hidden and only the manual profile picture upload works. Marked PII because it is a credential.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "model",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Optional override for the Replicate model id (e.g. 'fofr/face-to-many'). Empty string means the proxy uses its server-side default.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "UserAvatarConfig",
+  "schemaType": 1
+}

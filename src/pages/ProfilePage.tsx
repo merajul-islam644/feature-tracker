@@ -1,15 +1,25 @@
 import { useEffect } from "react";
+import { UserCircle2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { Avatar } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useToast } from "@/hooks/useToast";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 import { formatRelativeDate } from "@/lib/utils";
+
+// Profile is read-only — roles are granted externally (via Blocks-OS
+// admin tooling or `blocks iam users access grant` from the CLI), and
+// `AuthProvider` re-fetches `currentUser.roles` on every visibility
+// change + on a 5-minute background poll. So any role grant made
+// outside the app shows up here automatically the next time the tab
+// regains focus — no in-app grant button needed.
 
 export function ProfilePage() {
   const { currentUser } = useAuth();
@@ -24,23 +34,36 @@ export function ProfilePage() {
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold text-foreground">Profile</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Your account information.
+      <header className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            aria-hidden="true"
+            className="flex h-8 w-8 items-center justify-center rounded-md bg-primary-muted text-primary"
+          >
+            <UserCircle2 className="h-4 w-4" />
+          </span>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+            Profile
+          </h1>
+        </div>
+        <p className="max-w-2xl text-sm text-muted-foreground">
+          Your account information and assigned roles.
         </p>
       </header>
 
       <section aria-labelledby="profile-info-heading">
         <Card>
           <CardHeader>
-            <CardTitle id="profile-info-heading" className="sr-only">
-              Profile information
+            <CardTitle id="profile-info-heading" className="text-base">
+              Account
             </CardTitle>
+            <CardDescription>
+              Read-only identity block. Roles are granted outside the app.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="flex items-start gap-5">
-              <Avatar name={currentUser.name} size="lg" />
+              <UserAvatar userId={currentUser.id} name={currentUser.name} size="lg" />
               <div className="min-w-0 flex-1">
                 <h3 className="truncate text-lg font-semibold text-foreground">
                   {currentUser.name}
@@ -53,34 +76,51 @@ export function ProfilePage() {
 
             <Separator className="my-6" />
             <dl className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  User ID
-                </dt>
-                <dd className="mt-1 break-all text-sm font-mono text-foreground">
+              <DetailItem label="User ID">
+                <span className="break-all font-mono text-foreground">
                   {currentUser.id}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Joined
-                </dt>
-                <dd className="mt-1 text-sm text-foreground">
-                  {formatRelativeDate(currentUser.createdAt)}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Last updated
-                </dt>
-                <dd className="mt-1 text-sm text-foreground">
-                  {formatRelativeDate(currentUser.updatedAt)}
-                </dd>
-              </div>
+                </span>
+              </DetailItem>
+              <DetailItem label="Joined">
+                {formatRelativeDate(currentUser.createdAt)}
+              </DetailItem>
+              <DetailItem label="Last updated">
+                {formatRelativeDate(currentUser.updatedAt)}
+              </DetailItem>
+              <DetailItem label="Roles">
+                {currentUser.roles.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {currentUser.roles.map((r) => (
+                      <Badge key={r} variant="secondary" className="font-mono text-[10px]">
+                        {r}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
+              </DetailItem>
             </dl>
           </CardContent>
         </Card>
       </section>
+    </div>
+  );
+}
+
+function DetailItem({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="mt-1 break-words text-sm text-foreground">{children}</dd>
     </div>
   );
 }

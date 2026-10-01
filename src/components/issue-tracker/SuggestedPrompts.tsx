@@ -1,7 +1,7 @@
 // Quick-pick prompt chips shown when the chat is empty (section 7.3).
 
 import { Sparkles } from "lucide-react";
-import { suggestedPrompts } from "@/data/mockIssueTrackerData";
+import { suggestedPrompts } from "@/data/issueTrackerConstants";
 import { cn } from "@/lib/utils";
 
 interface Props {

@@ -1,0 +1,70 @@
+# Files / directories that should never end up in the Docker build context.
+# Keeps the context small and prevents leaking secrets or local noise into
+# the image.
+
+# Git + IDE noise
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+.claude
+.codex
+
+# Local dev artifacts (also in .gitignore but we don't trust that alone
+# for the docker build — someone could clone and run docker before the
+# .gitignore was tightened).
+.playwright-mcp
+cert
+npm-cache
+# NOTE: `server/` is intentionally NOT ignored. The Dockerfile runtime
+# stage `COPY server/prod-backend.mjs /app/server/prod-backend.mjs` and
+# needs the file in the build context. dev-only artifacts inside server/
+# are excluded below (`server/*.bak`, etc.).
+prompt
+
+# Build outputs that the image rebuilds itself
+dist
+dist-ssr
+node_modules
+*.log
+
+# Debug screenshots / JSON dumps that ended up in the working tree
+/*.png
+/dryrun-*
+/current-*
+/fresh-*
+/after-*-clone.json
+/projects-*.json
+/env-workflow-arrow-state.json
+/vite.config.js.bak
+/.dev-server.*.log
+
+# Secrets — never bake these in. The image gets runtime config via
+# Cloud Run env vars, not via build context.
+.env
+.env.local
+*.local
+
+# Docker / CI plumbing — kept out of the image itself (Docker still finds
+# them in the build context to do its job).
+Dockerfile
+.dockerignore
+# server/prod-backend.mjs MUST stay in the build context: the runtime
+# stage does `COPY server/prod-backend.mjs /app/server/prod-backend.mjs`
+# and breaks silently with "no source files specified" if .dockerignore
+# filters it out. Same lesson as the old nginx.conf — exclude from the
+# final image's `COPY . .` (via the per-file path below) but not from
+# the build context.
+
+# The build context for `npm ci` only needs package*.json — keep the rest
+# out until COPY . . runs in the build stage.
+
+# dev-only server-side files — never bake these in (kept in the build
+# context so the COPY step can find them, but excluded from COPY . . in
+# the build stage). Add new dev-only server files here as they appear.
+server/*.bak
+server/*.local
+server/.master.key
+server/.env.*

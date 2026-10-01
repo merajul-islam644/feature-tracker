@@ -1,22 +1,76 @@
 // Wrapper for the Secrets section (spec section 12): empty state, list of
 // saved credentials, and the add form.
+//
+// The form shows a target-binding dropdown so the user can pick one or more
+// configured verification targets to bind the credential to at creation
+// time. Each target has at most one credential, but a single credential
+// can be reused across many targets — so "pick all that apply" semantics
+// make sense here. The orchestration layer turns the selected set into
+// a diff-based N PATCHes against target.credentialId (see `bindSecret`
+// in `useIssueTracker` — the function name stays the same; the body
+// now handles the N-target case via toAdd/toRemove).
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { SecretCard } from "./SecretCard";
 import { SecretForm } from "./SecretForm";
-import type { Secret } from "@/types/issue-tracker";
+import type { Secret, VerificationTarget } from "@/types/issue-tracker";
 
 interface Props {
   secrets: Secret[];
-  onAdd: (payload: { name: string; email: string; password: string }) => Promise<void>;
+  targets: VerificationTarget[];
+  // Per-secret binding lookup: secretId → targetId[]. Comes from the
+  // localStorage mirror (see lib/issueTrackerBindings.ts) because the
+  // gateway's ruleGroup strips `credentialId` from VerificationTarget
+  // updates on env-scoped rows.
+  boundTargetsBySecretId: Record<string, string[]>;
+  onAdd: (payload: {
+    name: string;
+    email: string;
+    password: string;
+    // Optional array of targetIds — multi-binding is supported. Empty
+    // array / undefined = "no binding at creation time". The parent
+    // computes the diff (which is always "bind all" for a brand-new
+    // secret) and dispatches one PATCH per added target.
+    targetIds?: string[];
+  }) => Promise<void>;
+  onEdit: (id: string, patch: { name: string; email: string }) => void;
   onDelete: (id: string) => void;
+  // Re-bind a saved secret to a (possibly different) set of targets.
+  // Empty array means "unbind from everything". The parent computes
+  // the diff against the previous set and dispatches only the
+  // changed targets.
+  onBind: (secretId: string, targetIds: string[]) => void;
 }
 
-export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
+export function SecretsPanel({
+  secrets,
+  targets,
+  boundTargetsBySecretId,
+  onAdd,
+  onEdit,
+  onDelete,
+  onBind,
+}: Props) {
   const [formOpen, setFormOpen] = useState(false);
+
+  // Build a quick lookup of targetId → name of the secret currently bound
+  // to it. The form uses this to warn the user before they overwrite an
+  // existing binding. Derived from the localStorage mirror — see the
+  // SecretsPanel prop comment for why we don't read `target.credentialId`.
+  const boundSecretByTargetId = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const [secretId, targetIds] of Object.entries(boundTargetsBySecretId)) {
+      const s = secrets.find((x) => x.id === secretId);
+      if (!s) continue;
+      for (const targetId of targetIds) {
+        map[targetId] = s.name;
+      }
+    }
+    return map;
+  }, [boundTargetsBySecretId, secrets]);
 
   return (
     <Card>
@@ -28,6 +82,8 @@ export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
           </CardTitle>
           <CardDescription>
             Credentials the AI uses to sign into applications during verification.
+            Each credential is scoped to one target — it will not be passed to
+            any other URL.
           </CardDescription>
         </div>
         <Badge variant="muted">{secrets.length}</Badge>
@@ -46,7 +102,22 @@ export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
           <ul className="space-y-2">
             {secrets.map((s) => (
               <li key={s.id}>
-                <SecretCard secret={s} onDelete={onDelete} />
+                <SecretCard
+                  secret={s}
+                  targets={targets}
+                  // Pre-resolved bound-target ids from the localStorage
+                  // mirror — the card renders the binding chip from this
+                  // list instead of scanning `targets.credentialId` (which
+                  // the gateway silently drops on env-scoped rows).
+                  boundTargetIds={boundTargetsBySecretId[s.id] ?? []}
+                  // Same map the add-form passes to its dropdown —
+                  // built once at the panel level and reused so the
+                  // badge never drifts between the two surfaces.
+                  boundSecretByTargetId={boundSecretByTargetId}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                  onBind={onBind}
+                />
               </li>
             ))}
           </ul>
@@ -54,6 +125,8 @@ export function SecretsPanel({ secrets, onAdd, onDelete }: Props) {
 
         {formOpen ? (
           <SecretForm
+            targets={targets}
+            boundSecretByTargetId={boundSecretByTargetId}
             onSubmit={async (payload) => {
               await onAdd(payload);
               setFormOpen(false);

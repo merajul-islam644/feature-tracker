@@ -1,0 +1,16 @@
+{
+  "name": "lattice-mail-server",
+  "private": true,
+  "type": "module",
+  "description": "Inbound mail receiver for the Lattice mailbox — Cloudflare Email Worker POSTs parsed emails here; each POST becomes one MailMessage row in blx_MailMessages.",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@seliseblocks/client": "^0.2.0"
+  }
+}

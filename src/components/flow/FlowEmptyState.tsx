@@ -2,7 +2,10 @@ import { GitBranch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface FlowEmptyStateProps {
-  onAdd: () => void;
+  /** When provided, renders an Add Flow CTA. Omit for read-only
+   *  empty states (e.g. non-dev envs where flows are authored under
+   *  dev and other envs may legitimately be empty). */
+  onAdd?: () => void;
 }
 
 export function FlowEmptyState({ onAdd }: FlowEmptyStateProps) {
@@ -15,11 +18,13 @@ export function FlowEmptyState({ onAdd }: FlowEmptyStateProps) {
       <p className="mt-0.5 text-xs text-muted-foreground">
         Map out the user journey for this feature.
       </p>
-      <div className="mt-3">
-        <Button size="sm" onClick={onAdd}>
-          Add Flow
-        </Button>
-      </div>
+      {onAdd && (
+        <div className="mt-3">
+          <Button size="sm" onClick={onAdd}>
+            Add Flow
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
