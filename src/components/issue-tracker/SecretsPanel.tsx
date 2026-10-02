@@ -38,6 +38,8 @@ interface Props {
   }) => Promise<void>;
   onEdit: (id: string, patch: { name: string; email: string }) => void;
   onDelete: (id: string) => void;
+  // Flip a secret's enabled flag (see SecretCard).
+  onToggleEnabled: (id: string, enabled: boolean) => void;
   // Re-bind a saved secret to a (possibly different) set of targets.
   // Empty array means "unbind from everything". The parent computes
   // the diff against the previous set and dispatches only the
@@ -52,6 +54,7 @@ export function SecretsPanel({
   onAdd,
   onEdit,
   onDelete,
+  onToggleEnabled,
   onBind,
 }: Props) {
   const [formOpen, setFormOpen] = useState(false);
@@ -116,6 +119,7 @@ export function SecretsPanel({
                   boundSecretByTargetId={boundSecretByTargetId}
                   onEdit={onEdit}
                   onDelete={onDelete}
+                  onToggleEnabled={onToggleEnabled}
                   onBind={onBind}
                 />
               </li>
