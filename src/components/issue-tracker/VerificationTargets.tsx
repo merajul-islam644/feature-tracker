@@ -19,6 +19,12 @@ import { Input } from "@/components/ui/input";
 import { UrlInput, validateUrl } from "./UrlInput";
 import type { VerificationTarget, TargetStatus } from "@/types/issue-tracker";
 
+// Test Connection is temporarily parked: the MCP login probe is mid-rework
+// (target SPAs render unpredictably on slow links; the OIDC trigger click
+// needs the offscreen-element fix). All probe code stays wired — flip this
+// flag to bring the button back once the backend lands its final form.
+const TEST_CONNECTION_ENABLED = false;
+
 interface Props {
   targets: VerificationTarget[];
   draftUrl: string;
@@ -281,7 +287,7 @@ function TargetRow({
             {target.enabled ? "Disable" : "Enable"}
           </Button>
 
-          {isTesting ? (
+          {TEST_CONNECTION_ENABLED && isTesting ? (
             <span
               className="inline-flex h-8 items-center gap-1 px-2 text-xs text-muted-foreground"
               aria-live="polite"
@@ -289,7 +295,7 @@ function TargetRow({
               <Spinner className="h-3.5 w-3.5" aria-hidden="true" />
               Testing…
             </span>
-          ) : (
+          ) : TEST_CONNECTION_ENABLED ? (
             <Button
               type="button"
               variant="ghost"
@@ -302,7 +308,7 @@ function TargetRow({
               <Plug className="h-3.5 w-3.5" aria-hidden="true" />
               Test
             </Button>
-          )}
+          ) : null}
 
           <Button
             type="button"
