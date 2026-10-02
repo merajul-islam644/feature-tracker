@@ -129,7 +129,7 @@ export function AnnouncementsDialog({
           <div className="flex flex-row items-center justify-between space-y-0 border-b border-border px-5 py-4">
             <DialogTitle className="flex items-center gap-2 text-base font-semibold leading-none tracking-tight text-foreground">
               <Megaphone
-                className="h-4 w-4 text-primary"
+                className="h-4 w-4 text-primary -scale-x-100"
                 aria-hidden="true"
               />
               {t("announcements.title", "Announcements")}
