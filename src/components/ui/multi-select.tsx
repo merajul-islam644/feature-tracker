@@ -12,6 +12,19 @@ import { cn } from "@/lib/utils";
 export interface MultiSelectOption {
   value: string;
   label: string;
+  /**
+   * Secondary line rendered under the label inside the popover row —
+   * typically the user's email. Optional; options without one render
+   * the classic single-line row.
+   */
+  description?: string;
+  /**
+   * Optional leading node rendered between the checkbox and the label
+   * stack — typically a `UserAvatar`. The component only positions
+   * it; the caller owns the data fetching (profile-pic map + signed
+   * URL), exactly like every other people-surface in the app.
+   */
+  avatar?: React.ReactNode;
 }
 
 export interface MultiSelectProps {
@@ -225,6 +238,7 @@ export function MultiSelect({
             >
               {options.map((opt) => {
                 const isSelected = selectedSet.has(opt.value);
+                const hasDetails = Boolean(opt.avatar || opt.description);
                 return (
                   <li key={opt.value}>
                     <label
@@ -239,10 +253,28 @@ export function MultiSelect({
                         onCheckedChange={() => toggle(opt.value)}
                         aria-label={opt.label}
                       />
-                      <span className="truncate">{opt.label}</span>
+                      {/* Avatar/description rows get a two-line stack
+                          (label over muted description); plain options
+                          keep the single-line layout so existing
+                          consumers (Mail recipients) render unchanged. */}
+                      {hasDetails ? (
+                        <>
+                          {opt.avatar}
+                          <span className="min-w-0 flex-1 leading-tight">
+                            <span className="block truncate">{opt.label}</span>
+                            {opt.description && (
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {opt.description}
+                              </span>
+                            )}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="truncate">{opt.label}</span>
+                      )}
                       {isSelected && (
                         <Check
-                          className="ml-auto h-3.5 w-3.5 text-primary"
+                          className="ml-auto h-3.5 w-3.5 shrink-0 text-primary"
                           aria-hidden="true"
                         />
                       )}
