@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MultiSelect } from "@/components/ui/multi-select";
+import { UserAvatar } from "@/components/ui/UserAvatar";
 import { featureNameSchema } from "@/lib/validation";
 import { useToast } from "@/hooks/useToast";
 import { useCreateFeature } from "@/lib/blocks/hooks";
@@ -56,17 +57,33 @@ export function AddFeatureModal({
   // identity across renders — prevents the MultiSelect from re-
   // rendering its child option list on every keystroke.
   const EMPTY: { value: string; label: string }[] = [];
+  // Each option renders the member's profile picture (via the shared
+  // `UserAvatar`, initials until they upload) with the name over a
+  // muted email line — same people-row the chat roster and members
+  // grid use. The label is the bare name (no "(handle)" suffix): the
+  // email line underneath already disambiguates duplicate accounts,
+  // so the bracketed handle would be redundant noise.
   const developerOptions = useMemo(
     () =>
       developers.length > 0
-        ? developers.map((u) => ({ value: u.id, label: u.displayName }))
+        ? developers.map((u) => ({
+            value: u.id,
+            label: u.name,
+            description: u.email || undefined,
+            avatar: <UserAvatar userId={u.id} name={u.name} size="sm" />,
+          }))
         : EMPTY,
     [developers, EMPTY],
   );
   const qaOptions = useMemo(
     () =>
       qas.length > 0
-        ? qas.map((u) => ({ value: u.id, label: u.displayName }))
+        ? qas.map((u) => ({
+            value: u.id,
+            label: u.name,
+            description: u.email || undefined,
+            avatar: <UserAvatar userId={u.id} name={u.name} size="sm" />,
+          }))
         : EMPTY,
     [qas, EMPTY],
   );
