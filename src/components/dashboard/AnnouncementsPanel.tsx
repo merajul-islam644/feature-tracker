@@ -528,7 +528,12 @@ function AnnouncementCard({
           )}
         >
           <Megaphone
-            className={compact ? "h-4 w-4" : "h-5 w-5"}
+            className={cn(
+              // Flipped to face left, matching the dashboard trigger
+              // and dialog header icons.
+              "-scale-x-100",
+              compact ? "h-4 w-4" : "h-5 w-5",
+            )}
             aria-hidden="true"
           />
         </div>
