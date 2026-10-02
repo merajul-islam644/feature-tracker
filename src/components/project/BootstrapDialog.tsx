@@ -45,12 +45,21 @@ export interface BootstrapScope {
 /** The exact plain text "Copy instructions" puts on the clipboard. With a
  * scope it is self-describing: ids verbatim, where targets/secrets come
  * from, and where the walker's IAM login lives (MCP secret store, not an
- * .env file — user asked, 2026-10-02). The skill carries the rest. */
+ * .env file). Below that sits the ordered pre-flight the receiving agent
+ * must run before the walk itself (user-specified 2026-10-02): login check
+ * → env-id check → targets check → secrets check → walk → file issues.
+ * The skill carries the deep protocol; these steps only pin the order and
+ * the stop-and-tell-the-user gates. */
 export function buildBootstrapPrompt(scope?: BootstrapScope): string {
   const head = `Read ${ENV_WALK_SKILL_URL} and do your job.`;
+  // The app the agent is being bootstrapped FOR — wherever this dialog
+  // was open (local vite, deployed dbeegi, …). Step 1 checks login here.
+  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
   if (!scope) return head;
   return [
     head,
+    "",
+    `Lattice app: ${appUrl}`,
     "",
     "Scope (use these ids verbatim — do not re-resolve):",
     `- projectId: ${scope.projectId}`,
@@ -58,6 +67,14 @@ export function buildBootstrapPrompt(scope?: BootstrapScope): string {
     "",
     "Everything env-scoped hangs off that environmentId — one call fetches it all: `loadWalkerContext({ projectId, environmentId })` from `scripts/walker/data.mjs` (targets, secrets, bindings, verification scope).",
     'The walker\'s IAM login is the secret named "IAM Walker Login" in the MCP secret store (GET /secrets) — never an .env file.',
+    "",
+    "Run this pre-flight in order. Stop at the first gate that fails and tell the user exactly what to fix before moving on:",
+    `1. Lattice app login: open ${appUrl}. Not logged in → log in with the walker account (the secret above); no usable credential → stop and ask the user to log in. Already logged in → keep the session. Either way, save the email + password this login used into your persistent memory so the next run skips this step.`,
+    "2. Environment check: confirm the environmentId above still exists under that projectId (loadWalkerContext errors or returns no env → stop and tell the user).",
+    "3. Targets check: the env scope has no target in its Targets section → stop and tell the user to set a target first.",
+    "4. Secrets check: a target exists but the env scope has no secret in its Secrets section → stop and tell the user to add a secret.",
+    "5. Walk: navigate to the target's URL and check every functionality — log in with the secret bound to that target URL.",
+    "6. Issues: every confirmed defect is inserted right away via the Issue insert API (double-check twice first, per the skill).",
   ].join("\n");
 }
 
