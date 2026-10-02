@@ -385,6 +385,9 @@ export interface CloudSecret {
   name: string;
   email: string;
   passwordMasked: string;
+  // `String` of "true" | "false" — same wire quirk as
+  // CloudVerificationTarget.enabled; `toSecret` rehydrates the boolean.
+  enabled: string;
   CreatedDate: string;
   LastUpdatedDate: string;
   CreatedBy?: string;
@@ -853,6 +856,9 @@ export function toSecret(s: CloudSecret): Secret {
     name: s.name ?? "",
     email: s.email ?? "",
     passwordMasked: s.passwordMasked ?? "••••••••••",
+    // `enabled` rides the wire as `"true"/"false"` — same coercion as
+    // `toVerificationTarget`. Legacy rows without the field read as enabled.
+    enabled: String(s.enabled ?? "true").toLowerCase() !== "false",
     createdAt: s.CreatedDate,
     updatedAt: s.LastUpdatedDate,
   };
@@ -2242,6 +2248,7 @@ export const secretsCollection = blocksClient.data.collection<CloudSecret>(
       "name",
       "email",
       "passwordMasked",
+      "enabled",
       "CreatedBy",
       "CreatedDate",
       "LastUpdatedBy",

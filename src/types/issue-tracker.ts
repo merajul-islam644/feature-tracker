@@ -128,6 +128,9 @@ export interface Secret {
   // Masked display string only. The real value lives in component state for
   // the current session and is dropped on unmount / refresh.
   passwordMasked: string;
+  // Same semantics as VerificationTarget.enabled: a disabled secret stays
+  // listed but the walker's scope gate skips it (and any binding it holds).
+  enabled: boolean;
   createdAt: string;
   updatedAt: string;
   // Derived (never persisted): ids of every verification target whose

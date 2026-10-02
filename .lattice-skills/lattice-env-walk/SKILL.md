@@ -21,14 +21,16 @@ These are **hard** — every one came from explicit user feedback. Violating any
 
 1. **Don't shortcut by inferring from HTML or source.** Actually visit the URL in a real browser, click every button, fill every form, observe every network response. "I read the source, this looks broken" is not verification.
 2. **Don't guess.** If you haven't observed a defect with your own tools, it does not exist. "Probably", "likely", "should be" do not count.
-3. **Don't insert without verification.** Every Issue row in the cloud must correspond to a defect you actually saw. If the user said it is OK in a specific case, fine; otherwise ask.
+3. **Don't insert without double verification.** Every Issue row in the cloud must correspond to a defect you observed **twice** — once when found, once on an immediate re-check (user directive 2026-10-02: no permission-wait between the two). Confirmed on the re-check → insert right away via the Issue insert API; not confirmed → it never existed, move on.
 4. **Delete wrong inserts immediately.** If you inserted a defect and it later turns out to be wrong (false positive, you read the page wrong, the agent's failure mode was its own bug, not the app's), find it and delete it. Don't leave it and "explain later".
 5. **Complete one target before moving to the next.** Don't start target B while target A is half-walked. The user will catch this and be angry.
-6. **404 / can't-login = walk-stopper, not theme defect.** If a target URL returns 404, 5xx, or you can't reach the login form, stop, file an issue titled "Cannot reach <target> — login unreachable" with severity high, and ask the user before continuing. Don't go looking for cosmetic bugs on a page that doesn't load.
+6. **404 / can't-login = walk-stopper, not theme defect.** If a target URL returns 404, 5xx, or you can't reach the login form, stop, file an issue titled "Cannot reach <target> — login unreachable" with severity high (double-checked per rule 3 — a reload is the re-check), report it in one line, and wait for direction. Don't go looking for cosmetic bugs on a page that doesn't load.
 7. **Reply in Bangla.** Code, paths, branches, function names, env slugs, error messages stay in English. Only the prose around them is Bangla.
-8. **Ask before destructive actions.** Inserting issues, deleting issues, cancelling a running verify run, restarting MCP server — these all require user confirmation or an explicit prior go-ahead in the current session. Reading pages, clicking buttons, navigating is fine.
+8. **Ask before destructive actions — but inserts are no longer one.** Deleting issues, cancelling a running verify run, restarting the MCP server — these require user confirmation. Issue **inserts do not wait for permission** (user directive, 2026-10-02): double-check per rule 3, then file immediately. Reading pages, clicking buttons, navigating is fine.
 9. **No screenshot spam.** Don't take screenshots to "show" the user what you see — they don't need a slideshow of every page. Use snapshots (`browser_snapshot`) and `browser_evaluate` to read state. Screenshots only when the user explicitly asks or when an evidence artefact needs to be saved.
 10. **Stop the moment you find a leak, do not work around it.** If you discover the password is exposed in a log, response, SSE event, or file, STOP and tell the user. Don't paper over it, don't "use it just this once".
+11. **Start working silently.** The verify/walk command IS the start command. No preamble, no plan recital, no restating the task, no "let me first explain my approach". Your first ACTION is the pre-flight session gate (below); your first WORDS are either nothing or the one-line gate verdict. Speak only when blocked, or when presenting found defects (user directive, 2026-10-02 — the agent used to talk a lot before starting).
+12. **Talk less, never ask ajebaje questions.** Narration is not work (user directive, 2026-10-02). No running commentary, no restating what you're about to do, no asking permission for anything these rules already allow. The ONLY question allowed is a real blocker — one line, exactly what is missing (environmentId, target, secret, binding, login, MCP server down) — then wait. Everything else you decide yourself and act. Defects found, inserts filed, and session recoveries are reported in the end-of-target summary, not narrated mid-walk.
 
 ## Environment model (schema v2.1)
 
@@ -89,15 +91,15 @@ Steps 2–7 collapse into one call when the scope is already known: `const ctx =
 **Hard rules for bootstrap:**
 
 - **Never navigate the Lattice UI.** Walker reads everything through the cloud SDK and MCP server. No `browser_navigate` to `https://dbeegi.slsblx.com/...`, no DOM scraping, no `localStorage` mirror reads in stdio browser. The user opens Lattice themselves if they want.
-- **Walker never opens a browser tab for any target URL.** `browser_tabs action=new url=<targetUrl>` is **not** a walker primitive. The walker does not open, walk, or screenshot target apps in any browser. Verification of the target app's UI is the MCP server's `POST /verify/runs` headed-browser agent — gated behind explicit user consent (skill rule 8).
-- **Never auto-fill passwords.** Walker does not log in to anything. The MCP server's `/verify/runs` endpoint is the only mechanism that handles passwords, and that's gated behind explicit user consent (skill rule 8).
+- **Config reads are API-only; the walk itself is browser work.** Reading Environments/Checks/Targets/Secrets/Bindings goes through the `scripts/walker/` helpers — never through Lattice UI navigation or DOM scraping. Walking the TARGET app is the opposite: the stdio browser is the primary surface (see Pre-flight + Walk loop) — navigate to the target, self-login with the bound secret, walk its UI. The MCP server's `POST /verify/runs` headed agent is only the fallback (Walk loop Option C).
+- **Never type a password as a tool argument.** A plaintext password must never enter the LLM context (rule 10). The ONLY permitted password path in the stdio browser is the loopback fill recipe (Pre-flight → "Login with the bound secret"): `browser_evaluate` fetches the bound credential from the MCP store and fills the form inside the page, returning only ok/failed. The MCP server's `/verify/runs` headed agent has its own internal fill path.
 - **Never invent a token.** If the MCP secret store has no `IAM Walker Login` secret (or the store is down) and no env fallback resolves, walker stops and asks.
 - **If a step fails**, surface the message to the user, do not retry in a loop.
 
 For every target the user adds:
 
 1. **The user adds the target.** In the Lattice UI: Projects → pick the project → pick the env → Targets page → "Add URL" with display name + URL. The target shows up in the list with id, url, enabled toggle.
-2. **If the target needs login, the user adds a credential.** Secrets page → "+ Add Secret" with name + email + password + binding to the target via the secret-target dropdown. The secret is stored in `mcp-server/data/secrets.enc` (AES-256-GCM). The cloud only sees `passwordMasked`. The actual password never leaves the MCP server's process except through the **loopback-only** `GET /secrets/:id` — the walker's own login is the one legitimate consumer; anything non-local is refused before the id is looked up, and the classifier will block any attempt to exfiltrate it as **Credential Exploration**.
+2. **If the target needs login, the user adds a credential.** Secrets page → "+ Add Secret" with name + email + password + binding to the target via the secret-target dropdown. The secret is stored in `mcp-server/data/secrets.enc` (AES-256-GCM). The cloud only sees `passwordMasked`. Like targets, each secret row has an **Enabled/Disable toggle** — disabled secrets stay listed but the scope gate skips them (and their bindings). The actual password never leaves the MCP server's process except through the **loopback-only** `GET /secrets/:id` — exactly two legitimate consumers: the walker's own IAM login, and the loopback fill recipe inside the target page (Pre-flight). Anything non-local is refused before the id is looked up, and the classifier will block any attempt to exfiltrate it as **Credential Exploration**.
 3. **The user picks verification scope.** Scopes page — checkbox grid covering `page_load`, `navigation`, `buttons`, `forms`, `broken_links`, `console_errors`, `network_errors`, `authentication`, `accessibility`, `performance`, `all_functionality` (plus any custom checks they defined). Under v2.1 each toggle is a per-env row in `blx_VerificationChecks` — tester-only UI, saved straight to the cloud.
 4. **Walker reads the configuration.** Everything through `scripts/walker/data.mjs`: env row via `fetchEnvironments`, scope via `fetchVerificationChecks` (env-scoped by `environmentId`), targets/secrets/bindings via their helpers. No UI navigation, no `localStorage` mirrors.
 
@@ -175,12 +177,12 @@ Two Playwright instances are in play. Do not confuse them.
 
 | Instance                                                       | Started by                                                 | Used for                                                                                                                                                       | Password access                                                   |
 | -------------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| stdio `@playwright/mcp@0.0.82` (via `playwrightMcp.ts` bridge) | Claude Code startup                                        | `browser_navigate`, `browser_click`, `browser_snapshot`, `browser_evaluate`, `browser_fill_form`, `browser_tabs`, etc. — the interactive session the user sees | None. Filling a password field from this session fails or no-ops. |
+| stdio `@playwright/mcp@0.0.82` (via `playwrightMcp.ts` bridge) | Claude Code startup                                        | `browser_navigate`, `browser_click`, `browser_snapshot`, `browser_evaluate`, `browser_fill_form`, `browser_tabs`, etc. — the interactive session the user sees | Only via the loopback fill recipe (Pre-flight): `browser_evaluate` fetches the bound credential INSIDE the page — the plaintext never reaches the model. Typing a password as a tool argument is forbidden (rule 10). |
 | MCP server's own Playwright (`mcp-server/src/agent.ts`)        | `POST /verify/runs` or `mcp-server/scripts/debug-login.ts` | The verification agent — drives a **headed** Chrome window the user sees on the host                                                                           | Yes — `resolveCredentialForTarget` runs in this process           |
 
 The user's standing instruction is **the existing stdio browser session is the primary surface**. Don't kick off `/verify/runs` to "open a browser" — it opens a _second_ headed browser window. Use the existing stdio browser; open a new tab in it (`browser_tabs action=new`) to reach the target URL.
 
-For login-required flows inside the stdio browser, the only mechanism is the MCP verification agent's headed browser. The agent fills the password in its own process and drives the visible window. The user can interact with that window too — the agent and the user share one browser session per run.
+For login-required flows inside the stdio browser, the primary mechanism is the **loopback fill recipe** (Pre-flight → Login with the bound secret): the page itself fetches the credential from the loopback MCP store and fills the form, so the password never enters the model's context. The MCP verification agent's headed browser (Walk loop Option C) is the fallback only when the recipe cannot run and the user opts into a second browser.
 
 ## Walker helpers — `scripts/walker/`
 
@@ -230,14 +232,64 @@ import {
 
 `scripts/verify/list-targets.mjs` still works — it scans Chrome profiles for an `access_token` cookie and queries `VerificationTarget` directly. **Walker does not invoke it**; only the user runs it manually when their cookie-based session is alive and they want a quick CLI view. The walker prefers the API path because it survives expired sessions and works in any environment (CI, fresh VM, headless).
 
-### Walker never opens browser tabs
+### Where the browser is allowed — and where it never is
 
-A load-bearing rule, repeated here because every earlier draft of this skill drifted back into browser navigation:
+The distinction every earlier draft of this skill got wrong. Two different apps, two different doctrines:
 
-- **Walker does not call `browser_navigate`, `browser_tabs action=new url=<targetUrl>`, or any other browser tool.** No tab opens for any target URL, ever.
-- Walker reads config through `fetchTargets` / `fetchSecrets` / `fetchSecretBindings` (API) — not through DOM scraping in the stdio browser.
-- Walker does **not** walk target app UIs. Walking target apps is the MCP server's `POST /verify/runs` headed-browser agent. Walker only files the defects the MCP server reports, via the Issue insert API.
-- The user's stdio browser session stays untouched unless the user opens something themselves.
+- **Lattice (the tracker) — API only.** Walker never navigates the Lattice UI, never DOM-scrapes it, never reads its `localStorage` mirrors. Environments, Checks, Targets, Secrets, Bindings all come through `fetchTargets` / `fetchSecrets` / `fetchSecretBindings` / `loadWalkerContext` — even when the UI would be faster.
+- **The target app — the stdio browser IS the primary surface** (user's standing instruction). After the pre-flight gates pass, walker opens a tab, checks the session, self-logins with the bound secret (loopback fill recipe), and walks every route itself. This walk IS the verification — user directive 2026-10-02, replacing the old "walker never touches a target URL" stance.
+- **Passwords never enter model context in either case.** API reads mask them (`passwordMasked`); browser fills go through the loopback recipe inside the page. Typing a credential as a tool argument is always a rule-10 violation.
+
+## Pre-flight — scope gate + session gate (always the first actions, before any walking or talking)
+
+Run the gates in silence, in order. Your first message is whichever gate fails (exactly one line), or nothing at all when every gate passes — then you are already walking.
+
+**Scope gate — everything hangs off the bootstrap prompt's `environmentId` (user directive, 2026-10-02). All reads through `loadWalkerContext({ projectId, environmentId })`, never the UI:**
+
+1. **projectId + environmentId — both, verbatim.** The Bootstrap prompt pins both ("use these ids verbatim — do not re-resolve"); copied from an env page they always arrive together. If the user just said "verify" with no prompt, self-resolve BEFORE asking anything: bare `loadWalkerContext()` reads `UserPreference.activeEnvironmentId` and resolves that env's project — walk it without a question. Active preference also empty → ONE line: "কোন project আর environment verify করব বলুন — অথবা env পেজ থেকে Bootstrap prompt কপি করে দিন।" Stop. Do not guess.
+2. **Targets in that env scope?** `ctx.targets` (use the `enabled` ones). None → one line: "এই environment-এ কোনো target নেই — Targets পেজে Add URL দিয়ে target যোগ করুন।" Stop.
+3. **Secrets in that env scope?** `ctx.secrets` (use the `enabled` ones — a disabled secret is skipped, and any binding it holds is skipped with it). None → one line: "কোনো secret যোগ করা নেই — Secrets পেজে secret যোগ করে ওই target URL-এর সাথে bind করুন।" Stop.
+4. **An enabled secret bound to the target?** `ctx.secretBindings` must map some **enabled** secretId to this target's id (or the target row's `credentialId` points at an enabled secret). Bound only to a disabled secret → one line: "bound secret টা disabled — Secrets পেজে Enable করুন।" Stop.
+5. **All gates pass → navigate to the target. Immediately.** No confirmation question, no summary.
+
+**Session gate — only after the scope gate passes.** Open the target URL and snapshot. Authenticated surface renders → start walking. Lands on a login screen → log in yourself with the recipe below (gate 4 guarantees the bound credential). The stored credential itself fails → one line: "store করা credential দিয়ে লগইন হচ্ছে না — Secrets পেজে মিলিয়ে নিন", stop.
+
+**Never ask for credentials, never print them.** Bound secrets resolve through the MCP store; nothing sensitive is ever echoed, logged, or pasted.
+
+### Login with the bound secret — the loopback fill recipe
+
+The app being verified usually needs login. Use the bound credential WITHOUT the plaintext ever entering context (rule 10). The MCP server allows CORS from any origin, so the page itself can fetch it from loopback:
+
+```js
+// browser_evaluate — runs INSIDE the page; secretId comes from gate 4.
+// Returns only a status string — the credential values never come back.
+async () => {
+  const res = await fetch("http://127.0.0.1:8787/secrets/<secretId>");
+  if (!res.ok) return "store unreachable (" + res.status + ")";
+  const { email, password } = await res.json();
+  const set = (el, v) => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const emailEl = document.querySelector('input[type=email], input[name*="email" i], input[name*="user" i]');
+  const passEl = document.querySelector('input[type=password]');
+  if (!emailEl || !passEl) return "login form not found";
+  set(emailEl, email);
+  set(passEl, password);
+  return "filled";
+}
+```
+
+Then `browser_click` the submit button and snapshot the result. The password travels store → page directly; the model only ever sees "filled". If login fails, report "login failed" — never the values. If the MCP server isn't running, that is the one case where you ask the user (start the server, then retry once).
+
+### Mid-walk session expiry
+
+App sessions are short-lived — expect the stdio browser session to die mid-walk (login redirects or 401 storms on pages that worked minutes ago):
+
+- **Re-login yourself with the bound secret** (recipe above) and resume immediately — no permission-wait, and never re-walk pages already verified (user directive, 2026-10-02).
+- **Issue inserts never block.** They ride the walker API client, whose `accessToken` callback re-logins within 60s of token expiry (see `scripts/walker/auth.mjs`) — a dead target-app session cannot stop a filing.
+- Only when the stored credential itself stops working: one line to the user ("session শেষ, আর stored credential দিয়েও লগইন হচ্ছে না — Secrets পেজে মিলিয়ে নিন"), pause UI walking, resume on their confirmation.
+- The IAM login returns an `access_token` (~3.5h lifetime) and **no separate refresh token** — the client's silent re-login *is* the refresh.
 
 ## Walk loop (per target)
 
@@ -327,10 +379,11 @@ input.dispatchEvent(new Event("blur", { bubbles: true }));
 
 **Click + Tab to trigger blur.** Some forms run validation on `onBlur` instead of `onChange`. After typing, `browser_press_key key=Tab` to leave the field, then check error message and submit-button state.
 
-**Login-required routes — two paths:**
+**Login-required routes — three paths, in this order:**
 
-- **Option A — ask the user to log in.** The user fills the password in the headed browser the verify agent runs (or in their own browser); you then continue walking post-login pages in the stdio browser. The stdio browser does not share session cookies with the verify agent's browser by default, so prefer this when you only need to read post-login pages.
-- **Option B — kick off a verify run.** `POST /verify/runs` with the target's URL + credentialId + scope list. Stream SSE (`GET /verify/runs/<id>/events`) to watch the agent walk. Parse `kind: "issue_detected"` events into Issue rows. **Opens a second headed browser** — confirm with the user first.
+- **Option A (preferred) — self-login with the bound secret.** The pre-flight scope gate guarantees a bound credential before you ever got here. Use the loopback fill recipe (Pre-flight section) in the same stdio tab and continue into the post-login pages. No user round-trip.
+- **Option B — ask the user to log in.** Fallback for the session gate's failure case only: the bound credential itself failed (wrong/expired secret). One line, wait for the user to fix the secret or log in, then continue in the stdio tab.
+- **Option C — kick off a verify run.** `POST /verify/runs` with the target's URL + credentialId + scope list. Stream SSE (`GET /verify/runs/<id>/events`) to watch the agent walk. Parse `kind: "issue_detected"` events into Issue rows. **Opens a second headed browser** — confirm with the user first.
 
 ### 2. Catalogue defects
 
@@ -352,24 +405,32 @@ For each defect you observed, capture:
 | `detectedAt`        | ISO timestamp at the moment of observation                                       |
 | `verificationRunId` | `manual-<env>-<ISO timestamp>` if walking by hand, or the agent's runId          |
 
-### 3. Confirm with the user before inserting
+### 3. Double-check, then insert immediately (no permission-wait)
 
-Present each defect to the user as a short list. Use `AskUserQuestion` for per-defect OK, OR list them in chat and wait for the user's "OK to insert all" / "skip X, insert Y" reply. Never batch-insert defects the user hasn't seen.
+When a defect is found: **re-observe it right away** — re-click, re-submit, re-read the network/console for the same symptom (user directive 2026-10-02: "duibar check debe"). Confirmed on the second observation → file it **immediately** via the Issue insert API below. Do NOT wait for user approval — rule 8 no longer lists inserts as destructive. Not confirmed on the re-check → it never existed; move on.
 
-If the user says "yes, insert all", file them via the SDK mutation `collection.create()` against the Issue collection (`src/lib/blocks/data.ts` — `secretsCollection` is for secrets; the Issue collection is the sibling one used by `useIssueTracker.ts`). The fingerprint field MUST be computed using the FNV-1a formula at `useIssueTracker.ts:226-253` — reuse it, don't reinvent.
+**Duplicate guard — never insert the same issue twice.** Before `collection.create()`, query the Issue collection with the flat filter `{fingerprint: <fp>}` scoped to the env (`environmentId` too — both fields must be in the collection's `fields` selector, `data-gateway-filter-rule`). A hit means the defect is **already filed**: this is a re-encounter, not a new issue — update the existing row instead (`occurrenceCount` +1 cast to **string**, `lastSeenAt` = now, append this runId to `seenInRunIdsJson`) and move on. Two rows for one defect is an insert bug.
+
+**Update your own inserts anytime.** Walking a later functionality may reveal an already-filed issue needs correcting — better repro steps, new evidence, wrong severity. Update the row immediately, no permission-wait. Echo **every** field of the row on the update (`issue-tracker-update-requiredon-3-echo`: cloud marks fields `requiredOn: 3`, and the SDK resolves VALIDATION_ERROR silently — so verify `acknowledged` + `totalImpactedData` in the response, never trust a silent throw).
+
+**Delete your own wrong inserts immediately.** A later observation may prove an issue you filed is flat-out wrong (false positive, misread page). Delete it right away (rule 4) — no permission round-trip — and note the deletion in the end-of-target summary. Issues you did **not** insert yourself are not yours to delete; those need the user.
+
+File via the SDK mutation `collection.create()` against the Issue collection (`src/lib/blocks/data.ts` — `secretsCollection` is for secrets; the Issue collection is the sibling one used by `useIssueTracker.ts`). The fingerprint field MUST be computed using the FNV-1a formula at `useIssueTracker.ts:226-253` — reuse it, don't reinvent.
+
+Keep a running list of what you filed and show it when the target's walk ends — transparency in the summary, not a permission gate mid-walk.
 
 ### 4. Move to the next target
 
-After every reachable route on the current target is walked and every approved defect is filed, switch to the next target in the env. Never start the next target's walk until the current target's Issues page reflects your inserts and you've shown them to the user.
+After every reachable route on the current target is walked and every double-checked defect is filed, switch to the next target in the env. Never start the next target's walk until the current target's Issues page reflects your inserts and you've shown the filed list to the user.
 
 ## Issue insert API (cloud SDK)
 
 The Issue collection lives in the same SDK client used by `useIssueTracker.ts`. Schemas and field selectors are in `src/lib/blocks/data.ts`. **Concrete end-to-end insert pattern:**
 
-1. Load `.env` via `walkerConfig()` from `scripts/walker/auth.mjs` (VITE_BLOCKS_API_URL, VITE_BLOCKS_OIDC_URL, VITE_BLOCKS_OIDC_CLIENT_ID, VITE_BLOCKS_KEY, Email, Password are the required keys).
+1. Load `.env` via `walkerConfig()` from `scripts/walker/auth.mjs` — the four `VITE_BLOCKS_*` keys are the required ones. The IAM credential is NOT an `.env` key: `walkerClient()` resolves it from the MCP secret store (`iamCredential()`) on every login.
 2. `const client = await walkerClient();` — produces an SDK whose `accessToken` callback self-refreshes via `/api/auth/login`. No `BLOCKS_BEARER_TOKEN`, no `grab-token.mjs`, no Chrome profile scan.
 3. Open the Issue collection with `client.data.collection("Issue", { fields: [<full field list>] })`. The full list is at the top of `scripts/verify/verify-20260930T015004Z.mjs`.
-4. For each defect, compute the fingerprint using the formula below, build the payload, call `collection.create(payload)`.
+4. For each defect, compute the fingerprint, then **duplicate-guard**: query `where: ["fingerprint", "eq", "<fp>"]` (+ env scope) — an existing row means re-encounter: update `occurrenceCount`/`lastSeenAt`/`seenInRunIdsJson` instead of creating. Only a genuinely new fingerprint gets `collection.create(payload)`.
 5. Write a summary JSON next to the script with each `itemId` (you'll need them for deletion).
 
 Required fields for the `Issue` row: `title`, `applicationName`, `url`, `category`, `severity`, `status`, `description`, `expected`, `actual`, `reproductionStepsJson`, `evidenceJson`, `detectedAt`, `verificationRunId`, `fingerprint`, `occurrenceCount`, `lastSeenAt`, `seenInRunIdsJson`, `assignedDeveloperIdsJson`, `approvedById`, `CreatedBy`, `CreatedDate`, `LastUpdatedBy`, `LastUpdatedDate`. **Echo the env scope on every row (v2.1):** `projectId`, `envSlug`, and `environmentId` (the Environment ItemId) — plus `targetId` when you know which target row the defect came from (hard link that survives URL edits). Missing scope fields drop the issue out of the env's Issues view, and updates must echo every field (`issue-tracker-update-requiredon-3-echo`). Cast `occurrenceCount` to **string** (`"1"`), not number — the cloud stores it as text.
@@ -401,7 +462,7 @@ function computeIssueFingerprint(issue) {
 
 ## Issue deletion (for wrong inserts)
 
-Use the `deleteIssue` mutation. Filter by `fingerprint` or by exact `title`. Confirm with the user before deletion — even for an issue you inserted by mistake, the delete is destructive in cloud.
+Use the `deleteIssue` mutation. Filter by `fingerprint` or by exact `title`. **Your own wrong inserts: delete immediately** — rule 4 and the 2026-10-02 no-permission-wait directive apply to cleanup of your own mistakes; note the deletion in the summary. **Issues you did not insert: confirm with the user first** — those are someone else's rows, and the delete is destructive in cloud.
 
 ```ts
 await issueCollection.delete({ id: "<issueItemId>" });
@@ -427,7 +488,7 @@ These memories are load-bearing for this skill — read them on resume.
 ## What this skill is NOT for
 
 - Reading or fixing Lattice's own source code (that's regular Blocks work).
-- Inserting defects into UAT/PROD without an explicit user OK — UAT/PROD are user-facing; blind inserts are destructive.
+- Walking a UAT/PROD env **unless the user pinned it** — the Bootstrap prompt's `environmentId` IS the explicit OK. Never choose UAT/PROD on your own; dev/custom envs the user pinned are walked freely.
 - Walking the Blocks-IAM or Blocks-Data admin panels (different scope — add those as targets instead).
 - Running `npm run build`, Vite, or any CI/deploy task.
 

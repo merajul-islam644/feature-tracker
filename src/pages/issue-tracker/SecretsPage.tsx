@@ -22,6 +22,7 @@ export function SecretsPage() {
     addSecret,
     editSecret,
     deleteSecret,
+    setSecretEnabled,
     bindSecret,
   } = tracker;
 
@@ -53,6 +54,7 @@ export function SecretsPage() {
         }}
         onEdit={(id, patch) => void editSecret(id, patch)}
         onDelete={deleteSecret}
+        onToggleEnabled={(id, enabled) => void setSecretEnabled(id, enabled)}
         onBind={async (secretId, targetIds) => {
           await bindSecret(secretId, targetIds);
         }}

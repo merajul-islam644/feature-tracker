@@ -3725,7 +3725,10 @@ function slugEchoPatch<T>(
   const echo: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
     if (k === "ItemId" || AUDIT_COLUMNS.has(k)) continue;
-    echo[k] = v ?? "";
+    // `enabled` is requiredOn Both on both Secret and VerificationTarget —
+    // a legacy row missing it still needs a real value on this echo PATCH,
+    // and "" fails validation. Default to the schema convention instead.
+    echo[k] = v ?? (k === "enabled" ? "true" : "");
   }
   // The generic here only retypes the same key/value bag for each
   // collection's update signature — the runtime shape is identical, so
@@ -6233,6 +6236,9 @@ export function useCreateSecret(): UseMutationResult<
         name: input.name,
         email: input.email,
         passwordMasked: input.passwordMasked,
+        // Schema marks `enabled` requiredOn Both — new credentials start
+        // enabled (mirrors the target form's "always verify" default).
+        enabled: "true",
       });
       const itemId = extractInsertedItemId(created, "insertSecret");
       if (!itemId) {
@@ -6246,6 +6252,7 @@ export function useCreateSecret(): UseMutationResult<
         name: input.name,
         email: input.email,
         passwordMasked: input.passwordMasked,
+        enabled: "true",
         CreatedDate: now,
         LastUpdatedDate: now,
       };
@@ -6275,22 +6282,22 @@ export function useDeleteSecret(): UseMutationResult<void, Error, string> {
   });
 }
 
-// Edit the credential label + login email. The Secret schema marks
-// `name`, `email`, `passwordMasked`, `projectId`, and `envSlug` as
-// `requiredOn: 3`, so every PATCH must echo all five back — the gateway
-// rejects a partial update that drops any of them. The password is
-// intentionally NOT editable from this hook — per spec section 12.3 the
-// real password never reaches the cloud during the frontend phase, only
-// the masked display string. If a credential's password needs to change,
-// the user must delete the row and add a fresh one (same flow that
-// exists today). We therefore read the existing row and echo
-// `passwordMasked` back untouched, letting `name` and `email` be
-// overridden by the patch. `projectId` and `envSlug` are immutable per
-// row — the row's own values are the source of truth.
+// Edit the credential label + login email, or flip `enabled`. The Secret
+// schema marks `name`, `email`, `passwordMasked`, `enabled`, `projectId`,
+// and `envSlug` as `requiredOn: 3`, so every PATCH must echo all six back
+// — the gateway rejects a partial update that drops any of them. The
+// password is intentionally NOT editable from this hook — per spec
+// section 12.3 the real password never reaches the cloud during the
+// frontend phase, only the masked display string. If a credential's
+// password needs to change, the user must delete the row and add a fresh
+// one (same flow that exists today). We therefore read the existing row
+// and echo `passwordMasked` back untouched, letting `name`, `email`, and
+// `enabled` be overridden by the patch. `projectId` and `envSlug` are
+// immutable per row — the row's own values are the source of truth.
 export function useUpdateSecret(): UseMutationResult<
   Secret,
   Error,
-  { id: string; patch: { name?: string; email?: string } }
+  { id: string; patch: { name?: string; email?: string; enabled?: boolean } }
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
@@ -6305,6 +6312,7 @@ export function useUpdateSecret(): UseMutationResult<
         name: string;
         email: string;
         passwordMasked: string;
+        enabled: string;
       }>(rawExisting).items[0];
       const updated = (await secretsCollection.update(id, {
         projectId: existing?.projectId ?? "",
@@ -6314,6 +6322,14 @@ export function useUpdateSecret(): UseMutationResult<
         // Always echo the stored masked value back — never blank it out,
         // since we don't accept a new password from this codepath.
         passwordMasked: existing?.passwordMasked ?? "",
+        // Toggle override, else the stored value; a legacy row without
+        // the field defaults to enabled ("true"), same as `toSecret`.
+        enabled:
+          patch.enabled === undefined
+            ? (existing?.enabled ?? "true")
+            : patch.enabled
+              ? "true"
+              : "false",
       })) as
         | {
             data?: Parameters<typeof toSecret>[0];
