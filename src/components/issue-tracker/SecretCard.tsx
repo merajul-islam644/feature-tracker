@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, KeyRound, Link2, Link2Off, Pencil, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { TargetSelect } from "./TargetSelect";
@@ -39,6 +40,10 @@ interface Props {
   boundSecretByTargetId: Record<string, string>;
   onEdit: (id: string, patch: { name: string; email: string }) => void;
   onDelete: (id: string) => void;
+  // Flip the row's enabled flag. A disabled secret stays listed but the
+  // walker's scope gate skips it (and any binding it holds) — same
+  // semantics as VerificationTarget.enabled.
+  onToggleEnabled: (id: string, enabled: boolean) => void;
   // Re-bind a saved secret to a (possibly different) set of targets.
   // Empty array means "unbind from everything". The parent dispatches
   // only the changed targets.
@@ -52,6 +57,7 @@ export function SecretCard({
   boundSecretByTargetId,
   onEdit,
   onDelete,
+  onToggleEnabled,
   onBind,
 }: Props) {
   // When the user clicks the pencil we lift the row into a small inline
@@ -113,7 +119,11 @@ export function SecretCard({
   };
 
   return (
-    <div className="rounded-md border border-border bg-card p-4">
+    <div
+      className={`rounded-md border border-border bg-card p-4 ${
+        secret.enabled ? "" : "opacity-60"
+      }`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           <div
@@ -123,9 +133,14 @@ export function SecretCard({
             <KeyRound className="h-4 w-4" />
           </div>
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-foreground">
-              {secret.name}
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="truncate text-sm font-semibold text-foreground">
+                {secret.name}
+              </p>
+              <Badge variant={secret.enabled ? "default" : "muted"}>
+                {secret.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+            </div>
             <p className="truncate text-xs text-muted-foreground">
               {secret.email}
             </p>
@@ -178,6 +193,18 @@ export function SecretCard({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onToggleEnabled(secret.id, !secret.enabled)}
+            disabled={editing}
+            aria-pressed={secret.enabled}
+            aria-label={`${secret.enabled ? "Disable" : "Enable"} ${secret.name}`}
+            className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {secret.enabled ? "Disable" : "Enable"}
+          </Button>
           <Button
             type="button"
             variant="ghost"

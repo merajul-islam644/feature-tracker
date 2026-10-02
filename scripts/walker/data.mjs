@@ -79,6 +79,7 @@ const SECRET_FIELDS = [
   "name",
   "email",
   "passwordMasked",
+  "enabled",
   "CreatedBy",
   "CreatedDate",
   "LastUpdatedDate",
@@ -262,6 +263,9 @@ export async function fetchSecrets(
     name: s.name ?? "",
     email: s.email ?? "",
     passwordMasked: s.passwordMasked ?? "",
+    // Same wire quirk as VerificationTarget.enabled — stored "true"/"false"
+    // as a string; legacy rows pre-date the field.
+    enabled: String(s.enabled ?? "true").toLowerCase() !== "false",
     createdBy: s.CreatedBy ?? null,
     createdAt: s.CreatedDate ?? null,
   }));

@@ -1188,6 +1188,24 @@ export function useIssueTracker() {
     [secrets, updateSecret, toast],
   );
 
+  // Flip the per-secret `enabled` flag. Same shape as `setTargetEnabled`:
+  // routed through `useUpdateSecret`, which echoes the row's required
+  // fields back to the gateway, so the toggle ships as one PATCH carrying
+  // only the boolean. A disabled secret stays listed but the walker's
+  // scope gate skips it.
+  const setSecretEnabled = useCallback(
+    async (id: string, enabled: boolean) => {
+      const previous = secrets.find((s) => s.id === id);
+      if (!previous) return;
+      try {
+        await updateSecret.mutateAsync({ id, patch: { enabled } });
+      } catch {
+        toast.error(`Unable to update ${previous.name}.`);
+      }
+    },
+    [secrets, updateSecret, toast],
+  );
+
   // Re-bind a saved secret to a (possibly different) set of targets, or
   // clear all bindings by passing an empty array. The relationship is
   // stored on the target side as a single scalar (target.credentialId);
@@ -3750,6 +3768,7 @@ Continue.`;
     // secrets
     addSecret,
     editSecret,
+    setSecretEnabled,
     deleteSecret: deleteSecretFn,
     bindSecret,
 

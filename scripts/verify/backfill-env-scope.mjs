@@ -132,6 +132,12 @@ async function patchRow(name, itemId, patch) {
   // varies by gateway version. The schema allows updating individual
   // primitive fields, and `projectId` / `envSlug` are simple strings.
   // We use the SDK's generic update path:
+  //
+  // NOTE (enabled field, 2026-10-02): once Secret.json's `enabled` column
+  // (requiredOn "Both") is deployed, this patch-only update will 400 on
+  // Secret rows with VALIDATION_ERROR — every required column must ride
+  // along. migrate-env-schema.mjs's echoPatch is the reference pattern;
+  // re-derive from it if this one-shot ever needs to run again.
   return collection.update(itemId, patch);
 }
 
