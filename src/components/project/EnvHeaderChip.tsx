@@ -15,8 +15,9 @@
 // `useUpdateEnvironment` / `useDeleteEnvironment` throw the same error for
 // stale modals or programmatic callers. Both envs' modals live here —
 // RenameEnvModal for the label/slug edit, DeleteEnvDialog for the
-// child-cascade delete (which navigates back to the project landing after
-// success, since the route the user was standing on stops existing).
+// child-cascade delete (which navigates back to the top-level projects
+// list after success, since the route the user was standing on stops
+// existing).
 //
 // Badge treatment comes from `resolveEnvMetaFromEnvs` (row data — verbatim
 // label, kind-based class, custom-env tint). Unknown/deleted slugs resolve
@@ -144,7 +145,7 @@ export function EnvHeaderChip({ actions = false }: { actions?: boolean }) {
             projectId={projectId}
             environmentId={meta.environmentId}
             label={meta.label}
-            onDeleted={() => navigate(`/projects/${projectId}`)}
+            onDeleted={() => navigate("/projects")}
           />
         </>
       )}

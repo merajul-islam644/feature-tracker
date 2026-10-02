@@ -40,7 +40,7 @@ export function AnnouncementsSection() {
             className="flex items-center gap-2 text-base font-semibold"
           >
             <Megaphone
-              className="h-4 w-4 text-primary"
+              className="h-4 w-4 text-primary -scale-x-100"
               aria-hidden="true"
             />
             {t("announcements.title", "Announcements")}
