@@ -1,12 +1,11 @@
 // "Bootstrap with an AI agent" — a canned, copy-paste prompt for an AI
-// agent (Claude Code, Codex, …). The target repo is assumed already
-// bootstrapped (the upstream blocks-skills BOOTSTRAP.md flow ran when the
-// project was created), so the prompt only installs the Lattice env-walk
-// skill AND pins the walk scope: the projectId + environmentId of the page
-// the dialog was opened from (user asked, 2026-10-02 — any AI receiving the
-// pasted text must know which project/env to fetch targets and secrets
-// for, without asking). Pure client-side — no API call, nothing mutates,
-// so unlike the authoring CTAs it needs no role gate.
+// agent (Claude Code, Codex, …). Self-contained — no skill file anywhere
+// (user directive, 2026-10-03). The prompt pins the walk scope (projectId
+// + environmentId of the page the dialog was opened from) and the run
+// shape the user specified: work in TOTAL SILENCE, first bring the env's
+// targets + secrets, then navigate to the target immediately. Pure
+// client-side — no API call, nothing mutates, so unlike the authoring
+// CTAs it needs no role gate.
 
 import { useEffect, useState } from "react";
 import { Check, Copy } from "lucide-react";
@@ -23,58 +22,59 @@ import {
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/useToast";
 import { useT } from "@/lib/blocks/i18n";
-import { useEnvironments } from "@/lib/blocks/hooks";
+import {
+  useEnvironments,
+  useIssueTrackerTargets,
+  useSecretBindings,
+} from "@/lib/blocks/hooks";
 
-// The lattice-env-walk skill's committed copy. The copied prompt tells the
-// target agent to fetch and install it, so "verify this app" works in any
-// repo without the user explaining anything. Points at `main`.
-const ENV_WALK_SKILL_URL =
-  "https://raw.githubusercontent.com/merajul-islam644/feature-tracker/main/.lattice-skills/lattice-env-walk/SKILL.md";
-
-/** The walk scope baked into the copied prompt. All four fields come from
- * the page the dialog is opened on (route params + the env row matching
- * the slug). Undefined → the prompt degrades to the skill-only one-liner
- * and the agent resolves the scope itself (asks the user). */
+/** The walk scope baked into the copied prompt. The four id fields come
+ * from the page the dialog is opened on (route params + the env row
+ * matching the slug); `targets` is this env's enabled rows with each one's
+ * bound secret id — so the pasted prompt carries the URL to navigate to
+ * directly, and only the secret VALUES travel via the API at login time
+ * (user directives, 2026-10-03). Undefined → the prompt degrades to a
+ * one-liner telling the agent it must be pasted from an env page. */
 export interface BootstrapScope {
   projectId: string;
   environmentId: string;
   envLabel: string;
   envSlug: string;
+  targets: Array<{ url: string; secretId: string | null }>;
 }
 
-/** The exact plain text "Copy instructions" puts on the clipboard. With a
- * scope it is self-describing: ids verbatim, where targets/secrets come
- * from, and where the walker's IAM login lives (MCP secret store, not an
- * .env file). Below that sits the ordered pre-flight the receiving agent
- * must run before the walk itself (user-specified 2026-10-02): login check
- * → env-id check → targets check → secrets check → walk → file issues.
- * The skill carries the deep protocol; these steps only pin the order and
- * the stop-and-tell-the-user gates. */
+/** The exact plain text "Copy instructions" puts on the clipboard. Run
+ * shape is the user's directives (2026-10-03): the target URLs are baked
+ * into the text so the receiving agent navigates immediately, secrets are
+ * fetched from the store only when a login form actually shows, and the
+ * whole run is silent — the only things it ever says are a ✗ stop line
+ * and the end-of-run report. */
 export function buildBootstrapPrompt(scope?: BootstrapScope): string {
-  const head = `Read ${ENV_WALK_SKILL_URL} and do your job.`;
-  // The app the agent is being bootstrapped FOR — wherever this dialog
-  // was open (local vite, deployed dbeegi, …). Step 1 checks login here.
-  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
-  if (!scope) return head;
+  if (!scope)
+    return "You are verifying a target app. Open this dialog from an env page first — without its projectId + environmentId there is no target to resolve.";
   return [
-    head,
+    "Verify the target app below in a real browser. Work in TOTAL SILENCE — no commentary, no progress updates, no questions. The only things you ever say: a ✗ stop line when a step fails, and the end-of-run report.",
     "",
-    `Lattice app: ${appUrl}`,
+    `SCOPE  project ${scope.projectId}  ·  env "${scope.envLabel}" (${scope.envSlug})  ·  ${scope.environmentId}`,
     "",
-    "Scope (use these ids verbatim — do not re-resolve):",
-    `- projectId: ${scope.projectId}`,
-    `- environmentId: ${scope.environmentId}  (env "${scope.envLabel}", slug "${scope.envSlug}")`,
+    ...(scope.targets.length > 0
+      ? scope.targets.map(
+          (t) =>
+            `TARGET ${t.url}${t.secretId ? `  ·  secret ${t.secretId}` : ""}`,
+        )
+      : [
+          "TARGET (none)",
+          `   ✗ no enabled target → "এই environment-এ কোনো target নেই — Targets পেজে যোগ করুন।"`,
+        ]),
+    "1 OPEN — navigate to the target URL immediately. More than one target → finish one fully before the next.",
+    "2 LOGIN — only if a login form shows: fetch the bound secret in-page (browser_evaluate → GET http://127.0.0.1:8787/secrets/<secretId>) → fill email+password. Password never in your output; never snapshot between fill and submit.",
+    `   ✗ no bound secret → "bound secret নেই — Secrets পেজে যোগ করে এই target-এ bind করুন।"`,
+    `   ✗ login fails → "store করা credential দিয়ে লগইন হচ্ছে না — Secrets পেজে মিলিয়ে নিন।"`,
+    "3 WALK — every page: click all buttons/links · every form valid+invalid · theme · language · 375px · log console errors + status ≥400",
+    `   ✗ 404/5xx or no login → file "Cannot reach <target>" (high) and stop`,
+    "4 FILE — defect confirmed twice → insert Issue row now (walkerClient() from scripts/walker/auth.mjs · fingerprint = useIssueTracker.ts:226-253 · rows carry project+env scope). No permission-asking.",
     "",
-    "Everything env-scoped hangs off that environmentId — one call fetches it all: `loadWalkerContext({ projectId, environmentId })` from `scripts/walker/data.mjs` (targets, secrets, bindings, verification scope).",
-    'The walker\'s IAM login is the secret named "IAM Walker Login" in the MCP secret store (GET /secrets) — never an .env file.',
-    "",
-    "Run this pre-flight in order. Stop at the first gate that fails and tell the user exactly what to fix before moving on:",
-    `1. Lattice app login: open ${appUrl}. Not logged in → log in with the walker account (the secret above); no usable credential → stop and ask the user to log in. Already logged in → keep the session. Either way, save the email + password this login used into your persistent memory so the next run skips this step.`,
-    "2. Environment check: confirm the environmentId above still exists under that projectId (loadWalkerContext errors or returns no env → stop and tell the user).",
-    "3. Targets check: the env scope has no target in its Targets section → stop and tell the user to set a target first.",
-    "4. Secrets check: a target exists but the env scope has no secret in its Secrets section → stop and tell the user to add a secret.",
-    "5. Walk: navigate to the target's URL and check every functionality — log in with the secret bound to that target URL.",
-    "6. Issues: every confirmed defect is inserted right away via the Issue insert API (double-check twice first, per the skill).",
+    "REPORT — only this, then stop: pages walked · issues filed · skipped + why",
   ].join("\n");
 }
 
@@ -90,7 +90,12 @@ interface BootstrapDialogProps {
   envSlug?: string;
 }
 
-export function BootstrapDialog({ open, onClose, projectId, envSlug }: BootstrapDialogProps) {
+export function BootstrapDialog({
+  open,
+  onClose,
+  projectId,
+  envSlug,
+}: BootstrapDialogProps) {
   const toast = useToast();
   const t = useT();
   const [copied, setCopied] = useState(false);
@@ -98,18 +103,55 @@ export function BootstrapDialog({ open, onClose, projectId, envSlug }: Bootstrap
   // The env row matching the page's slug — read only while the dialog is
   // open, and the same cached query the page itself uses (no extra fetch).
   // While rows are loading (or the slug doesn't match a row) the prompt
-  // falls back to the skill-only one-liner.
-  const envsQuery = useEnvironments(open ? projectId ?? null : null);
+  // falls back to the one-liner.
+  const envsQuery = useEnvironments(open ? (projectId ?? null) : null);
   const env = (envsQuery.data ?? []).find((e) => e.slug === envSlug);
+
+  // This env's enabled targets + their bound secrets — the same cached
+  // queries the Targets/Secrets pages use (useActiveEnv is route-driven,
+  // so on an env page it IS the page's env). Their result is baked into
+  // the prompt: the target URL to navigate to, and the secret id to fetch
+  // ONLY when the app shows a login form. Secret values never appear in
+  // the prompt — they travel page↔store at login time.
+  const targetsQuery = useIssueTrackerTargets({ enabled: open });
+  const bindingsQuery = useSecretBindings(
+    env && envSlug
+      ? { projectId: projectId ?? "", envSlug, environmentId: env.id }
+      : null,
+    { enabled: open && Boolean(env) },
+  );
+  const secretIdByTargetId = (() => {
+    const map: Record<string, string> = {};
+    for (const [secretId, targetIds] of Object.entries(
+      bindingsQuery.data?.bindings ?? {},
+    )) {
+      for (const tid of targetIds) map[tid] ??= secretId;
+    }
+    return map;
+  })();
+  const scopeTargets = (targetsQuery.data ?? [])
+    .filter((t) => t.enabled)
+    .map((t) => ({ url: t.url, secretId: secretIdByTargetId[t.id] ?? null }));
+
   const scope: BootstrapScope | undefined =
-    projectId && envSlug && env
+    projectId &&
+    envSlug &&
+    env &&
+    targetsQuery.isSuccess &&
+    bindingsQuery.isSuccess
       ? {
           projectId,
           environmentId: env.id,
           envLabel: env.label,
           envSlug,
+          targets: scopeTargets,
         }
       : undefined;
+  // While the reads resolve the prompt can't show target URLs yet — say
+  // so instead of flashing the fallback one-liner, which reads like a
+  // mistake.
+  const targetsPending =
+    open && (!targetsQuery.isSuccess || !bindingsQuery.isSuccess);
 
   // A stale "copied" flip from a previous open must not leak into the
   // next one — same reset discipline as DeleteProjectDialog's spinner.
@@ -150,33 +192,31 @@ export function BootstrapDialog({ open, onClose, projectId, envSlug }: Bootstrap
           <DialogTitle>
             {t("projectDetail.bootstrapTitle", "Bootstrap with an AI agent")}
           </DialogTitle>
-          {/* The description mirrors the clipboard text verbatim, split so
-              the skill URL stays a real <a> in every locale. */}
+          {/* The description states what the clipboard text does — the
+              prompt is self-contained, no skill file to fetch. */}
           <DialogDescription>
-            {t("projectDetail.bootstrapSkillBefore", "Read")}{" "}
-            <a
-              href={ENV_WALK_SKILL_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="break-all font-medium text-primary underline underline-offset-2"
-            >
-              {ENV_WALK_SKILL_URL}
-            </a>{" "}
-            {t("projectDetail.bootstrapSkillAfter", "and do your job.")}
+            {t(
+              "projectDetail.bootstrapDesc",
+              "Copies a silent self-contained prompt: paste it into your AI agent and it fetches this environment's targets and secrets, navigates to the target, and verifies it without a word until the report.",
+            )}
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             {t(
               "projectDetail.bootstrapHint",
-              "Paste this into your AI agent (Claude Code, Codex, Cursor, …) inside the repo where you want the skill installed.",
+              "Paste this into your AI agent (Claude Code, Codex, Cursor, …) opened at this repo. It stays silent until the final report.",
             )}
           </p>
           {/* Copy preview — the exact clipboard content, including the
-              pinned scope ids. The <pre> is the literal prompt text, so
-              it stays untranslated on purpose. */}
+              pinned scope ids and target URLs. The <pre> is the literal
+              prompt text, so it stays untranslated on purpose. While the
+              target/binding reads resolve, say so instead of flashing the
+              no-scope fallback (which would read like a mistake). */}
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-xs text-foreground">
-            {buildBootstrapPrompt(scope)}
+            {targetsPending
+              ? "Loading this environment's targets…"
+              : buildBootstrapPrompt(scope)}
           </pre>
         </DialogBody>
         <DialogFooter>
