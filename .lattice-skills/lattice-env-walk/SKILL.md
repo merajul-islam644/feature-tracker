@@ -34,7 +34,7 @@ const ctx = await loadWalkerContext({ projectId, environmentId }); // or {projec
 
 Filters are flat `{field:value}` and every filtered column must be in the collection's `fields` selector. Secrets return `passwordMasked` only. Unresolvable credential → stop: check MCP health, Secrets page → add `IAM Walker Login`, retry once. Never invent targets from chat history.
 
-**Two browsers:** stdio `@playwright/mcp` (browser_* tools) is the PRIMARY surface — new tab per target; the plaintext password reaches it only via the loopback recipe below. The MCP server's `/verify/runs` agent is a fallback that opens a second headed window — confirm first.
+**Two browsers:** stdio `@playwright/mcp` (browser\_\* tools) is the PRIMARY surface — new tab per target; the plaintext password reaches it only via the loopback recipe below. The MCP server's `/verify/runs` agent is a fallback that opens a second headed window — confirm first.
 
 ## Pre-flight — scope gate (silent; first message = the failed gate, one line) + session gate
 
@@ -53,15 +53,21 @@ async () => {
   if (!res.ok) return "store unreachable (" + res.status + ")";
   const { email, password } = await res.json();
   const set = (el, v) => {
-    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(el, v);
+    Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    ).set.call(el, v);
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  const e = document.querySelector('input[type=email], input[name*="email" i], input[name*="user" i]');
-  const p = document.querySelector('input[type=password]');
+  const e = document.querySelector(
+    'input[type=email], input[name*="email" i], input[name*="user" i]',
+  );
+  const p = document.querySelector("input[type=password]");
   if (!e || !p) return "login form not found";
-  set(e, email); set(p, password);
+  set(e, email);
+  set(p, password);
   return "filled";
-}
+};
 ```
 
 Then click submit and snapshot; report "login failed", never values. Mid-walk session death → re-login with the recipe, resume, never re-walk verified pages; inserts never block (walker client re-logins itself).
