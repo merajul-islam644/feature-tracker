@@ -75,6 +75,7 @@ import {
   useAddCustomVerificationCheck,
   useUpdateCustomVerificationCheck,
   useRemoveCustomVerificationCheck,
+  canEditVerificationChecks,
 } from "@/lib/blocks/hooks";
 import type { EnvVerificationCheck } from "@/lib/blocks/data";
 import { buildIssueTrackerContext } from "@/lib/issueTrackerContext";
@@ -3729,9 +3730,10 @@ Continue.`;
     // until then. Empty data after ready = deployment gap — the page
     // falls back to a read-only catalog view.
     checksReady: Boolean(activeEnvironmentId) && !checksQuery.isLoading,
-    // Scope toggles are tester-only QA state — mirrors the mutation
-    // hooks' own throws (defense in depth).
-    checksReadOnly: !(currentUser?.roles?.includes("tester") ?? false),
+    // Scope toggles are tester/manager QA state — mirrors the mutation
+    // hooks' own throws (defense in depth; one source of truth in
+    // `canEditVerificationChecks`).
+    checksReadOnly: !canEditVerificationChecks(currentUser),
     // Assistant panel visibility, reported back by GlobalChatAssistant.
     // Drives the page-scoped gate above: chat history / sessions /
     // projects / AI config only fetch while the panel is open.
