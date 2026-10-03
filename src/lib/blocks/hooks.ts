@@ -8217,7 +8217,9 @@ async function seedBuiltinChecks(
       label: check.label,
       description: check.description,
       recommended: String(check.recommended),
-      enabled: String(check.recommended),
+      // Nothing is pre-selected (user directive, 2026-10-03): the user
+      // checks the scopes they want — `recommended` is only a badge.
+      enabled: "false",
     });
   }
 }
@@ -8642,6 +8644,18 @@ export function useVerificationChecks(
   });
 }
 
+// Who may write verification scope (toggles + custom-check CRUD)? The
+// per-env check selection is QA state, but managers own the same surface
+// (user directive, 2026-10-03): tester and manager may write, every other
+// role is read-only. The Scope page's `readOnly` (useIssueTracker's
+// `checksReadOnly`) mirrors this exact check — keep the two in lockstep.
+export function canEditVerificationChecks(
+  currentUser: { roles?: string[] } | null | undefined,
+): boolean {
+  const roles = currentUser?.roles ?? [];
+  return roles.includes("tester") || roles.includes("manager");
+}
+
 export function useSetVerificationCheckEnabled(): UseMutationResult<
   EnvVerificationCheck,
   Error,
@@ -8649,15 +8663,15 @@ export function useSetVerificationCheckEnabled(): UseMutationResult<
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
-  // Tester-only guard — the per-env check selection IS QA state (same
-  // policy as the flow-row chips: read-only for every non-tester role).
+  // Tester/manager guard — the per-env check selection IS QA state (same
+  // policy as the flow-row chips: read-only for every other role).
   // The Scope page hides the toggles; this is the defense-in-depth throw.
-  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  const mayEdit = canEditVerificationChecks(currentUser);
   return useMutation({
     mutationFn: async ({ row, enabled }) => {
-      if (!isTester) {
+      if (!mayEdit) {
         throw new Error(
-          "Only testers can change the verification scope for an environment.",
+          "Only testers and managers can change the verification scope for an environment.",
         );
       }
       // Echo every requiredOn "Both" column — projectId, environmentId,
@@ -8717,13 +8731,13 @@ export function useUpdateCustomVerificationCheck(): UseMutationResult<
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
-  // Tester-only guard — same QA-state policy as the enable toggle above.
-  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  // Tester/manager guard — same QA-state policy as the enable toggle above.
+  const mayEdit = canEditVerificationChecks(currentUser);
   return useMutation({
     mutationFn: async ({ row, label, description, recommended }) => {
-      if (!isTester) {
+      if (!mayEdit) {
         throw new Error(
-          "Only testers can edit custom verification checks.",
+          "Only testers and managers can edit custom verification checks.",
         );
       }
       if (row.source !== "custom") {
@@ -8779,13 +8793,13 @@ export function useAddCustomVerificationCheck(): UseMutationResult<
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
-  // Tester-only guard — same QA-state policy as the enable toggle above.
-  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  // Tester/manager guard — same QA-state policy as the enable toggle above.
+  const mayEdit = canEditVerificationChecks(currentUser);
   return useMutation({
     mutationFn: async (input) => {
-      if (!isTester) {
+      if (!mayEdit) {
         throw new Error(
-          "Only testers can define custom verification checks.",
+          "Only testers and managers can define custom verification checks.",
         );
       }
       const label = input.label.trim();
@@ -8861,13 +8875,13 @@ export function useRemoveCustomVerificationCheck(): UseMutationResult<
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
-  // Tester-only guard — same QA-state policy as the enable toggle above.
-  const isTester = currentUser?.roles?.includes("tester") ?? false;
+  // Tester/manager guard — same QA-state policy as the enable toggle above.
+  const mayEdit = canEditVerificationChecks(currentUser);
   return useMutation({
     mutationFn: async ({ row }) => {
-      if (!isTester) {
+      if (!mayEdit) {
         throw new Error(
-          "Only testers can remove custom verification checks.",
+          "Only testers and managers can remove custom verification checks.",
         );
       }
       // Builtin rows are catalog-owned — they're toggled, never deleted.
