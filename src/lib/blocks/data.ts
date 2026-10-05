@@ -1916,6 +1916,81 @@ export function toUserNote(c: CloudUserNote): UserNoteRow {
   };
 }
 
+// --- PlaywrightScript (per-user, per-env authoring) --------------------------
+//
+// One row per (userId, projectId, envSlug, name) — the user's own library
+// of Playwright scripts for each project env, surfaced in the Issue
+// Tracker's `/panel` editor dropdown. Composite PK (userId + projectId +
+// envSlug + name) means a single `list` filter is enough to scope a read
+// to one env, and the upsert in `useSavePlaywrightScript` echoes every
+// `requiredOn: "Both"` field on PATCH (per the
+// `issue-tracker-update-requiredon-3-echo` lesson). Local mirror under
+// `lattice.mirror.playwrightScripts.v1` keeps the editor working before
+// the schema is pushed to the gateway.
+export interface CloudPlaywrightScript {
+  ItemId: string;
+  userId: string;
+  projectId: string;
+  envSlug: string;
+  name: string;
+  description?: string;
+  language: string;
+  code: string;
+  updatedAt?: string;
+  CreatedBy?: string;
+  CreatedDate: string;
+  LastUpdatedBy?: string;
+  LastUpdatedDate: string;
+}
+
+export interface PlaywrightScript {
+  id: string;
+  userId: string;
+  projectId: string;
+  envSlug: string;
+  name: string;
+  description: string;
+  /** "javascript" today; the column is wide enough for "typescript"/"python"
+   *  without a schema migration if a future PR adds a new language. */
+  language: string;
+  code: string;
+  updatedAt: string;
+  /** Optional folder id — null/undefined means the script lives at the
+   *  root of the Explorer tree. Folders are localStorage-only for now
+   *  (no cloud collection yet); the id is whatever the folder mirror
+   *  generated locally. */
+  parentId?: string;
+}
+
+// Folder — purely an Explorer-side grouping. No cloud schema yet; the
+// only persistence is `lattice.mirror.playwrightFolders.v1`. Folders
+// nest via `parentId` — undefined means top-level. The Explorer tree
+// renders recursively off `parentId`.
+export interface PlaywrightFolder {
+  id: string;
+  userId: string;
+  projectId: string;
+  envSlug: string;
+  name: string;
+  /** Optional parent folder id — undefined means the folder sits at
+   *  the root of the Explorer tree. */
+  parentId?: string;
+}
+
+export function toPlaywrightScript(c: CloudPlaywrightScript): PlaywrightScript {
+  return {
+    id: c.ItemId,
+    userId: c.userId ?? "",
+    projectId: c.projectId ?? "",
+    envSlug: c.envSlug ?? "",
+    name: c.name ?? "",
+    description: c.description ?? "",
+    language: c.language ?? "javascript",
+    code: c.code ?? "",
+    updatedAt: c.updatedAt ?? c.LastUpdatedDate ?? "",
+  };
+}
+
 // --- Pagination envelope ----------------------------------------------------
 
 interface PagedCloud<T> {
@@ -2198,6 +2273,31 @@ export const hiddenAnnouncementsCollection = blocksClient.data.collection<CloudH
 export const userNotesCollection = blocksClient.data.collection<CloudUserNote>("UserNote", {
   fields: ["userId", "padType", "rowsJson", "updatedAt", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
+
+// `blx_PlaywrightScripts` carries every filter field in the selector —
+// gateway rule per the "blocks-data filter+fields" memory: an unselected
+// column is silently dropped from the response AND from any filter the
+// gateway receives. `userId`/`projectId`/`envSlug` are the read scope;
+// `name` disambiguates the row inside that scope.
+export const playwrightScriptsCollection = blocksClient.data.collection<CloudPlaywrightScript>(
+  "PlaywrightScript",
+  {
+    fields: [
+      "userId",
+      "projectId",
+      "envSlug",
+      "name",
+      "description",
+      "language",
+      "code",
+      "updatedAt",
+      "CreatedBy",
+      "CreatedDate",
+      "LastUpdatedBy",
+      "LastUpdatedDate",
+    ],
+  },
+);
 
 // --- Issue Tracker collection accessors -------------------------------------
 //

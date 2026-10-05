@@ -31,6 +31,9 @@ import { resolve as resolveUrl } from "node:url";
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+import * as fsp from "node:fs/promises";
+import { EVIDENCE_DIR } from "./evidence.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = join(__dirname, "..", "data", "login-debug.log");
@@ -483,8 +486,558 @@ const RISKY_CONTROL =
 // issued mid-walk takes effect at the next loop boundary (per page in
 // the deep walk, per candidate during the clickable pass) rather than
 // after the whole target list finishes.
+
+// Wire-level log level — the SSE envelope (`RunEvent.console_log.level`)
+// is a narrow 4-badge union so the panel's UI can render it as a small
+// fixed palette. Chromium's `ConsoleMessage.type()` returns 18 strings
+// (per playwright.dev/docs/api/class-consolemessage); we collapse them
+// at the boundary so neither side has to care. The full original string
+// stays accessible in the test-runner's tagged stdout for debugging.
+function collapseLogLevel(level: string): "log" | "info" | "warn" | "error" {
+  switch (level) {
+    case "warning":
+      // Chromium's "warning" → wire "warn" (the badge the panel renders).
+      return "warn";
+    case "info":
+      return "info";
+    case "error":
+      return "error";
+    case "log":
+    case "debug":
+    case "dir":
+    case "dirxml":
+    case "table":
+    case "trace":
+    case "clear":
+    case "startGroup":
+    case "startGroupCollapsed":
+    case "endGroup":
+    case "assert":
+    case "profile":
+    case "profileEnd":
+    case "count":
+    case "time":
+    case "timeEnd":
+    default:
+      return "log";
+  }
+}
 function runCancelled(runId: string, deadline: number): boolean {
   return getRun(runId)?.stopRequested === true || Date.now() > deadline;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// User-authored Playwright script runner — invoked when a /verify/runs POST
+// carries a `script` payload. The script runs in the Node process under a
+// `new Function` wrapper, so the user has access to Playwright's Node API
+// on the injected `page` arg plus two helpers (`log`, `screenshot`) that
+// pipe console output and screenshots into the same SSE stream verification
+// runs use. The terminal `run_completed` / `run_failed` events are reused
+// so the History list renders a pass/fail verdict per row.
+//
+// TRUST: the script runs on the verification server with full Node
+// privileges (require, os, fs, child_process). Don't paste secrets or
+// anything you wouldn't run as the MCP-server's user — this is the
+// trust boundary documented in the editor's starter-script comment.
+// ────────────────────────────────────────────────────────────────────────────
+
+async function runScript(req: StartVerificationRequest): Promise<void> {
+  if (!req.script) {
+    // Type-narrowing helper — `runScript` is only called when `script` is
+    // present, so reaching here is a programmer error. Treat it the same
+    // way the verifier does for malformed runs: stamp failed + log.
+    setStatus(req.runId, "failed");
+    appendEvent(req.runId, {
+      kind: "run_failed",
+      runId: req.runId,
+      reason: "runScript called without a script payload",
+    });
+    return;
+  }
+
+  // Spec mode (`test.describe` / `test.beforeEach` / `expect`) takes a
+  // separate code path — it spawns `npx playwright test` as a subprocess
+  // so we can use `@playwright/test`'s real fixtures + reporter.
+  // Everything else (default) stays on the `new Function(...)` direct
+  // path that the panel's been using.
+  if (req.script.mode === "spec") {
+    await runSpecScript(req);
+    return;
+  }
+
+  const runDeadline = Date.now() + MAX_RUN_MS;
+
+  // Console-log bridge — page.on("console") fires for both user-script
+  // console.log calls and any browser-side diagnostic, so we get coverage
+  // for free. pageerror captures uncaught throws from the script's
+  // top-level (a `throw new Error("boom")` lands here, not on console).
+  //
+  // Per playwright.dev/docs/api/class-consolemessage, msg.type() returns
+  // 18 distinct values (log | debug | info | error | warning | dir |
+  // dirxml | table | trace | clear | startGroup | startGroupCollapsed |
+  // endGroup | assert | profile | profileEnd | count | time | timeEnd).
+  // We pass the level through verbatim on the SSE wire so the panel can
+  // render it; the panel's UI collapses them to a smaller badge set.
+  // NB: Chromium emits "warning" (not "warn") — the union below mirrors
+  // the official strings, the TS cast at the listener site too.
+  const emitConsole = (
+    level: string,
+    message: string,
+  ): void => {
+    appendEvent(req.runId, {
+      kind: "console_log",
+      runId: req.runId,
+      // Chromium's 18 ConsoleMessage.type() values → wire's 4-badge
+      // union (see collapseLogLevel). The original level is preserved
+      // in the SSE tail as the first word of the message when we want
+      // to debug, but the badge stays narrow.
+      level: collapseLogLevel(level),
+      message,
+      ts: Date.now(),
+    });
+  };
+
+  // Screenshot bridge — saves to the same evidence dir the verification
+  // walk uses, so /api/evidence/:filename's runId ownership check just
+  // works. Returned `ref` is the randomHex suffix only; the URL is the
+  // full `/api/evidence/${runId}_${ref}.png` path the editor prepends
+  // `/api` to when fetching.
+  const emitScreenshot = async (label: string): Promise<string | null> => {
+    // The page is captured fresh — the user's script may have navigated
+    // away by the time they call screenshot, so we look up the active
+    // page off the closure rather than capturing one at fn-construction
+    // time. The actual screenshot call happens on the page the script is
+    // currently driving.
+    const bytes = await (page as Page | undefined)?.screenshot().catch(() => undefined);
+    if (!page || !bytes) return null;
+    const saved = saveEvidence(bytes, {
+      mime: "image/png",
+      extension: ".png",
+      runId: req.runId,
+      label,
+    });
+    appendEvent(req.runId, {
+      kind: "screenshot_taken",
+      runId: req.runId,
+      storageRef: saved.url.replace("/api/evidence/", ""),
+      label,
+      ts: Date.now(),
+    });
+    return saved.url;
+  };
+
+  let browser: Browser | undefined;
+  let context: import("playwright").BrowserContext | undefined;
+  let page: Page | undefined;
+
+  try {
+    // Same launch shape as runAgent — headed by default so the user sees
+    // a real Chrome window, headless when HEADED=0 (CI / WSL no-display).
+    browser = await chromium.launch({
+      headless: process.env.HEADED === "0",
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--start-maximized"],
+    });
+    context = await browser.newContext({ ignoreHTTPSErrors: true });
+    page = await context.newPage();
+    page.on("console", (msg) =>
+      // msg.type() returns 18 values per official docs (log/debug/info/
+      // error/warning/dir/...). emitConsole takes `string` so the full
+      // set is preserved on the SSE wire.
+      emitConsole(msg.type(), msg.text()),
+    );
+    page.on("pageerror", (err) => emitConsole("error", err.message));
+
+    // Build the helper-bound function. `await` is a top-level await inside
+    // the wrapper, so the user's script body can stay sync-looking. We
+    // expose `page`, `context`, `browser` for users who want to drop below
+    // Playwright's Node API, plus `screenshot(label)` for the common case
+    // (image capture streamed into the SSE history). We deliberately do
+    // NOT inject a `log()` helper — `console.log(...)` works through the
+    // page.on('console') listener above, and a separate log() helper
+    // shadowed the standard name with a confusing (level, message)
+    // signature.
+    // eslint-disable-next-line no-new-func
+    const wrapped = new Function(
+      "page",
+      "context",
+      "browser",
+      "screenshot",
+      `return (async () => { ${req.script!.code} })();`,
+    );
+
+    await wrapped(page, context, browser, emitScreenshot);
+
+    // Cooperative cancellation — a Stop issued mid-script flips
+    // `stopRequested`; we honour it here rather than waiting for the
+    // script to finish so the UI settles promptly.
+    if (runCancelled(req.runId, runDeadline)) {
+      setStatus(req.runId, "cancelled");
+      appendEvent(req.runId, {
+        kind: "run_failed",
+        runId: req.runId,
+        reason: "Cancelled by user.",
+      });
+      return;
+    }
+
+    setStatus(req.runId, "completed");
+    appendEvent(req.runId, {
+      kind: "run_completed",
+      runId: req.runId,
+      completedAt: new Date().toISOString(),
+      failedTargets: 0,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    setStatus(req.runId, "failed");
+    appendEvent(req.runId, {
+      kind: "run_failed",
+      runId: req.runId,
+      reason: message,
+    });
+  } finally {
+    // Browser cleanup mirrors runAgent — best-effort so a crash mid-run
+    // doesn't leak Chrome instances.
+    await context?.close().catch(() => undefined);
+    await browser?.close().catch(() => undefined);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Spec mode — `npx playwright test <file> --reporter=line` runner.
+//
+// User body is written to a temp `<runId>.spec.ts` under
+// `mcp-server/data/spec-tmp/`, the wrapper module re-imports
+// `@playwright/test` (so `test` / `expect` resolve even if the user's
+// code didn't import them explicitly), and stdout/stderr from the
+// subprocess is streamed as `console_log` events. Screenshots taken via
+// the augmented `screenshot(label)` fixture bridge to the SSE tail via
+// tagged stdout lines (parent parses them out — see `parseTagged`).
+//
+// The page/context/browser lifecycle is owned by `@playwright/test`
+// here — `runScript` doesn't tear down what `runSpecScript` didn't
+// launch. Stop is honoured by SIGTERMing the subprocess, mirroring the
+// `requestStop` pattern the verification walk uses.
+//
+// TRUST: same as direct mode — the user's body runs with full Node
+// privileges in a subprocess of the MCP server. Don't paste secrets.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Spec-mode temp + evidence dirs — colocated with the existing
+// evidence dir so /api/evidence/:filename ownership checks don't need
+// a parallel path. Resolved against the script file location
+// (`__dirname/../data/...`), matching how `secrets.ts:DATA_DIR` and
+// `evidence.ts:EVIDENCE_DIR` anchor theirs — `process.cwd()` would
+// resolve to wherever `npm run dev` was invoked, which is fragile.
+const SPEC_TMP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "data", "spec-tmp");
+const SPEC_EVIDENCE_DIR = EVIDENCE_DIR;
+
+// Line prefix the wrapper emits to bridge page console + screenshots to
+// the parent SSE stream. Tagged so the test runner's own line reporter
+// output (which we also forward) doesn't get confused.
+const SPEC_TAG_CONSOLE = "[lattice:console]";
+const SPEC_TAG_SCREENSHOT = "[lattice:screenshot]";
+const SPEC_TAG_READY = "[lattice:ready]";
+
+interface TaggedLine {
+  tag: string;
+  payload: unknown;
+}
+
+function parseTagged(line: string): TaggedLine | null {
+  for (const tag of [SPEC_TAG_CONSOLE, SPEC_TAG_SCREENSHOT, SPEC_TAG_READY]) {
+    if (!line.startsWith(tag)) continue;
+    try {
+      return { tag, payload: JSON.parse(line.slice(tag.length).trim()) };
+    } catch {
+      // Malformed JSON in a tagged line — surface as a plain error log
+      // rather than dropping it silently.
+      return { tag, payload: line.slice(tag.length) };
+    }
+  }
+  return null;
+}
+
+async function runSpecScript(req: StartVerificationRequest): Promise<void> {
+  if (!req.script) {
+    setStatus(req.runId, "failed");
+    appendEvent(req.runId, {
+      kind: "run_failed",
+      runId: req.runId,
+      reason: "runSpecScript called without a script payload",
+    });
+    return;
+  }
+
+  await fsp.mkdir(SPEC_TMP_DIR, { recursive: true });
+  await fsp.mkdir(SPEC_EVIDENCE_DIR, { recursive: true });
+
+  // The wrapper module re-imports `@playwright/test` so `test` /
+  // `expect` resolve even if the user didn't import them. It installs
+  // a `test.beforeEach` hook that:
+  //
+  //   1. attaches `page.on("console")` so user-side console output
+  //      bridges to the parent SSE stream as `console_log` events;
+  //   2. monkey-patches `page.screenshot` to emit a tagged line
+  //      (`[lattice:screenshot]`) for every screenshot the user (or
+  //      our own helper) takes, so the panel can render thumbnails.
+  //
+  // The previous design used `base.extend({ screenshot: ... })` to
+  // expose a `screenshot(label)` fixture, but Playwright refused it
+  // with `worker fixture "screenshot" cannot depend on a test fixture
+  // "page"` — fixtures that depend on `page` need to be declared as
+  // test-scoped explicitly, and the easiest workaround is to wrap the
+  // existing `page.screenshot` method in-place per test instead.
+  const wrapper = `import { test, expect } from '@playwright/test';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
+const RUN_ID = ${JSON.stringify(req.runId)};
+const EVIDENCE_DIR = ${JSON.stringify(SPEC_EVIDENCE_DIR)};
+
+await fs.mkdir(EVIDENCE_DIR, { recursive: true });
+
+test.beforeEach(async ({ page }) => {
+  // Bridge user-side console + pageerror to the parent SSE stream.
+  page.on('console', (msg) => {
+    process.stdout.write(${JSON.stringify(SPEC_TAG_CONSOLE)} + JSON.stringify({ level: msg.type(), message: msg.text() }) + '\\n');
+  });
+  page.on('pageerror', (err) => {
+    process.stdout.write(${JSON.stringify(SPEC_TAG_CONSOLE)} + JSON.stringify({ level: 'error', message: err.message }) + '\\n');
+  });
+
+  // Wrap page.screenshot so every call emits a tagged line. The wrap is
+  // installed per-test (the page object is test-scoped), so two
+  // parallel tests don't trample each other.
+  const original = page.screenshot.bind(page);
+  page.screenshot = async (options = {}) => {
+    const filename = \`\${RUN_ID}_\${Date.now()}_\${Math.random().toString(36).slice(2, 10)}.png\`;
+    const fullPath = path.join(EVIDENCE_DIR, filename);
+    const result = await original({ ...options, path: fullPath });
+    const label = typeof options.path === 'string' ? options.path : (typeof options.type === 'string' ? options.type : filename);
+    process.stdout.write(${JSON.stringify(SPEC_TAG_SCREENSHOT)} + JSON.stringify({ label, filename, ts: Date.now() }) + '\\n');
+    return result;
+  };
+
+  // Track the active page so the module-scope screenshot(label)
+  // helper can resolve it without rebinding at every call site.
+  globalThis.__latticeCurrentPage = page;
+});
+
+test.afterEach(async () => {
+  globalThis.__latticeCurrentPage = undefined;
+});
+
+// Helper — lets user code call await screenshot('label') without
+// re-binding page themselves. It must be called inside a test()
+// body because that's the only time a page fixture exists.
+async function screenshot(label) {
+  const page = globalThis.__latticeCurrentPage;
+  if (!page) {
+    throw new Error('screenshot(label) must be called inside a test() body.');
+  }
+  return await page.screenshot({ path: label });
+}
+
+process.stdout.write(${JSON.stringify(SPEC_TAG_READY)} + '{}' + '\\n');
+
+${req.script.code}
+`;
+
+  const specFile = join(SPEC_TMP_DIR, `${req.runId}.spec.ts`);
+  await fsp.writeFile(specFile, wrapper, "utf8");
+
+  // Playwright's CLI on Windows treats the test-file argument as a
+  // glob/regex, not a path — passing an absolute path with backslashes
+  // (Windows native) makes it fail with "No tests found" even though
+  // the file exists. A relative path with forward slashes is parsed
+  // correctly. cwd is anchored to the mcp-server root so the relative
+  // path resolves to `<root>/data/spec-tmp/<runId>.spec.ts`.
+  const specRel = `./${req.runId}.spec.ts`.replace(/\\/g, "/");
+
+  const child = spawn(
+    process.platform === "win32" ? "npx.cmd" : "npx",
+    ["playwright", "test", specRel, "--reporter=line", "--workers=1"],
+    {
+      // Anchor the subprocess cwd to the spec-tmp directory — that
+      // keeps the relative `specRel` path short and matches the
+      // Playwright convention of "test file path relative to cwd".
+      // npx resolves `node_modules/.bin/playwright` from the cwd, and
+      // since SPEC_TMP_DIR is under mcp-server/data/, the .bin lookup
+      // walks up through `data` → `mcp-server` → `node_modules/.bin`,
+      // which is the install we want.
+      cwd: SPEC_TMP_DIR,
+      env: {
+        ...process.env,
+        // Surface to the wrapper so the fixture can prefix evidence
+        // filenames with the runId and write to the same dir the
+        // direct-mode `saveEvidence()` uses.
+        LATTICE_RUN_ID: req.runId,
+        LATTICE_EVIDENCE_DIR: SPEC_EVIDENCE_DIR,
+        // Don't let the user's global playwright.config.ts steer this
+        // single-file run — they may have a project-wide config that
+        // adds reporters or alters timeouts in ways that don't apply
+        // here. `--config` flag would override; passing via env would
+        // be picked up automatically by playwright's resolver. We
+        // explicitly don't set one and rely on `--reporter=line` to
+        // force our reporter regardless.
+        NO_COLOR: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      // Windows: npx.cmd is a batch shim — needs a shell to find it
+      // through PATHEXT resolution reliably.
+      shell: process.platform === "win32",
+    },
+  );
+
+  // Cooperative cancellation — a Stop issued while the subprocess is
+  // mid-flight flips `stopRequested`; the interval SIGTERMs the child
+  // so the wrapper's `test.afterEach` runs and Playwright's own
+  // teardown completes before exit. We don't `kill -9` because that
+  // would leak Chromium instances on the subprocess side.
+  const stopPoller = setInterval(() => {
+    if (getRun(req.runId)?.stopRequested) child.kill("SIGTERM");
+  }, 500);
+
+  // Line-buffered reader — Node's stdout chunks don't align to newline
+  // boundaries, and our tagged lines (`[lattice:screenshot]{...}`)
+// would be torn mid-JSON if we naively `text.split("\n")` per chunk.
+// Buffer the trailing partial line until the next chunk delivers its
+// newline. The buffer is per-stream (stdout vs stderr).
+  // Strip ANSI CSI escape sequences — Playwright's `--reporter=line`
+  // emits `\x1B[1A\x1B[K` (cursor-up + clear-line) BEFORE the wrapped
+  // `process.stdout.write` of our tagged line on every progress update.
+  // Without this, `parseTagged` would never see a line that starts with
+  // `[lattice:screenshot]` and would fall through to the untagged
+  // branch, leaking the raw tag string as a `console_log` event.
+  const ANSI_CSI = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+  const stripAnsi = (s: string) => s.replace(ANSI_CSI, "");
+
+  const makeLineSplitter = () => {
+    let buf = "";
+    return (chunk: string): string[] => {
+      buf += chunk;
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() ?? "";
+      return lines
+        .filter((l) => l.length > 0)
+        .map(stripAnsi);
+    };
+  };
+  const stdoutSplitter = makeLineSplitter();
+
+  // stderr tail — surfaced as the failure reason when the runner
+  // exits non-zero. Clipped to the last 30 lines so the SSE envelope
+  // stays bounded.
+  let stderrTail: string[] = [];
+  const stderrSplitter = makeLineSplitter();
+  const pushStderr = (chunk: Buffer) => {
+    for (const line of stderrSplitter(chunk.toString("utf8"))) {
+      stderrTail.push(line);
+      if (stderrTail.length > 200) stderrTail = stderrTail.slice(-200);
+      appendEvent(req.runId, {
+        kind: "console_log",
+        runId: req.runId,
+        level: "error",
+        message: line,
+        ts: Date.now(),
+      });
+    }
+  };
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    for (const line of stdoutSplitter(text)) {
+      const tagged = parseTagged(line);
+      if (tagged?.tag === SPEC_TAG_CONSOLE) {
+        const p = tagged.payload as { level?: string; message?: string };
+        appendEvent(req.runId, {
+          kind: "console_log",
+          runId: req.runId,
+          // Narrow to the union the panel renders as a badge. Any of
+          // the 18 official `type()` values collapses to one of these
+          // four; the rest ("dir", "table", "trace", …) map to "log"
+          // since they're browser-internal diagnostics the panel
+          // doesn't visually distinguish.
+          level: ["log", "info", "warn", "error"].includes(p.level ?? "")
+            ? (p.level as "log" | "info" | "warn" | "error")
+            : "log",
+          message: p.message ?? "",
+          ts: Date.now(),
+        });
+      } else if (tagged?.tag === SPEC_TAG_SCREENSHOT) {
+        const p = tagged.payload as { label?: string; filename?: string; ts?: number };
+        appendEvent(req.runId, {
+          kind: "screenshot_taken",
+          runId: req.runId,
+          storageRef: p.filename ?? "",
+          label: p.label ?? "",
+          ts: p.ts ?? Date.now(),
+        });
+      } else if (tagged?.tag === SPEC_TAG_READY) {
+        // Sentinel emitted by the wrapper once it's loaded — confirms
+        // `@playwright/test` resolved and the wrapper module ran. We
+        // forward nothing; the marker is here so a hang on a missing
+        // fixture is observable in the parent logs (no [lattice:ready]
+        // ever appears).
+      } else {
+        appendEvent(req.runId, {
+          kind: "console_log",
+          runId: req.runId,
+          level: "log",
+          message: line,
+          ts: Date.now(),
+        });
+      }
+    }
+  });
+  child.stderr.on("data", pushStderr);
+
+  const exitCode: number | null = await new Promise((resolve) => {
+    child.on("close", (code) => resolve(code));
+    child.on("error", (err) => {
+      // Spawn itself failed (binary missing, permission denied) — the
+      // 'close' event still fires with code null, but `error` already
+      // carries the OS-level reason. Surface to stderr tail.
+      pushStderr(Buffer.from(`spawn error: ${err.message}`));
+    });
+  });
+
+  clearInterval(stopPoller);
+  // Best-effort cleanup of the temp spec file — leave it on disk if
+  // rm fails so a post-mortem `cat <file>.spec.ts` is possible.
+  await fsp.unlink(specFile).catch(() => undefined);
+
+  // Stop wins over exit code — if the user cancelled mid-flight, the
+  // subprocess exits non-zero but the verdict we surface is "cancelled",
+  // not "failed".
+  if (getRun(req.runId)?.stopRequested) {
+    setStatus(req.runId, "cancelled");
+    appendEvent(req.runId, {
+      kind: "run_failed",
+      runId: req.runId,
+      reason: "Cancelled by user.",
+    });
+    return;
+  }
+
+  if (exitCode === 0) {
+    setStatus(req.runId, "completed");
+    appendEvent(req.runId, {
+      kind: "run_completed",
+      runId: req.runId,
+      completedAt: new Date().toISOString(),
+      failedTargets: 0,
+    });
+  } else {
+    const tail = stderrTail.slice(-30).join("\n");
+    setStatus(req.runId, "failed");
+    appendEvent(req.runId, {
+      kind: "run_failed",
+      runId: req.runId,
+      reason: `playwright test exited with code ${exitCode}\n${tail}`,
+    });
+  }
 }
 
 async function deepWalk(
@@ -1320,6 +1873,14 @@ export async function runAgent(req: StartVerificationRequest) {
   const rec = getRun(req.runId);
   if (!rec) {
     setStatus(req.runId, "failed");
+    return;
+  }
+  // Playwright script runs take a different path — same RunRecord
+  // storage, same SSE tail, but the agent walk is skipped entirely.
+  // The two kinds are mutually exclusive (StartBody's refine enforces
+  // it at the HTTP layer), so this branch is safe.
+  if (req.script) {
+    await runScript(req);
     return;
   }
   setStatus(req.runId, "running");

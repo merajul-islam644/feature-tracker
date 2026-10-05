@@ -1,8 +1,11 @@
-// Run History — the persisted list of past verification runs (survives
-// backend restarts; the store is file-backed on the server). Compact rows:
-// status dot, when it started, how long it took, scope size. The event log
-// itself isn't loaded here — a row's detail is what the Verification Panel
-// already shows for the latest run.
+// Run History — the persisted list of past runs (survives backend
+// restarts; the store is file-backed on the server). Compact rows:
+// kind badge, status dot, when it started, how long it took. Two kinds
+// of run can appear side-by-side: AI verification
+// (`RunKind = "verification"`) and user-authored Playwright scripts
+// (`RunKind = "playwright"`). The kind badge per row is the only
+// disambiguator — the event log itself isn't loaded here, only the
+// summary fields the backend's `/verify/runs` endpoint projects.
 
 import { useQuery } from "@tanstack/react-query";
 import { History } from "lucide-react";
@@ -14,6 +17,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { issueTrackerApi } from "@/services/issueTrackerApi";
+import { ScriptBadge } from "./ScriptBadge";
 import { cn } from "@/lib/utils";
 
 const STATUS_TONE: Record<string, string> = {
@@ -71,7 +75,8 @@ export function RunHistory() {
           Run History
         </CardTitle>
         <CardDescription>
-          Past verification runs, newest first — kept across server restarts.
+          Past runs — AI verification and Playwright scripts — newest first;
+          kept across server restarts.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -94,13 +99,20 @@ export function RunHistory() {
                 />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-foreground">
-                    {Object.values(r.targetNames).join(", ") || "verification run"}
+                    {r.kind === "playwright"
+                      ? r.scriptName ?? "Playwright script"
+                      : Object.values(r.targetNames ?? {}).join(", ") ||
+                        "verification run"}
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {formatAgo(r.startedAt)} · {r.scope.length} checks ·{" "}
-                    {formatDuration(r.startedAt, r.completedAt)} · {r.eventCount} events
+                    {formatAgo(r.startedAt)} ·{" "}
+                    {r.kind === "playwright"
+                      ? `${r.eventCount ?? 0} events`
+                      : `${r.scope?.length ?? 0} checks`}{" "}
+                    · {formatDuration(r.startedAt, r.completedAt)}
                   </p>
                 </div>
+                <ScriptBadge kind={r.kind} className="shrink-0" />
                 <span className="shrink-0 text-xs uppercase tracking-wide text-muted-foreground">
                   {r.status}
                 </span>

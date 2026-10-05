@@ -188,8 +188,12 @@ export function AppSidebar() {
     },
     {
       kind: "link",
+      // The `/panel` route now hosts the VS Code-style workspace
+      // (see `components/workspace/WorkspacePage.tsx`). Sidebar
+      // gets a dedicated `menuLabel` key so translators don't have
+      // to re-translate the page's H1 to change the menu text.
       to: `${issueTrackerBase}/panel`,
-      label: t("issueTracker.panel.title", "Panel"),
+      label: t("issueTracker.workspace.menuLabel", "Workspace"),
       icon: Activity,
       envOnly: true,
     },

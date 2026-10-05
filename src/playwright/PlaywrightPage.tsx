@@ -1,3 +1,10 @@
+// /test-runner — the in-browser Playwright scratchpad. Runs scripts in
+// a sandboxed runner inside the page (src/playwright/playwrightRunner.ts)
+// against this app's own DOM. The persisted cross-device variant lives
+// at `/panel` (src/pages/issue-tracker/PlaywrightEditorPanel.tsx) —
+// that path runs scripts through the mcp-server so the run shows up in
+// `/history` next to AI verification runs.
+
 import { javascript } from "@codemirror/lang-javascript";
 import { oneDark } from "@codemirror/theme-one-dark";
 import CodeMirror from "@uiw/react-codemirror";
@@ -282,6 +289,11 @@ export function PlaywrightPage() {
    */
   const mountedRef = useRef(true);
   const logCounterRef = useRef(0);
+  // Mirror of the `runId` state — used by `nextLogId` to keep the id
+  // generator in lockstep with the run that actually fired. Without
+  // this, the state setter's async commit could let two consecutive
+  // runs share an id range and produce duplicate React keys.
+  const runIdRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -333,7 +345,12 @@ export function PlaywrightPage() {
 
   function nextLogId() {
     logCounterRef.current += 1;
-    return runId * 100_000 + logCounterRef.current;
+    // Read from the ref (always the freshest value) rather than the
+    // captured `runId` state — the state setter is async, so a rapid
+    // new run right after a re-render could read a stale runId here
+    // and collide id ranges. The ref mirror is updated in `run()`
+    // before any logs are appended.
+    return runIdRef.current * 100_000 + logCounterRef.current;
   }
 
   function appendLog(entry: Omit<RunnerLog, "id">) {
@@ -364,7 +381,14 @@ export function PlaywrightPage() {
     if (running) return;
     setLogs([]);
     logCounterRef.current = 0;
-    setRunId((current) => current + 1);
+    setRunId((current) => {
+      const next = current + 1;
+      // Mirror the new id into the ref so `nextLogId` reads the
+      // freshest value even if its call happens before React
+      // commits the new `runId` state.
+      runIdRef.current = next;
+      return next;
+    });
     setRunning(true);
     setCurrentHighlight(null);
 
@@ -399,8 +423,22 @@ export function PlaywrightPage() {
   }
 
   function reset() {
-    setLogs([]);
+    // Confirm before discarding user edits — `code` may have drifted
+    // from the library copy. The previous behavior silently replaced
+    // the editor with the library starter, which lost the user's
+    // typed changes without warning. We only prompt when the
+    // editor's current content actually differs from the library's
+    // canonical body; pressing Reset on a pristine library load is
+    // still a single click.
     const fromLibrary = SCRIPT_LIBRARY.find((s) => s.id === activeScript);
+    const target = fromLibrary?.code ?? STARTER_SCRIPT;
+    if (code !== target) {
+      const ok = window.confirm(
+        "Discard your edits and reset this script to the library version?",
+      );
+      if (!ok) return;
+    }
+    setLogs([]);
     if (fromLibrary) {
       setCode(fromLibrary.code);
     } else {
@@ -537,7 +575,9 @@ export function PlaywrightPage() {
               </option>
             ))}
             {launchedFrom ? (
-              <option value={activeScript}>From repo · {launchedFrom}</option>
+              <option key="from-repo" value={activeScript}>
+                From repo · {launchedFrom}
+              </option>
             ) : null}
           </select>
         </label>

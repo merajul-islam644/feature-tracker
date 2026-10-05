@@ -1,82 +1,57 @@
-// Verification Panel — the de-facto Issue Tracker landing page after
-// the index was removed. Hosts the run start / pause / resume / stop
-// controls plus the live progress card. Per-section actions (export
-// report) live here.
+// Workspace surface — the body of the `/panel` route.
 //
-// The Run verification CTA sits on the same row as the page's H1 (right
-// side, baseline-aligned). The "Last run X ago" status pill lives on the
-// description row so it doesn't compete with the button on the title row.
+// What used to live here was the Playwright authoring surface (see
+// git history for `PlaywrightEditorPanel.tsx`). The user replaced
+// that with a VS Code-style file/folder management system: pick a
+// local folder, browse its tree, edit files, save back to disk.
+// All the actual workspace primitives (folder picker, file CRUD,
+// tree refresh) live in `useDevServer()`; this page is the page-
+// level wrapper that ties the heading row to the workspace body.
 
-import { History } from "lucide-react";
-import { useIssueTrackerStore } from "@/hooks/issueTrackerStore";
-import {
-  RunVerificationActions,
-} from "@/components/issue-tracker/IssueTrackerHeader";
-import { VerificationPanel } from "@/components/issue-tracker/VerificationPanel";
-import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
+import type { ReactNode } from "react";
+import { useAuth } from "@/hooks/useAuth";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
+import { DevServerProvider, useDevServer } from "@/contexts/DevServerContext";
+import { WorkspacePage } from "@/components/workspace/WorkspacePage";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
-import { useT } from "@/lib/blocks/i18n";
+
+// Mount the dev-server sandbox context unconditionally so the
+// workspace primitives are available regardless of active-env
+// status. The provider returns a null workspace when the
+// `(user, project, env)` triple is empty, and the workspace page
+// renders an "Open folder" empty-state in that case.
+function DevServerWrapper({ children }: { children: ReactNode }) {
+  const { currentUser } = useAuth();
+  const activeEnv = useActiveEnv();
+  return (
+    <DevServerProvider
+      userId={currentUser?.id ?? ""}
+      projectId={activeEnv?.projectId ?? ""}
+      envSlug={activeEnv?.envSlug ?? ""}
+    >
+      {children}
+    </DevServerProvider>
+  );
+}
+
+function PanelBody() {
+  // `enabled` reflects the VITE_USE_DEV_SERVER flag. When the
+  // sandbox is not configured the workspace page shows an empty
+  // state instead of throwing — the user can still see the page,
+  // just nothing happens on click.
+  void useDevServer();
+  return (
+    <div className="space-y-4">
+      <BackToProjectsLink />
+      <WorkspacePage />
+    </div>
+  );
+}
 
 export function PanelPage() {
-  const t = useT();
-  const tracker = useIssueTrackerStore();
-  const {
-    run,
-    loading,
-    exportRunReport,
-    startVerification,
-    pauseVerification,
-    resumeVerification,
-    stopVerification,
-    lastRunAgo,
-  } = tracker;
-
   return (
-    <div className="space-y-6">
-      <BackToProjectsLink />
-
-      {/* Title row: H1 + env chip on the left, Run verification CTA on the
-          right. Same flex alignment as other section headers so the button
-          reads as belonging to this page (not as a stuck-on toolbar). */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-xl font-semibold text-foreground">
-            {t("issueTracker.panel.title", "Panel")}
-          </h1>
-          <EnvHeaderChip />
-        </div>
-        <RunVerificationActions
-          runStatus={run.status}
-          loading={loading.run}
-          onStart={() => void startVerification()}
-          onPause={pauseVerification}
-          onResume={resumeVerification}
-          onStop={stopVerification}
-        />
-      </div>
-
-      {/* Description + last-run status pill. Pill stays muted below the
-          title so it doesn't draw the eye away from the CTA. */}
-      <div className="space-y-2">
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          {t(
-            "issueTracker.panel.description",
-            "Live status of the most recent verification run — progress, application map, and a markdown export you can share.",
-          )}
-        </p>
-        {lastRunAgo && (
-          <span
-            className="inline-flex w-fit items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
-            aria-label={`Last completed run ${lastRunAgo}`}
-            title={`Last completed run ${lastRunAgo}`}
-          >
-            <History className="h-3 w-3" aria-hidden="true" />
-            Last run {lastRunAgo}
-          </span>
-        )}
-      </div>
-
-      <VerificationPanel run={run} onExportReport={exportRunReport} />
-    </div>
+    <DevServerWrapper>
+      <PanelBody />
+    </DevServerWrapper>
   );
 }
