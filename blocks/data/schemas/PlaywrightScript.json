@@ -1,0 +1,95 @@
+{
+  "collectionName": "blx_PlaywrightScripts",
+  "fields": [
+    {
+      "name": "userId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "OIDC sub of the script's author. Scripts are per-user — every user has their own library per (projectId, envSlug).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Owning Project.ItemId. Scripts are env-scoped: one row per (userId, projectId, envSlug, name).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "envSlug",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Environment slug (dev / stg / prod / uat / custom). Same env scope as VerificationTarget and Secret.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "name",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Display name. Unique within (userId, projectId, envSlug) — the editor's dropdown identity.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "description",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Free-text description shown in the editor's dropdown.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "language",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "javascript (the only supported language today; the column exists so a future switch to TypeScript / Python doesn't require a schema migration).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "code",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Script body. Plain JavaScript — runs in the Node context via `new Function` wrapper inside mcp-server's runScript helper. The user calls Playwright APIs on the injected `page` arg and uses the injected `log(level, msg)` / `screenshot(label)` helpers to emit console_log / screenshot_taken SSE events.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "updatedAt",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ISO timestamp of the most recent save. Echoed on update so the localStorage mirror can compare freshness.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "PlaywrightScript",
+  "schemaType": 1
+}

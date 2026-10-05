@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import svgr from "vite-plugin-svgr";
 import path from "path";
 import fs from "fs";
 import type { ServerResponse } from "http";
@@ -474,6 +475,162 @@ function mailBridgeProxy(env: Record<string, string>): Plugin {
   };
 }
 
+// Server-side proxy for the dev-server sandbox.
+//
+// `mcp-server` (on `:8787`) owns the per-(workspace, port) child
+// processes that the /panel workspace's terminal + preview panels
+// drive. The browser hits `/api/dev-server/*` and this middleware
+// forwards transparently — same registrable domain as the Lattice
+// page, so the IAM cookie + Vite HMR iframe both work.
+//
+// Behaviour:
+//   • GET  /api/dev-server/<wsId>/<port>/events   → SSE pump (preserves
+//                                                    the streaming
+//                                                    response so the
+//                                                    xterm panel can
+//                                                    see live output)
+//   • POST /api/dev-server/start                  → JSON forward
+//   • POST /api/dev-server/stop                   → JSON forward
+//   • GET  /api/dev-server/<wsId>/<port>/status   → JSON forward
+//   • GET  /api/dev-server/<wsId>/<port>/files/* → JSON forward
+//   • PUT  /api/dev-server/<wsId>/<port>/files/* → JSON forward
+//   • GET  /api/dev-server/<wsId>/<port>/proxy/*  → stream relay —
+//                                                    reverse-proxy to
+//                                                    127.0.0.1:<port>.
+//                                                    The dev-server
+//                                                    preview iframe
+//                                                    hangs off this.
+//
+// When `DEV_SERVER_BACKEND_URL` is unset the proxy returns 503 and
+// the client (`devServerApi`) throws — the workspace context catches
+// and degrades to "Run mode only".
+function devServerProxy(env: Record<string, string>): Plugin {
+  // Default to the local MCP server. Set to empty string to disable
+  // (the proxy will then 503 every request).
+  const backendUrl = (
+    env.DEV_SERVER_BACKEND_URL !== undefined
+      ? env.DEV_SERVER_BACKEND_URL
+      : "http://localhost:8787"
+  ).replace(/\/+$/, "");
+
+  return {
+    name: "feature-tracker:dev-server-proxy",
+    apply: "serve",
+    configureServer(server) {
+      const notConfigured = (res: ServerResponse) => {
+        res.statusCode = 503;
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            error: "dev_server_not_configured",
+            message:
+              "DEV_SERVER_BACKEND_URL is not set on the Vite server. Set it (and VITE_USE_DEV_SERVER=1 on the client) to enable the dev-server sandbox.",
+          }),
+        );
+      };
+
+      // Single mount at `/api/dev-server` catches every sub-path. The
+      // forward URL is `${backendUrl}/dev-server${req.url}` because
+      // Connect has already peeled the `/api/dev-server` prefix off by
+      // the time this handler sees the request.
+      server.middlewares.use("/api/dev-server", async (req, res) => {
+        if (!backendUrl) {
+          notConfigured(res);
+          return;
+        }
+        // SSE pump for `/events` — preserves the streaming response so
+        // the terminal panel gets a frame per stdout/stderr line.
+        if (
+          req.method === "GET" &&
+          (req.url ?? "").split("?")[0].endsWith("/events")
+        ) {
+          try {
+            const upstream = await fetch(
+              `${backendUrl}/dev-server${req.url ?? "/"}`,
+              {
+                headers: {
+                  accept: "text/event-stream",
+                  // Forward `accept-encoding` identity so the SSE
+                  // stream isn't gzipped — Vite's compression
+                  // middleware would otherwise buffer the response.
+                  "accept-encoding": "identity",
+                },
+              },
+            );
+            res.statusCode = upstream.status;
+            res.setHeader(
+              "content-type",
+              upstream.headers.get("content-type") ?? "text/event-stream",
+            );
+            res.setHeader("cache-control", "no-cache");
+            res.setHeader("connection", "keep-alive");
+            res.setHeader("x-accel-buffering", "no");
+            if (upstream.body) {
+              const reader = upstream.body.getReader();
+              const pump = async () => {
+                try {
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    res.write(Buffer.from(value));
+                  }
+                  res.end();
+                } catch {
+                  res.end();
+                }
+              };
+              pump();
+            } else {
+              res.end();
+            }
+          } catch (err) {
+            res.statusCode = 502;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                error: "upstream_failure",
+                message: err instanceof Error ? err.message : String(err),
+              }),
+            );
+          }
+          return;
+        }
+        // JSON forward for everything else (start, stop, status, files,
+        // proxy GET). The proxy/* path is a reverse-proxy on the
+        // backend side — the vite proxy here just forwards the bytes.
+        try {
+          const upstream = await fetch(
+            `${backendUrl}/dev-server${req.url ?? "/"}`,
+            {
+              method: req.method,
+              headers: { "content-type": "application/json" },
+              body: ["GET", "HEAD"].includes(req.method ?? "")
+                ? undefined
+                : await readBody(req),
+            },
+          );
+          const text = await upstream.text();
+          res.statusCode = upstream.status;
+          res.setHeader(
+            "content-type",
+            upstream.headers.get("content-type") ?? "application/json",
+          );
+          res.end(text);
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "upstream_failure",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      });
+    },
+  };
+}
+
 // Server-side proxy for the Issue Tracker verification endpoints (MCP).
 // Same shape as aiChatProxy: when VERIFY_BACKEND_URL is unset the proxy
 // returns 503, and the client falls back to the in-browser mock so the UI
@@ -801,9 +958,13 @@ function verifyProxy(env: Record<string, string>): Plugin {
         }
         try {
           // Strip the /api prefix before forwarding — the stub backend
-          // mounts these under /secrets, /evidence, /verify/*.
+          // mounts these under /secrets, /evidence, /verify/*. Connect's
+          // middleware rewrite has already dropped the mount prefix from
+          // `req.url`, so by the time we get here it's already a bare
+          // `/<storageRef>`; we just need to re-attach `/evidence` so the
+          // upstream's route at `/evidence/:filename` matches.
           const upstreamPath = (req.url ?? "/").replace(/^\/api/, "");
-          const upstream = await fetch(`${backendUrl}${upstreamPath}`, {
+          const upstream = await fetch(`${backendUrl}/evidence${upstreamPath}`, {
             method: req.method,
             headers: { "content-type": "application/json" },
             body:
@@ -856,6 +1017,51 @@ function verifyProxy(env: Record<string, string>): Plugin {
         try {
           const upstreamPath = (req.url ?? "/").replace(/^\/api/, "");
           const upstream = await fetch(`${backendUrl}/playwright${upstreamPath}`, {
+            method: req.method,
+            headers: { "content-type": "application/json" },
+            body:
+              req.method === "POST"
+                ? await readBody(req)
+                : undefined,
+          });
+          res.statusCode = upstream.status;
+          res.setHeader(
+            "content-type",
+            upstream.headers.get("content-type") ?? "application/json",
+          );
+          res.end(await upstream.text());
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "upstream_failure",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      });
+
+      // /api/tools → mcp-server /tools/*. The Configure drawer installs
+      // arbitrary npm packages into the runner's environment, so user code
+      // can `require()` them. Lives on the same backend (mcp-server on
+      // :8787) as the Playwright bridge — same forward path, distinct
+      // mount prefix so the two never collide.
+      server.middlewares.use("/api/tools", async (req, res) => {
+        if (!backendUrl) {
+          res.statusCode = 503;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "verify_not_configured",
+              message: "VERIFY_BACKEND_URL is not set — the npm tool installer is unavailable.",
+            }),
+          );
+          return;
+        }
+        try {
+          const upstreamPath = (req.url ?? "/").replace(/^\/api/, "");
+          const upstream = await fetch(`${backendUrl}/tools${upstreamPath}`, {
             method: req.method,
             headers: { "content-type": "application/json" },
             body:
@@ -1604,9 +1810,16 @@ export default defineConfig(({ mode, command }) => {
   return {
   plugins: [
     react(),
+    // `?react` import suffix turns an `.svg` file into a real React
+    // component (TreeRaw / Vite svgr). Used by the workspace Explorer's
+    // file/folder icons — Material Icon Theme SVGs ship as React
+    // components so they can be sized + recoloured via props without a
+    // separate `<img>` round-trip.
+    svgr(),
     aiChatProxy(env),
     aiAvatarProxy(env),
     verifyProxy(env),
+    devServerProxy(env),
     mailBridgeProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],

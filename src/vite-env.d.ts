@@ -10,6 +10,12 @@ interface ImportMetaEnv {
   // and startVerification through /api/verify/* instead of the in-browser
   // mocks. Default is empty / off.
   readonly VITE_USE_REAL_VERIFY?: string;
+  // Dev-server sandbox flag — when "1", the /panel workspace routes
+  // its start/stop/file/proxy calls through /api/dev-server/* (added
+  // by `devServerProxy` in vite.config.ts). When off, the workspace
+  // editor still works but the terminal/preview/scaffold-to-disk
+  // features degrade silently.
+  readonly VITE_USE_DEV_SERVER?: string;
   // Domain that serves per-user inbound mail addresses (the Mail page's
   // "Get Your Email" dialog builds <name>.<uid6>@<domain> from the
   // signed-in user). Must match the domain your Cloudflare Email

@@ -33,6 +33,15 @@ export type IssueCategory =
   | "accessibility"
   | "other";
 
+// ────────────────────────────────────────────────────────────────────────────
+// Run discriminator — verification vs user-authored Playwright script.
+// Stored on every RunRecord so /verify/runs history can render a
+// "Playwright" vs "AI verification" badge per row. Both kinds go through
+// the same /verify/runs endpoint and the same SSE stream — the only
+// difference is which agent branch (runAgent vs runScript) executes.
+// ────────────────────────────────────────────────────────────────────────────
+export type RunKind = "verification" | "playwright";
+
 export interface IssueEvidence {
   type: "screenshot" | "video" | "console" | "network" | "url" | "observation";
   label: string;
@@ -120,9 +129,37 @@ export type RunEvent =
       applicationName: string;
       pages: Record<string, string[]>;
     }
+  // ──────────────────────────────────────────────────────────────────────────
+  // Playwright script runs — emitted by `runScript` (see agent.ts). Two new
+  // kinds stream the user's `console.log` calls and `screenshot(label)` helper
+  // invocations into the same SSE tail the verification run uses, so a single
+  // history panel can render both. The two existing terminal kinds
+  // (run_completed, run_failed) carry the final pass/fail verdict.
+  // ──────────────────────────────────────────────────────────────────────────
+  | {
+      kind: "console_log";
+      runId: string;
+      level: "log" | "info" | "warn" | "error";
+      message: string;
+      ts: number;
+    }
+  | {
+      kind: "screenshot_taken";
+      runId: string;
+      storageRef: string;
+      label: string;
+      ts: number;
+    }
   | { kind: "run_failed"; runId: string; reason: string };
 
-// Shapes posted in by the frontend (see issueTrackerApi.ts:startVerification).
+// Shapes posted in by the frontend (see issueTrackerApi.ts:startVerification
+// and the new startScript). The body carries one of two payloads:
+//
+//   1. Verification run — `targets` non-empty, `scope` non-empty, `script` absent.
+//   2. Playwright script run — `targets` and `scope` empty, `script` set.
+//
+// The HTTP layer enforces the XOR via a `.refine` on StartBody (see
+// index.ts); this type just describes both shapes as a union.
 export interface StartVerificationRequest {
   runId: string;
   userId: string;
@@ -138,6 +175,23 @@ export interface StartVerificationRequest {
   // to desktop. Mobile/tablet set viewport + touch so responsive
   // layouts actually get exercised differently.
   device?: "desktop" | "mobile" | "tablet";
+  // When present, the agent takes the script-execution path (`runScript`).
+  // `runAgent`'s verification walk is skipped — the script drives the
+  // browser via Playwright APIs and uses the injected `log()` and
+  // `screenshot()` helpers to emit console_log / screenshot_taken events.
+  //
+  // `mode` selects how the body is executed:
+  //   - "direct" (default) — wraps the body in `new Function(...)` and
+  //     evaluates it on the active Node process. Bindings: page, context,
+  //     browser, screenshot(). Cheapest path; matches what `/test-runner`
+  //     runs in-browser.
+  //   - "spec"             — writes a temp `<runId>.spec.ts`, runs
+  //     `npx playwright test <file> --reporter=line` as a child process,
+  //     and pipes stdout/stderr through as console_log events. This is
+  //     the path that supports `test.describe` / `test.beforeEach` /
+  //     `expect` from `@playwright/test`. Heavier (subprocess + fixtures)
+  //     but matches the canonical `*.spec.ts` script shape.
+  script?: { name: string; code: string; mode?: "direct" | "spec" };
 }
 
 export interface TestConnectionRequest {

@@ -1794,6 +1794,15 @@ export function useIssueTracker() {
           });
           break;
 
+        // Playwright-script runs share the verification SSE envelope
+        // (`mcp-server/src/agent.ts:runScript`). The verification reducer
+        // owns verification-shaped state, so these two event kinds are
+        // explicit no-ops here — the new PlaywrightEditorPanel tracks
+        // them itself.
+        case "console_log":
+        case "screenshot_taken":
+          break;
+
         default: {
           // Exhaustiveness check — TS will flag a missing case here.
           const _exhaustive: never = event;

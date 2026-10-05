@@ -52,6 +52,13 @@ export type VerificationRunStatus =
   | "failed"
   | "cancelled";
 
+// Run discriminator — verification vs user-authored Playwright script.
+// Both go through the same /verify/runs endpoint and the same SSE stream;
+// the only difference is which agent branch executes (`runAgent` for
+// verification, `runScript` for scripts). Stored on every row that
+// /verify/runs returns so the History page can mix them with a kind badge.
+export type RunKind = "verification" | "playwright";
+
 export type ChatRole = "user" | "assistant" | "system";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -418,7 +425,50 @@ export type RunEvent =
       applicationName: string;
       pages: Record<string, string[]>;
     }
+  // ──────────────────────────────────────────────────────────────────────────
+  // Playwright script runs — emitted by mcp-server's `runScript` (see
+  // mcp-server/src/agent.ts). Two new kinds stream the user's
+  // `console.log` calls and `screenshot(label)` helper invocations into
+  // the same SSE tail the verification run uses, so a single history
+  // panel can render both. The two terminal kinds below (run_completed,
+  // run_failed) carry the final pass/fail verdict.
+  // ──────────────────────────────────────────────────────────────────────────
+  | {
+      kind: "console_log";
+      runId: string;
+      level: "log" | "info" | "warn" | "error";
+      message: string;
+      ts: number;
+    }
+  | {
+      kind: "screenshot_taken";
+      runId: string;
+      storageRef: string;
+      label: string;
+      ts: number;
+    }
   | { kind: "run_failed"; runId: string; reason: string };
+
+// Run summary — the per-row shape /verify/runs returns for the History
+// list. Carries enough metadata to render a row (status dot, duration,
+// target names) without replaying the SSE event log. `kind` lets the
+// History list mix AI verification + user-authored script runs with a
+// kind badge per row. `scriptName` is set only on Playwright rows so
+// the panel can show "checkout-flow · 12s" instead of "0 checks · 12s".
+// Promoted from an inline alias inside src/services/issueTrackerApi.ts
+// when the wildcard landed — both modules now share this single source
+// of truth.
+export interface RunSummary {
+  id: string;
+  kind: RunKind;
+  status: string;
+  scope: string[];
+  targetNames: Record<string, string>;
+  startedAt: string;
+  completedAt?: string;
+  eventCount: number;
+  scriptName?: string;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Chat session summary — derived from the persisted ChatMessage store. One

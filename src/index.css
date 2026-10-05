@@ -1,3 +1,10 @@
+/* VS Code's official codicon font — provides the filled glyph shapes
+   used in the Explorer file/folder rows. This @import MUST come
+   before the @tailwind directives: PostCSS silently drops any
+   @import that appears after another rule (it has to be the first
+   thing in the file). */
+@import "@vscode/codicons/dist/codicon.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -359,6 +366,19 @@
 }
 .dark .mail-scroll::-webkit-scrollbar-thumb:hover {
   background-color: hsl(var(--muted-foreground) / 0.55);
+}
+
+/* Hide the visible scrollbar but keep wheel / trackpad / drag-scroll
+   working — used by the Workspace Explorer tree so it doesn't render
+   a chunky vertical bar on top of the row hover affordance. */
+.scrollbar-hide {
+  scrollbar-width: none;          /* Firefox */
+  -ms-overflow-style: none;       /* IE / old Edge */
+}
+.scrollbar-hide::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;                   /* Chromium / WebKit / Opera */
 }
 
 @layer utilities {
