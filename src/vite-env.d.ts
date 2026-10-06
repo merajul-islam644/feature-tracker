@@ -1,5 +1,15 @@
 /// <reference types="vite/client" />
 
+// `vite-plugin-svgr` rewrites `import X from './foo.svg?react'` into a
+// real React component at build time, so TS needs an ambient declaration
+// for the `?react` query suffix — otherwise `tsc -b` errors with
+// TS2307 on every SVG import.
+declare module "*.svg?react" {
+  import type { FC, SVGProps } from "react";
+  const ReactComponent: FC<SVGProps<SVGSVGElement>>;
+  export default ReactComponent;
+}
+
 interface ImportMetaEnv {
   readonly VITE_BLOCKS_API_URL: string;
   readonly VITE_BLOCKS_OIDC_CLIENT_ID: string;
