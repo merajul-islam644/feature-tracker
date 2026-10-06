@@ -33,7 +33,6 @@ import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { ExplorerSidebar } from "./ExplorerSidebar";
 import { EditorTabs } from "./EditorTabs";
 import { EditorArea } from "./EditorArea";
-import { AgentStatusBanner, AgentStatusPill } from "./AgentStatusBanner";
 import { basename, checkNameClash, dirname } from "./treeHelpers";
 import { toast } from "sonner";
 import { redo, undo } from "@codemirror/commands";
@@ -59,7 +58,6 @@ export function WorkspacePage() {
     openFolder,
     setWorkspaceRoot,
     closeFolder,
-    agentStatus,
   } = useDevServer();
 
   // ─── Tab / content state ──────────────────────────────────────
@@ -720,7 +718,6 @@ export function WorkspacePage() {
 
   return (
     <div className="space-y-3">
-      <AgentStatusBanner status={agentStatus} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-xl font-semibold text-foreground">
@@ -745,7 +742,6 @@ export function WorkspacePage() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          <AgentStatusPill status={agentStatus} />
           <Button
             variant="ghost"
             size="icon"

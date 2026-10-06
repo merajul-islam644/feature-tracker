@@ -537,44 +537,7 @@ export const devServerApi = {
   // GET /api/dev-server/_agent/status which returns
   // { enabled, connected, connectedAt, version }.
   //   - `enabled=false` means the cloud mcp-server is running the
-  //     /dev-server/* routes locally (the dev case, or the prod case
-  //     where the bridge flag is off). All /panel operations work
-  //     without an agent.
-  //   - `enabled=true, connected=false` means the cloud mcp-server
-  //     is in bridge mode but no local agent has connected yet. The
-  //     banner shows the "start the agent" instructions and any
-  //     /dev-server/* call will 503 with `agent_offline`.
-  //   - `enabled=true, connected=true` is the happy path: the
-  //     banner is hidden and /panel operates against the user's
-  //     local filesystem.
-  async getAgentStatus(): Promise<{
-    enabled: boolean;
-    connected: boolean;
-    connectedAt: string | null;
-    version: string | null;
-  }> {
-    // The SPA cache: dedupe consecutive identical responses inside a
-    // 1s window so the 5s poll doesn't trigger 5 banner re-renders
-    // for the same status. Implementation lives in DevServerContext.
-    const res = await fetch("/api/dev-server/_agent/status", {
-      method: "GET",
-      headers: { accept: "application/json" },
-    });
-    if (!res.ok) {
-      // Bridge is not configured at all (older cloud, dev mode
-      // without the flag). Treat as "not enabled, not connected" so
-      // the banner stays out of the way and the existing local
-      // mcp-server still serves /dev-server/*.
-      return { enabled: false, connected: false, connectedAt: null, version: null };
-    }
-    return (await res.json()) as {
-      enabled: boolean;
-      connected: boolean;
-      connectedAt: string | null;
-      version: string | null;
-    };
-  },
-};
+  };
 
 // Convenience re-export so callers don't have to chase the type.
 export type { DevServerRecord, DevServerStatus, DevServerWorkspace };

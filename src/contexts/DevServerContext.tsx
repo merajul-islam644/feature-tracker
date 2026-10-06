@@ -148,26 +148,6 @@ interface DevServerContextValue {
   setWorkspaceRoot: (path: string) => Promise<void>;
   /** Forget the picked folder. Clears localStorage + state. */
   closeFolder: () => void;
-
-  /**
-   * Local-agent bridge status, polled every 5s while the panel is
-   * mounted. `null` until the first response lands.
-   *
-   * - `enabled=false` → cloud mcp-server is running /dev-server/*
-   *   locally (the dev case). No banner, no agent needed.
-   * - `enabled=true, connected=false` → bridge is engaged but no
-   *   local agent is connected. The banner shows the "start the
-   *   agent" instructions; any /dev-server/* call 503s.
-   * - `enabled=true, connected=true` → the local agent is up and
-   *   serving /dev-server/* requests. Banner hidden, panel
-   *   operates against the user's filesystem.
-   */
-  agentStatus: {
-    enabled: boolean;
-    connected: boolean;
-    connectedAt: string | null;
-    version: string | null;
-  } | null;
 }
 
 const DevServerContext = createContext<DevServerContextValue | null>(null);
@@ -234,10 +214,6 @@ export function DevServerProvider({
 
   const [servers, setServers] = useState<Map<number, DevServerRecord>>(() => new Map());
   const [problems, setProblems] = useState<Problem[]>([]);
-  // Local-agent bridge status. `null` until the first poll lands;
-  // the banner treats that as "loading" and renders nothing. See
-  // the matching effect below.
-  const [agentStatus, setAgentStatus] = useState<DevServerContextValue["agentStatus"]>(null);
   // ─── VS Code-style file tree state ─────────────────────────────
   // `null` until the first `refreshTree()` call lands. Cleared when
   // the user closes the folder (or the workspace triple changes). The
@@ -797,51 +773,6 @@ export function DevServerProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, projectId, envSlug]);
 
-  // Local-agent bridge status — poll every 5s. The banner is
-  // proactive UI: it shows the user the "start the agent"
-  // instructions before they hit any /dev-server/* call. Without
-  // this poll, the only feedback would be a 503 toast on the first
-  // failed operation, which feels like a server bug.
-  //
-  // The poll starts as soon as the panel mounts and runs until
-  // unmount. We use a simple setInterval — no exponential
-  // backoff, no jitter — because the endpoint is the same-origin
-  // SPA proxy and is essentially free.
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const next = await devServerApi.getAgentStatus();
-        if (cancelled) return;
-        setAgentStatus((prev) => {
-          // Skip the re-render when the new status is byte-identical
-          // to the previous one — saves the banner from 4 useless
-          // re-renders per minute when nothing changes.
-          if (
-            prev &&
-            prev.enabled === next.enabled &&
-            prev.connected === next.connected &&
-            prev.connectedAt === next.connectedAt &&
-            prev.version === next.version
-          ) {
-            return prev;
-          }
-          return next;
-        });
-      } catch {
-        // Network blip — keep the previous status; next tick will
-        // retry. Banner doesn't flash because we only update on a
-        // real change.
-      }
-    };
-    void tick();
-    const handle = window.setInterval(tick, 5_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(handle);
-    };
-  }, []);
-
   const value = useMemo<DevServerContextValue>(() => ({
     workspace,
     enabled: true,
@@ -863,7 +794,6 @@ export function DevServerProvider({
     openFolder,
     setWorkspaceRoot,
     closeFolder,
-    agentStatus,
   }), [
     workspace,
     servers,
@@ -884,7 +814,6 @@ export function DevServerProvider({
     openFolder,
     setWorkspaceRoot,
     closeFolder,
-    agentStatus,
   ]);
 
   return (
