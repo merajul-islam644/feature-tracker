@@ -142,6 +142,12 @@ app.addHook("preHandler", async (req, reply) => {
   // bridge owns. /verify, /secrets, /playwright, /tools, /evidence
   // all stay cloud-local.
   if (!url.startsWith("/dev-server")) return;
+  // Don't intercept the bridge endpoints (`/dev-server/_agent*`).
+  // Those are the WS handshake + status route that the agent
+  // connects to — short-circuiting them would block the upgrade
+  // before @fastify/websocket can answer 101, leaving the agent
+  // hanging until code=1006.
+  if (url.startsWith("/dev-server/_agent")) return;
   if (!process.env.AGENT_BRIDGE_ENABLED) return;
   await forwardToAgent(req, reply);
 });
