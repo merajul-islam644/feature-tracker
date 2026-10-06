@@ -6,12 +6,6 @@
 // workspace dir, and a hand-rolled reverse-proxy that the preview
 // iframe hangs off.
 //
-// Feature-flagged by `VITE_USE_DEV_SERVER`. When the flag is off, every
-// method throws with the same `flag_off` envelope as `verify_proxy`'s
-// `verify_not_configured` — the workspace context catches the throw
-// and degrades to "preview disabled" + "Run mode only" so the panel
-// still mounts the editor surface.
-//
 // SSE reconnect (`subscribeEvents`) mirrors `issueTrackerApi.subscribeRun`
 // (lines 477-600): manual reconnect with cursor advance instead of
 // `EventSource` auto-retry, exponential backoff up to 8s, and an
@@ -27,13 +21,13 @@ import type {
   PackageJsonSummary,
 } from "@/types/dev-server";
 
-// Feature flag — mirrors `VITE_USE_REAL_VERIFY` for the dev-server
-// sandbox. When off, every method throws "flag_off" so callers can
-// degrade without special-casing the network shape.
-const USE_DEV_SERVER = import.meta.env.VITE_USE_DEV_SERVER === "1";
-
-const FLAG_OFF_ERROR = (method: string): Error =>
-  new Error(`dev-server sandbox not enabled (${method})`);
+// Feature flag removed — the dev-server sandbox is always on. The
+// previous `VITE_USE_DEV_SERVER` build-time flag was silently false
+// in production (cloudbuild.yaml had no substitution for it), which
+// short-circuited every method to `FLAG_OFF_ERROR("…")` and broke
+// the `/panel` workspace. Keeping the path on always means local
+// dev, containerized staging, and Cloud Run prod all share one code
+// path — no "did someone forget to set the build arg" footgun.
 
 // ─────────────────────────────────────────────────────────────────────
 //  Workspace identity
@@ -51,7 +45,10 @@ const FLAG_OFF_ERROR = (method: string): Error =>
 // 60K generations. `crypto.randomUUID()` is collision-free and is
 // widely supported in modern browsers + Node.
 function randomId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
     return crypto.randomUUID();
   }
   // Last-ditch fallback for very old environments.
@@ -70,11 +67,6 @@ export function makeWorkspaceId(): string {
 // ─────────────────────────────────────────────────────────────────────
 
 export const devServerApi = {
-  /** Throws when the flag is off — callers gate on this. */
-  isEnabled(): boolean {
-    return USE_DEV_SERVER;
-  },
-
   /**
    * Start (or restart) a child `npm run dev` for the given workspace
    * + port. Idempotent — `startDevServer` in mcp-server reuses the
@@ -89,7 +81,6 @@ export const devServerApi = {
     command: string;
     args: string[];
   }): Promise<{ id: string; status: DevServerStatus; port: number }> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("startDevServer");
     const res = await fetch("/api/dev-server/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -99,14 +90,17 @@ export const devServerApi = {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(data.error ?? `start failed (${res.status})`);
     }
-    return (await res.json()) as { id: string; status: DevServerStatus; port: number };
+    return (await res.json()) as {
+      id: string;
+      status: DevServerStatus;
+      port: number;
+    };
   },
 
   async stopDevServer(opts: {
     workspaceId: string;
     port: number;
   }): Promise<void> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("stopDevServer");
     const res = await fetch("/api/dev-server/stop", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -128,7 +122,6 @@ export const devServerApi = {
     workspaceId: string;
     port: number;
   }): Promise<DevServerRecord | null> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("getStatus");
     try {
       const res = await fetch(
         `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/${opts.port}/status`,
@@ -151,23 +144,16 @@ export const devServerApi = {
    * Returns a teardown function. Idempotent: calling unsubscribe
    * after the stream settled (`done`) is a no-op.
    */
-  subscribeEvents(
-    opts: {
-      workspaceId: string;
-      port: number;
-      onEvent: (event: DevServerEvent) => void;
-      onError: (err: Error) => void;
-      /** Fires once after `MAX_FAILURES` consecutive reconnect
-       *  failures. Lets the consumer flip the status bar to "Stopped"
-       *  without waiting for per-attempt `onError` callbacks. */
-      onGiveUp?: (err: Error) => void;
-    },
-  ): () => void {
-    if (!USE_DEV_SERVER) {
-      opts.onGiveUp?.(new Error("dev-server sandbox not enabled"));
-      return () => {};
-    }
-
+  subscribeEvents(opts: {
+    workspaceId: string;
+    port: number;
+    onEvent: (event: DevServerEvent) => void;
+    onError: (err: Error) => void;
+    /** Fires once after `MAX_FAILURES` consecutive reconnect
+     *  failures. Lets the consumer flip the status bar to "Stopped"
+     *  without waiting for per-attempt `onError` callbacks. */
+    onGiveUp?: (err: Error) => void;
+  }): () => void {
     const url0 = `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/${opts.port}/events`;
     let es: EventSource | null = null;
     let reconnectTimer: number | undefined;
@@ -228,9 +214,7 @@ export const devServerApi = {
         opts.onError(new Error("dev-server stream error"));
         consecutiveFailures += 1;
         if (consecutiveFailures >= MAX_FAILURES) {
-          opts.onGiveUp?.(
-            new Error("dev-server stream gave up after retries"),
-          );
+          opts.onGiveUp?.(new Error("dev-server stream gave up after retries"));
           return;
         }
         reconnectTimer = window.setTimeout(() => {
@@ -269,7 +253,6 @@ export const devServerApi = {
     port: number;
     path: string;
   }): Promise<string | null> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("readFile");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/${opts.port}/files/${opts.path}`,
     );
@@ -291,7 +274,6 @@ export const devServerApi = {
     path: string;
     content: string;
   }): Promise<void> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("writeFile");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/${opts.port}/files/${opts.path}`,
       {
@@ -315,11 +297,7 @@ export const devServerApi = {
    * Path defaults to `/`. Pass `path: ""` for an exact empty path
    * (rare).
    */
-  proxyUrl(opts: {
-    workspaceId: string;
-    port: number;
-    path?: string;
-  }): string {
+  proxyUrl(opts: { workspaceId: string; port: number; path?: string }): string {
     const p = opts.path ?? "/";
     // Anchor on `window.location.origin` so the URL is valid inside an
     // iframe and matches the Vite proxy when running in dev.
@@ -342,9 +320,9 @@ export const devServerApi = {
   // ───────────────────────────────────────────────────────────────
 
   async pickFolder(): Promise<
-    { path: string } | { cancelled: true; reason: "cancelled" | "no_gui" | "spawn_failed" }
+    | { path: string }
+    | { cancelled: true; reason: "cancelled" | "no_gui" | "spawn_failed" }
   > {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("pickFolder");
     const res = await fetch("/api/dev-server/pick-folder", {
       method: "POST",
       // Send an explicit JSON content-type with an empty object — Vite's
@@ -372,7 +350,6 @@ export const devServerApi = {
    * dependencies subsection.
    */
   async inspectPackage(path: string): Promise<PackageJsonSummary | null> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("inspectPackage");
     const res = await fetch("/api/dev-server/inspect-package", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -409,7 +386,6 @@ export const devServerApi = {
     root: string;
     maxDepth?: number;
   }): Promise<FileNode[]> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("listTree");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/list`,
       {
@@ -436,7 +412,6 @@ export const devServerApi = {
     root: string;
     path: string;
   }): Promise<string | null> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("readUserFile");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/read`,
       {
@@ -466,7 +441,6 @@ export const devServerApi = {
     path: string;
     content: string;
   }): Promise<void> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("writeUserFile");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/write`,
       {
@@ -495,7 +469,6 @@ export const devServerApi = {
     root: string;
     path: string;
   }): Promise<void> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("deleteUserPath");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/delete`,
       {
@@ -520,7 +493,6 @@ export const devServerApi = {
     oldPath: string;
     newPath: string;
   }): Promise<void> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("renameUserPath");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/rename`,
       {
@@ -547,7 +519,6 @@ export const devServerApi = {
     root: string;
     path: string;
   }): Promise<void> {
-    if (!USE_DEV_SERVER) throw FLAG_OFF_ERROR("mkdirUserPath");
     const res = await fetch(
       `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/mkdir`,
       {
@@ -566,5 +537,6 @@ export const devServerApi = {
 // Convenience re-export so callers don't have to chase the type.
 export type { DevServerRecord, DevServerStatus, DevServerWorkspace };
 
-// Provide a single-name default for the new-flag check below.
-export const USE_DEV_SERVER_FLAG = USE_DEV_SERVER;
+// (USE_DEV_SERVER_FLAG removed — the dev-server sandbox is always on
+// now. See the comment block at the top of this file for the
+// rationale.)

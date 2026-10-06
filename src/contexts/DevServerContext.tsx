@@ -775,7 +775,7 @@ export function DevServerProvider({
 
   const value = useMemo<DevServerContextValue>(() => ({
     workspace,
-    enabled: devServerApi.isEnabled(),
+    enabled: true,
     servers,
     problems,
     workspaceRoot,

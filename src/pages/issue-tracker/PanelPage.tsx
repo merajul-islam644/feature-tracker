@@ -35,10 +35,8 @@ function DevServerWrapper({ children }: { children: ReactNode }) {
 }
 
 function PanelBody() {
-  // `enabled` reflects the VITE_USE_DEV_SERVER flag. When the
-  // sandbox is not configured the workspace page shows an empty
-  // state instead of throwing — the user can still see the page,
-  // just nothing happens on click.
+  // Workspace editor is always-on now (the previous VITE_USE_DEV_SERVER
+  // build-time flag was removed in src/services/devServerApi.ts).
   void useDevServer();
   return (
     <div className="space-y-4">
