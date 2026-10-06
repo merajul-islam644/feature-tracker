@@ -538,7 +538,15 @@ export function DevServerProvider({
 
   const setWorkspaceRoot = useCallback(
     async (path: string) => {
-      if (!userId || !projectId || !envSlug) return;
+      if (!userId || !projectId || !envSlug) {
+        // Auth/env triple hasn't hydrated — typing a path while the
+        // IAM session is broken would otherwise silently swallow the
+        // click. Surface the failure so the user knows to refresh.
+        toast.error(
+          "Authentication not ready — please refresh the page and try again.",
+        );
+        return;
+      }
       const trimmed = path.trim();
       if (!trimmed) return;
       try {
