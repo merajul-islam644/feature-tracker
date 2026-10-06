@@ -663,73 +663,74 @@ server.on("upgrade", (req, clientSocket, head) => {
   const upstreamUrl = `${wsOrigin}${upstreamPath}`;
 
   // Lazy import — ws is only needed if an upgrade actually fires.
-  import("ws").then(({ WebSocket }) => {
-    const upstreamHeaders = {};
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (!v) continue;
-      // Drop the host header — the upstream is on a different host.
-      if (k === "host") continue;
-      upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
-    }
-    const upstream = new WebSocket(upstreamUrl, {
-      headers: upstreamHeaders,
-    });
-
-    let closed = false;
-    const cleanup = (code, reason) => {
-      if (closed) return;
-      closed = true;
-      try {
-        if (clientSocket.writable) clientSocket.end();
-      } catch {
-        /* */
+  import("ws").then(({ WebSocket, WebSocketServer }) => {
+    // Upgrade the agent's socket in-place via ws's noServer mode —
+    // handleUpgrade writes the HTTP/1.1 101 Switching Protocols
+    // response and hands us a real WebSocket object. Without this
+    // the agent sees no 101 and closes with code=1006.
+    const wss = new WebSocketServer({ noServer: true });
+    wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
+      const upstreamHeaders = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (!v) continue;
+        if (k === "host") continue;
+        upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
       }
-      try {
-        if (upstream.readyState <= 1) upstream.close(code, reason);
-      } catch {
-        /* */
-      }
-    };
+      const upstream = new WebSocket(upstreamUrl, {
+        headers: upstreamHeaders,
+      });
 
-    upstream.on("open", () => {
-      // Drain any 'head' bytes the client sent before we got here.
-      if (head && head.length > 0) {
+      let closed = false;
+      const cleanup = (code, reason) => {
+        if (closed) return;
+        closed = true;
         try {
-          upstream.send(Buffer.from(head));
+          clientWs.close(code, reason);
         } catch {
-          /* upstream closed before head could be sent */
+          /* */
         }
-      }
-    });
-    upstream.on("message", (data, isBinary) => {
-      try {
-        if (clientSocket.writable) {
-          clientSocket.write(isBinary ? data : Buffer.from(data));
+        try {
+          if (upstream.readyState <= 1) upstream.close(code, reason);
+        } catch {
+          /* */
         }
-      } catch {
-        cleanup(1011, "client_write_failed");
-      }
-    });
-    upstream.on("close", (code, reason) => {
-      cleanup(code, reason?.toString?.() ?? "");
-    });
-    upstream.on("error", (err) => {
-      // eslint-disable-next-line no-console
-      console.warn(`[prod-backend] WS upstream error: ${err.message}`);
-      cleanup(1011, "upstream_error");
-    });
+      };
 
-    clientSocket.on("data", (data) => {
-      try {
-        if (upstream.readyState === 1 /* OPEN */) {
-          upstream.send(data, { binary: true });
+      clientWs.on("message", (data, isBinary) => {
+        try {
+          if (upstream.readyState === 1) {
+            upstream.send(data, { binary: isBinary });
+          }
+        } catch {
+          cleanup(1011, "upstream_send_failed");
         }
-      } catch {
-        cleanup(1011, "upstream_send_failed");
-      }
+      });
+      clientWs.on("close", (code, reason) =>
+        cleanup(code, reason?.toString?.() ?? ""),
+      );
+      clientWs.on("error", () => cleanup(1011, "client_error"));
+
+      upstream.on("open", () => {
+        // No-op — we don't need to send the head bytes here because
+        // handleUpgrade already consumed them and parsed the upgrade
+        // request. The agent's WS messages flow through `message`.
+      });
+      upstream.on("message", (data, isBinary) => {
+        try {
+          clientWs.send(data, { binary: isBinary });
+        } catch {
+          cleanup(1011, "client_send_failed");
+        }
+      });
+      upstream.on("close", (code, reason) =>
+        cleanup(code, reason?.toString?.() ?? ""),
+      );
+      upstream.on("error", (err) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[prod-backend] WS upstream error: ${err.message}`);
+        cleanup(1011, "upstream_error");
+      });
     });
-    clientSocket.on("close", () => cleanup(1000, "client_close"));
-    clientSocket.on("error", () => cleanup(1011, "client_error"));
   }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error(`[prod-backend] WS forwarder failed to import ws: ${err.message}`);

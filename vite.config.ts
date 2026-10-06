@@ -658,70 +658,72 @@ function agentBridgeProxy(env: Record<string, string>): Plugin {
           }
           // Dynamic import so `ws` is only loaded when the upgrade
           // actually fires (cold start of dev mode stays fast).
-          import("ws").then(({ WebSocket }) => {
+          import("ws").then(({ WebSocket, WebSocketServer }) => {
             const upstreamPath = reqUrl.replace(/^\/api\/dev-server/, "");
             const upstreamUrl = `${mcpWsUrl}${upstreamPath}`;
-            const upstreamHeaders: Record<string, string> = {};
-            for (const [k, v] of Object.entries(req.headers)) {
-              if (!v) continue;
-              if (k === "host") continue;
-              upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
-            }
-            const upstream = new WebSocket(upstreamUrl, { headers: upstreamHeaders });
-
-            let closed = false;
-            const cleanup = (code: number, reason: string) => {
-              if (closed) return;
-              closed = true;
-              try {
-                if (clientSocket.writable) clientSocket.end();
-              } catch {
-                /* */
+            // Upgrade the agent's socket in-place via ws's noServer mode.
+            // handleUpgrade writes the HTTP/1.1 101 Switching Protocols
+            // response — without it the agent sees no 101 and closes with
+            // code=1006.
+            const wss = new WebSocketServer({ noServer: true });
+            wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
+              const upstreamHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(req.headers)) {
+                if (!v) continue;
+                if (k === "host") continue;
+                upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
               }
-              try {
-                if (upstream.readyState <= 1) upstream.close(code, reason);
-              } catch {
-                /* */
-              }
-            };
+              const upstream = new WebSocket(upstreamUrl, {
+                headers: upstreamHeaders,
+              });
 
-            upstream.on("open", () => {
-              if (head && head.length > 0) {
+              let closed = false;
+              const cleanup = (code: number, reason: string) => {
+                if (closed) return;
+                closed = true;
                 try {
-                  upstream.send(Buffer.from(head));
+                  clientWs.close(code, reason);
                 } catch {
-                  /* upstream closed before head could be sent */
+                  /* */
                 }
-              }
-            });
-            upstream.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-              try {
-                if (clientSocket.writable) {
+                try {
+                  if (upstream.readyState <= 1) upstream.close(code, reason);
+                } catch {
+                  /* */
+                }
+              };
+
+              clientWs.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+                try {
+                  if (upstream.readyState === 1) {
+                    upstream.send(data as Buffer, { binary: isBinary });
+                  }
+                } catch {
+                  cleanup(1011, "upstream_send_failed");
+                }
+              });
+              clientWs.on("close", (code: number, reason: Buffer) =>
+                cleanup(code, reason?.toString?.() ?? ""),
+              );
+              clientWs.on("error", () => cleanup(1011, "client_error"));
+
+              upstream.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+                try {
                   const buf = isBinary
                     ? Buffer.isBuffer(data)
                       ? data
                       : Buffer.from(data as ArrayBuffer)
                     : Buffer.from(data as unknown as string);
-                  clientSocket.write(buf);
+                  clientWs.send(buf, { binary: isBinary });
+                } catch {
+                  cleanup(1011, "client_send_failed");
                 }
-              } catch {
-                cleanup(1011, "client_write_failed");
-              }
+              });
+              upstream.on("close", (code: number, reason: Buffer) => {
+                cleanup(code, reason?.toString?.() ?? "");
+              });
+              upstream.on("error", () => cleanup(1011, "upstream_error"));
             });
-            upstream.on("close", (code, reason) => {
-              cleanup(code, reason?.toString?.() ?? "");
-            });
-            upstream.on("error", () => cleanup(1011, "upstream_error"));
-
-            clientSocket.on("data", (data) => {
-              try {
-                if (upstream.readyState === 1) upstream.send(data, { binary: true });
-              } catch {
-                cleanup(1011, "upstream_send_failed");
-              }
-            });
-            clientSocket.on("close", () => cleanup(1000, "client_close"));
-            clientSocket.on("error", () => cleanup(1011, "client_error"));
           }).catch(() => {
             try {
               clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
