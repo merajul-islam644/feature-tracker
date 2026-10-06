@@ -74,7 +74,16 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 # (used to load .ts source at runtime — see mcp-server/Dockerfile from
 # the now-removed two-service split for the rationale). Same
 # ci-then-install fallback as the frontend.
+#
+# Source files MUST be copied into the deps stage too — the runtime
+# stage's `COPY --from=deps /app/mcp-server /app/mcp-server` brings
+# the source along with node_modules, and prod-backend.mjs spawns
+# /app/mcp-server/node_modules/tsx/dist/cli.mjs /app/mcp-server/src/
+# index.ts. Without the source COPY here, the spawn ENOENTs and every
+# /api/dev-server/* call 502s with upstream_failure.
 COPY mcp-server/package.json mcp-server/package-lock.json* /app/mcp-server/
+COPY mcp-server/src /app/mcp-server/src
+COPY mcp-server/tsconfig.json /app/mcp-server/tsconfig.json
 WORKDIR /app/mcp-server
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 WORKDIR /app
