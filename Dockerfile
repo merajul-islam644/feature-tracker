@@ -158,6 +158,24 @@ ENV AI_GATEWAY_URL=$AI_GATEWAY_URL \
     AI_GATEWAY_TOKEN=$AI_GATEWAY_TOKEN \
     AI_GATEWAY_MODEL=$AI_GATEWAY_MODEL
 
+# Local-agent bridge — opt-in. When AGENT_BRIDGE_ENABLED=1, the
+# mcp-server child process forwards every /dev-server/* HTTP request
+# over a WebSocket to a local agent running on the user's machine
+# (see agent/agent.mjs + mcp-server/src/agentBridge.ts). Without it,
+# the mcp-server runs the routes locally — same as dev mode.
+#
+# AGENT_BRIDGE_TOKEN is the shared secret the agent must present on
+# its WS `hello` frame to be accepted. Rotate together: change the
+# portal substitution, restart the user's agent with the new --token.
+#
+# Both must be set as Trigger substitutions in the Blocks portal
+# (Build → Trigger → Substitutions) for them to reach the running
+# container. See .env.production.example.
+ARG AGENT_BRIDGE_ENABLED
+ARG AGENT_BRIDGE_TOKEN
+ENV AGENT_BRIDGE_ENABLED=$AGENT_BRIDGE_ENABLED \
+    AGENT_BRIDGE_TOKEN=$AGENT_BRIDGE_TOKEN
+
 # DISABLE_MCP_CHILD=1 skips the spawn — escape hatch for one-off debugging
 # (e.g. running only the SPA behind a manually-managed mcp-server). Not
 # expected to be set in normal deployments.

@@ -47,6 +47,11 @@ substitutions:
   _VITE_BLOCKS_OIDC_SCOPE: "openid profile"
   _REGION: "us-central1"
   _REPOSITORY: "feature-tracker"
+  # Local-agent bridge defaults. AGENT_BRIDGE_TOKEN must be set in
+  # the Block portal trigger substitutions — never put a real token
+  # here (this file is git-tracked). The agent the user runs on
+  # their machine must pass the same --token value.
+  _AGENT_BRIDGE_ENABLED: "1"
 
 # Top-level images — Cloud Build pushes these after the build succeeds.
 # The tag uses branch + short SHA + build id so every build is unique.
@@ -120,6 +125,8 @@ steps:
       - "--build-arg=VITE_BLOCKS_OIDC_URL=${_VITE_BLOCKS_OIDC_URL}"
       - "--build-arg=VITE_BLOCKS_OIDC_SCOPE=${_VITE_BLOCKS_OIDC_SCOPE}"
       - "--build-arg=VITE_BLOCKS_APP_DOMAIN=${_VITE_BLOCKS_APP_DOMAIN}"
+      - "--build-arg=AGENT_BRIDGE_ENABLED=${_AGENT_BRIDGE_ENABLED}"
+      - "--build-arg=AGENT_BRIDGE_TOKEN=${_AGENT_BRIDGE_TOKEN}"
       - "--file=Dockerfile"
       - "."
     dir: "."

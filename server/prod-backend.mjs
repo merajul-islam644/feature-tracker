@@ -623,6 +623,125 @@ process.on("SIGINT", () => {
   if (mcpProc && !mcpProc.killed) mcpProc.kill("SIGINT");
 });
 
+// ────────────────────────────────────────────────────────────────────
+//  WebSocket upgrade forwarder — /api/dev-server/_agent
+//
+//  The local agent on the user's machine opens a WebSocket to
+//  wss://<this-host>/api/dev-server/_agent. node:http has no built-in
+//  WebSocket handling, so we listen for the 'upgrade' event and pipe
+//  the TCP socket to a fresh WebSocket client pointed at the local
+//  mcp-server's /_agent WS route. The same pattern npm's http-proxy
+//  uses internally — ~50 lines, no streaming quirks. The agent on
+//  the user's side uses Node 22+'s built-in WebSocket, so this side
+//  uses ws@8 (already a dep of mcp-server). We import it lazily to
+//  avoid the cost when the upgrade never fires.
+//
+//  All other upgrade paths (e.g. Vite HMR — N/A in prod) get
+//  destroyed so the client gets a clean close, not a hang.
+// ────────────────────────────────────────────────────────────────────
+
+server.on("upgrade", (req, clientSocket, head) => {
+  const reqUrl = req.url || "";
+  if (!reqUrl.startsWith("/api/dev-server/_agent")) {
+    // Not ours — let the default destroy it. Cloud Run won't have
+    // any other upgrade handler.
+    clientSocket.destroy();
+    return;
+  }
+  if (!DEV_SERVER_URL) {
+    clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+    clientSocket.destroy();
+    return;
+  }
+
+  // Resolve the mcp-server's WS origin from the HTTP origin.
+  // DEV_SERVER_URL is http://127.0.0.1:8787 → ws://127.0.0.1:8787.
+  const wsOrigin = DEV_SERVER_URL.replace(/^http/, "ws");
+  // The agent's URL includes /api/dev-server/_agent; mcp-server's
+  // WS route is mounted at /_agent. Strip the /api/dev-server prefix.
+  const upstreamPath = reqUrl.replace(/^\/api\/dev-server/, "");
+  const upstreamUrl = `${wsOrigin}${upstreamPath}`;
+
+  // Lazy import — ws is only needed if an upgrade actually fires.
+  import("ws").then(({ WebSocket }) => {
+    const upstreamHeaders = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!v) continue;
+      // Drop the host header — the upstream is on a different host.
+      if (k === "host") continue;
+      upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
+    }
+    const upstream = new WebSocket(upstreamUrl, {
+      headers: upstreamHeaders,
+    });
+
+    let closed = false;
+    const cleanup = (code, reason) => {
+      if (closed) return;
+      closed = true;
+      try {
+        if (clientSocket.writable) clientSocket.end();
+      } catch {
+        /* */
+      }
+      try {
+        if (upstream.readyState <= 1) upstream.close(code, reason);
+      } catch {
+        /* */
+      }
+    };
+
+    upstream.on("open", () => {
+      // Drain any 'head' bytes the client sent before we got here.
+      if (head && head.length > 0) {
+        try {
+          upstream.send(Buffer.from(head));
+        } catch {
+          /* upstream closed before head could be sent */
+        }
+      }
+    });
+    upstream.on("message", (data, isBinary) => {
+      try {
+        if (clientSocket.writable) {
+          clientSocket.write(isBinary ? data : Buffer.from(data));
+        }
+      } catch {
+        cleanup(1011, "client_write_failed");
+      }
+    });
+    upstream.on("close", (code, reason) => {
+      cleanup(code, reason?.toString?.() ?? "");
+    });
+    upstream.on("error", (err) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[prod-backend] WS upstream error: ${err.message}`);
+      cleanup(1011, "upstream_error");
+    });
+
+    clientSocket.on("data", (data) => {
+      try {
+        if (upstream.readyState === 1 /* OPEN */) {
+          upstream.send(data, { binary: true });
+        }
+      } catch {
+        cleanup(1011, "upstream_send_failed");
+      }
+    });
+    clientSocket.on("close", () => cleanup(1000, "client_close"));
+    clientSocket.on("error", () => cleanup(1011, "client_error"));
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(`[prod-backend] WS forwarder failed to import ws: ${err.message}`);
+    try {
+      clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      clientSocket.destroy();
+    } catch {
+      /* */
+    }
+  });
+});
+
 server.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(`[prod-backend] listening on http://${HOST}:${PORT}`);

@@ -631,6 +631,122 @@ function devServerProxy(env: Record<string, string>): Plugin {
   };
 }
 
+// Local-agent bridge — same shape as prod-backend.mjs's `upgrade`
+// handler. The local agent opens a WebSocket to ws://<vite-host>/
+// api/dev-server/_agent; we forward the upgrade to ws://localhost:
+// <MCP_PORT>/_agent. Both server-side paths are inside the same dev
+// machine, so the wire is plain ws:// (no TLS). The agent's URL
+// must match the agent's --remote flag.
+function agentBridgeProxy(env: Record<string, string>): Plugin {
+  const mcpHttpUrl = (
+    env.DEV_SERVER_BACKEND_URL !== undefined
+      ? env.DEV_SERVER_BACKEND_URL
+      : "http://localhost:8787"
+  ).replace(/\/+$/, "");
+  const mcpWsUrl = mcpHttpUrl.replace(/^http/, "ws");
+
+  return {
+    name: "feature-tracker:agent-bridge-proxy",
+    apply: "serve",
+    configureServer(server) {
+      const bind = (httpServer: import("node:http").Server) => {
+        httpServer.on("upgrade", (req, clientSocket, head) => {
+          const reqUrl = req.url || "";
+          if (!reqUrl.startsWith("/api/dev-server/_agent")) {
+            clientSocket.destroy();
+            return;
+          }
+          // Dynamic import so `ws` is only loaded when the upgrade
+          // actually fires (cold start of dev mode stays fast).
+          import("ws").then(({ WebSocket }) => {
+            const upstreamPath = reqUrl.replace(/^\/api\/dev-server/, "");
+            const upstreamUrl = `${mcpWsUrl}${upstreamPath}`;
+            const upstreamHeaders: Record<string, string> = {};
+            for (const [k, v] of Object.entries(req.headers)) {
+              if (!v) continue;
+              if (k === "host") continue;
+              upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
+            }
+            const upstream = new WebSocket(upstreamUrl, { headers: upstreamHeaders });
+
+            let closed = false;
+            const cleanup = (code: number, reason: string) => {
+              if (closed) return;
+              closed = true;
+              try {
+                if (clientSocket.writable) clientSocket.end();
+              } catch {
+                /* */
+              }
+              try {
+                if (upstream.readyState <= 1) upstream.close(code, reason);
+              } catch {
+                /* */
+              }
+            };
+
+            upstream.on("open", () => {
+              if (head && head.length > 0) {
+                try {
+                  upstream.send(Buffer.from(head));
+                } catch {
+                  /* upstream closed before head could be sent */
+                }
+              }
+            });
+            upstream.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+              try {
+                if (clientSocket.writable) {
+                  const buf = isBinary
+                    ? Buffer.isBuffer(data)
+                      ? data
+                      : Buffer.from(data as ArrayBuffer)
+                    : Buffer.from(data as unknown as string);
+                  clientSocket.write(buf);
+                }
+              } catch {
+                cleanup(1011, "client_write_failed");
+              }
+            });
+            upstream.on("close", (code, reason) => {
+              cleanup(code, reason?.toString?.() ?? "");
+            });
+            upstream.on("error", () => cleanup(1011, "upstream_error"));
+
+            clientSocket.on("data", (data) => {
+              try {
+                if (upstream.readyState === 1) upstream.send(data, { binary: true });
+              } catch {
+                cleanup(1011, "upstream_send_failed");
+              }
+            });
+            clientSocket.on("close", () => cleanup(1000, "client_close"));
+            clientSocket.on("error", () => cleanup(1011, "client_error"));
+          }).catch(() => {
+            try {
+              clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+              clientSocket.destroy();
+            } catch {
+              /* */
+            }
+          });
+        });
+      };
+      // httpServer is created during Vite's setup; bind immediately
+      // if it exists, otherwise wait for the listening event.
+      const httpServer = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
+      if (httpServer) {
+        bind(httpServer);
+      } else {
+        server.httpServer?.once("listening", () => {
+          const hs = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
+          if (hs) bind(hs);
+        });
+      }
+    },
+  };
+}
+
 // Server-side proxy for the Issue Tracker verification endpoints (MCP).
 // Same shape as aiChatProxy: when VERIFY_BACKEND_URL is unset the proxy
 // returns 503, and the client falls back to the in-browser mock so the UI
@@ -1820,6 +1936,7 @@ export default defineConfig(({ mode, command }) => {
     aiAvatarProxy(env),
     verifyProxy(env),
     devServerProxy(env),
+    agentBridgeProxy(env),
     mailBridgeProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],

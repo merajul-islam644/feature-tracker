@@ -70,6 +70,17 @@
 //   POST   /dev-server/:wsId/mkdir       → mkdir -p in the user-picked
 //                                          folder
 //
+//   GET    /_agent/status                → bridge status for the SPA
+//                                          banner (always available; reports
+//                                          { enabled, connected, … })
+//   WS     /_agent                       → local-agent bridge. Opt-in via
+//                                          AGENT_BRIDGE_ENABLED=1. When the
+//                                          flag is on, every /dev-server/*
+//                                          request is forwarded to the
+//                                          connected local agent instead of
+//                                          being executed in this process.
+//                                          See ./agentBridge.ts.
+//
 // The verification agent runs in headed mode (a real visible Chrome
 // window on the host). The browser window is the preview — there is
 // no in-app mirror and no `/interact` endpoint, so the user sees the
@@ -77,6 +88,7 @@
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
 import { spawn } from "node:child_process";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync } from "node:fs";
 import { writeFile, readFile, mkdir } from "node:fs/promises";
@@ -106,18 +118,74 @@ import {
   walkTree,
   workspaceRoot,
 } from "./devServer.js";
+import { forwardToAgent, getAgentBridgeStatus, installAgentBridgeHandlers } from "./agentBridge.js";
 import type { StartVerificationRequest } from "./types.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8787);
 
 const app = Fastify({ logger: { level: process.env.MCP_LOG_LEVEL ?? "info" } });
 await app.register(cors, { origin: true, credentials: true });
+await app.register(websocket);
+
+// Local-agent bridge — opt-in via AGENT_BRIDGE_ENABLED=1. When the
+// flag is on, every /dev-server/* request is forwarded to a
+// long-running WebSocket connection from a local agent on the
+// user's machine (see ./agentBridge.ts). When the flag is off, the
+// cloud mcp-server runs /dev-server/* handlers locally (the dev
+// mode, where the user's mcp-server has the filesystem access).
+//
+// The preHandler short-circuits the route handler when the bridge
+// is engaged; without it, the routes run as they always have.
+app.addHook("preHandler", async (req, reply) => {
+  const url = req.url ?? "";
+  // Match the /dev-server/* prefix — that's the only surface the
+  // bridge owns. /verify, /secrets, /playwright, /tools, /evidence
+  // all stay cloud-local.
+  if (!url.startsWith("/dev-server")) return;
+  if (!process.env.AGENT_BRIDGE_ENABLED) return;
+  await forwardToAgent(req, reply);
+});
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Health
 // ────────────────────────────────────────────────────────────────────────────
 
 app.get("/health", async () => ({ ok: true, time: new Date().toISOString() }));
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Local-agent bridge — opt-in.
+//
+//  WebSocket endpoint that a local `agent/agent.mjs` script on the
+//  user's machine opens. Once connected, /dev-server/* requests are
+//  forwarded here and the agent proxies them to a local mcp-server
+//  that has access to the user's filesystem.
+//
+//  Set AGENT_BRIDGE_ENABLED=1 in the cloud mcp-server's env to
+//  engage the bridge. Without it, /dev-server/* routes run locally
+//  in the cloud mcp-server (the dev case).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Register the bridge under BOTH the proxied path (`/dev-server/_agent*`
+// — what vite/prod-backend forward after stripping `/api`) and the
+// direct path (`/_agent*` — for unit tests + direct curl access). They
+// route to the same handler so a single agent can be discovered either
+// way. Order matters: the more specific path first.
+app.get("/dev-server/_agent/status", async () => getAgentBridgeStatus());
+app.get("/_agent/status", async () => getAgentBridgeStatus());
+
+app.get("/dev-server/_agent", { websocket: true }, (socket, _req) =>
+  installAgentBridgeHandlers(socket),
+);
+app.get("/_agent", { websocket: true }, (socket /* SocketStream */, _req) => {
+  // Handshake — the first frame MUST be { type: "hello", token }.
+  // If AGENT_BRIDGE_ENABLED is off we still accept the connection
+  // so the agent can learn its status, but every forwarded request
+  // will 503 because forwardToAgent short-circuits on the flag.
+  installAgentBridgeHandlers(socket);
+  // No explicit hello_ack here — handleFrame sends it after parsing
+  // the first frame. The agent's hello timeout protects against
+  // silent dead sockets.
+});
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Test connection — quick one-shot probe.
