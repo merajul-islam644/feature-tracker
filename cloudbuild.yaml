@@ -36,6 +36,13 @@
 
 # Top-level substitutions. Defaults fill in only when the trigger doesn't
 # pass a value of its own.
+#
+# Per-env wiring — empty defaults below let the build complete even when
+# the corresponding Block-portal trigger substitution isn't set yet. The
+# deployed SPA then returns 503 from the affected /api/* route until
+# someone sets the substitution in the Block portal (Build → Trigger →
+# Substitutions) and re-deploys. Setting values here is equivalent to
+# setting them in the portal — the portal wins on deploy.
 substitutions:
   _VITE_BLOCKS_OIDC_SCOPE: "openid profile"
   _REGION: "us-central1"
@@ -43,6 +50,9 @@ substitutions:
 
 # Top-level images — Cloud Build pushes these after the build succeeds.
 # The tag uses branch + short SHA + build id so every build is unique.
+# Single image: the frontend SPA (feature-tracker) now also bundles the
+# mcp-server (single-container architecture). prod-backend.mjs spawns
+# mcp-server as a child process at startup.
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/feature-tracker:${BRANCH_NAME##*/}-${SHORT_SHA}-${BUILD_ID}"
 
@@ -54,10 +64,18 @@ options:
 
 steps:
   # ── 1. install ──────────────────────────────────────────────────────────
+  # Single container → two `npm ci` runs: frontend + mcp-server. The
+  # Dockerfile copies mcp-server's node_modules from the deps cache, so
+  # the image-mcp step is gone (mcp-server is built INTO the same
+  # image). Both lockfiles are committed, so the build is reproducible.
   - id: install
     name: gcr.io/cloud-builders/npm
-    entrypoint: npm
-    args: ["ci"]
+    entrypoint: sh
+    args:
+      - "-c"
+      - |
+        npm ci
+        cd mcp-server && npm ci
     dir: "."
 
   # ── 2. typecheck ────────────────────────────────────────────────────────
@@ -86,11 +104,11 @@ steps:
       - "VITE_BLOCKS_APP_DOMAIN=${_VITE_BLOCKS_APP_DOMAIN}"
     waitFor: ["typecheck"]
 
-  # ── 4. build the container image ────────────────────────────────────────
-  # The Dockerfile is multi-stage (deps → build → nginx runtime); passing
-  # the same VITE_BLOCKS_* values as --build-arg means the image's nginx
-  # stage serves a bundle that already has them inlined. No rebuild is
-  # needed at image-run time.
+  # ── 4. build the SPA container image ────────────────────────────────────
+  # The Dockerfile is multi-stage (deps → build → runtime). prod-backend.mjs
+  # spawns mcp-server as a child process at startup, so the runtime image
+  # contains both. No mcp-server-specific build args — its only env
+  # requirement (MCP_PORT=8787) is hardcoded in the spawn block.
   - id: image
     name: gcr.io/cloud-builders/docker
     args:
@@ -110,10 +128,12 @@ steps:
   # ── 5. push to Artifact Registry ─────────────────────────────────────────
   # Implicit: declared in `images:` at the top of this file.
 
-  # ── 6. optional Cloud Run deploy ─────────────────────────────────────────
+  # ── 6. optional Cloud Run deploy ────────────────────────────────────────
   # Runs only when the trigger passes a _SERVICE substitution. Same
   # pipeline serves both "build image only" (omitting _SERVICE) and
-  # "build + deploy" workflows without duplicating config.
+  # "build + deploy" workflows without duplicating config. The single
+  # deployed service runs BOTH prod-backend.mjs and the mcp-server
+  # child process.
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: sh
