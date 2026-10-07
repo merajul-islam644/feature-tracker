@@ -54,6 +54,15 @@ import { TerminalPanel } from "./TerminalPanel";
 import { TerminalTabs } from "./TerminalTabs";
 import { SearchPanel } from "./SearchPanel";
 import {
+  BUILTIN_ITEMS,
+  SidebarActivityBar,
+  resolveLucideIcon,
+  type ActivityBarItem,
+} from "./SidebarActivityBar";
+import { ExtensionsManagerPanel } from "./ExtensionsManagerPanel";
+import { ExtensionIframeView } from "./ExtensionIframeView";
+import { useInstalledExtensions } from "@/contexts/ExtensionsContext";
+import {
   ExternalChangeDialog,
   UnsavedConfirmDialog,
 } from "./WorkspaceDialogs";
@@ -74,6 +83,12 @@ import { EditorView } from "@codemirror/view";
 import { cn } from "@/lib/utils";
 import { devServerApi } from "@/services/devServerApi";
 import type { TerminalInstance } from "@/types/dev-server";
+import {
+  loadWorkspaceTabs,
+  saveWorkspaceTabs,
+  loadWorkspaceFullscreen,
+  saveWorkspaceFullscreen,
+} from "@/lib/blocks/devServerStorage";
 
 // Debounce window for autosave. Small enough that the dot indicator
 // barely registers; long enough to coalesce a stream of keystrokes
@@ -169,6 +184,116 @@ export function WorkspacePage() {
   const [openPaths, setOpenPaths] = useState<string[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
   const [tabContent, setTabContent] = useState<Map<string, string>>(new Map());
+  // The folder the user currently has open. Read off the dev-server
+  // context — `null` when no folder is picked. We use it as the
+  // scoping segment of the localStorage key for the tab persistence
+  // effects below, so a switch between folders within the same
+  // project+env swaps the tab set instead of bleeding one folder's
+  // paths into another.
+  const folderPath = workspaceRoot?.path ?? null;
+
+  // Load tabs from localStorage when (workspace identity + folder)
+  // combo changes. On a fresh load this restores the open files + the
+  // active tab so a refresh (or a browser close+reopen) returns the
+  // editor to the exact view the user left. On a folder switch the
+  // new folder loads its own tab set; closing the folder resets to
+  // empty. We track the key we've seen so subsequent renders with the
+  // same folder don't clobber the user's in-progress edits.
+  const tabsLoadKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = [
+      workspace?.userId ?? "",
+      workspace?.projectId ?? "",
+      workspace?.envSlug ?? "",
+      folderPath ?? "",
+    ].join("|");
+    if (key === tabsLoadKeyRef.current) return;
+    tabsLoadKeyRef.current = key;
+    if (
+      !workspace?.userId ||
+      !workspace?.projectId ||
+      !workspace?.envSlug ||
+      !folderPath
+    ) {
+      setOpenPaths([]);
+      setActivePath(null);
+      setTabContent(new Map());
+      return;
+    }
+    const loaded = loadWorkspaceTabs(
+      workspace.userId,
+      workspace.projectId,
+      workspace.envSlug,
+      folderPath,
+    );
+    const restoredPaths = loaded?.openPaths ?? [];
+    setOpenPaths(restoredPaths);
+    setActivePath(loaded?.activePath ?? null);
+    // tabContent is in-memory only — re-fetch on demand. Wiping it on
+    // a folder switch is the cheapest way to make sure stale cache
+    // entries from a previous folder don't leak in.
+    setTabContent(new Map());
+    // Pre-fetch every restored tab's content so the user sees the
+    // file body the moment the editor mounts — without this, opening
+    // the page after a refresh would leave every tab visually empty
+    // until the user clicked each one to trigger `openFile`.
+    if (restoredPaths.length > 0) {
+      void Promise.all(
+        restoredPaths.map(async (path) => {
+          try {
+            const content = await readUserFile(path);
+            setTabContent((prev) => {
+              const next = new Map(prev);
+              next.set(path, content ?? "");
+              return next;
+            });
+          } catch (err) {
+            // Stale tabs (file deleted on disk between visits) just
+            // toast and skip — the tab stays open but the editor
+            // shows nothing, and the user can close it.
+            toast.error(err instanceof Error ? err.message : String(err));
+          }
+        }),
+      );
+    }
+  }, [
+    workspace?.userId,
+    workspace?.projectId,
+    workspace?.envSlug,
+    folderPath,
+    readUserFile,
+  ]);
+
+  // Persist on every change while a folder is open. Mirrors the
+  // `terminals` save effect below — same shape, same `(user, project,
+  // env, folder)` scope, different model. `saveWorkspaceTabs` strips
+  // empty state so a long-lived session doesn't accumulate stale
+  // rows for one-off folders.
+  useEffect(() => {
+    if (
+      !workspace?.userId ||
+      !workspace?.projectId ||
+      !workspace?.envSlug ||
+      !folderPath
+    ) {
+      return;
+    }
+    saveWorkspaceTabs(
+      workspace.userId,
+      workspace.projectId,
+      workspace.envSlug,
+      folderPath,
+      { openPaths, activePath },
+    );
+  }, [
+    openPaths,
+    activePath,
+    workspace?.userId,
+    workspace?.projectId,
+    workspace?.envSlug,
+    folderPath,
+  ]);
+
   // External-change prompt — opened when the watcher fires a `change`
   // for a path that's currently open as a tab. Single-slot: only one
   // prompt at a time; if a second file changes while the first is
@@ -336,11 +461,71 @@ export function WorkspacePage() {
   // and renders just the editor column (breadcrumb + tabs + editor)
   // in a fixed-position overlay covering the entire viewport. Toggled
   // by the zoom button next to "Open folder" in the page header.
-  // Not persisted — a refresh always returns to the normal layout.
+  //
+  // Persisted per `(user, project, env)` — a refresh (or browser
+  // close+reopen) restores the zoomed view so the user doesn't have
+  // to re-click after every reload. Folder-independent: the zoom
+  // preference is page-level, not file-level.
+  // We can't read `workspace` synchronously on first render — the
+  // `useDevServer` provider hydrates async, so a lazy `useState`
+  // initializer would always see `workspace === null` and pin
+  // `editorFullscreen` to `false`. That would clobber a stored
+  // `true` once the persist effect fired (because
+  // `saveWorkspaceFullscreen` interprets `false` as "remove the
+  // row"). Instead we start at `false` and load via an effect that
+  // keys on the workspace identity.
   const [editorFullscreen, setEditorFullscreen] = useState(false);
+  const fullscreenLoadKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      !workspace?.userId ||
+      !workspace?.projectId ||
+      !workspace?.envSlug
+    ) {
+      return;
+    }
+    const key = `${workspace.userId}|${workspace.projectId}|${workspace.envSlug}`;
+    if (key === fullscreenLoadKeyRef.current) return;
+    fullscreenLoadKeyRef.current = key;
+    setEditorFullscreen(
+      loadWorkspaceFullscreen(
+        workspace.userId,
+        workspace.projectId,
+        workspace.envSlug,
+      ),
+    );
+  }, [workspace?.userId, workspace?.projectId, workspace?.envSlug]);
   const toggleEditorFullscreen = useCallback(() => {
     setEditorFullscreen((v) => !v);
   }, []);
+
+  // Mirror the toggle to localStorage. Same `lattice.mirror.*.v1`
+  // family as the tabs row above; `saveWorkspaceFullscreen` strips
+  // the key when the flag is `false` so the default state doesn't
+  // litter DevTools. The key guard mirrors the load effect so we
+  // don't write a stale pre-load `false` over a stored `true`.
+  useEffect(() => {
+    if (
+      !workspace?.userId ||
+      !workspace?.projectId ||
+      !workspace?.envSlug
+    ) {
+      return;
+    }
+    const key = `${workspace.userId}|${workspace.projectId}|${workspace.envSlug}`;
+    if (key !== fullscreenLoadKeyRef.current) return;
+    saveWorkspaceFullscreen(
+      workspace.userId,
+      workspace.projectId,
+      workspace.envSlug,
+      editorFullscreen,
+    );
+  }, [
+    editorFullscreen,
+    workspace?.userId,
+    workspace?.projectId,
+    workspace?.envSlug,
+  ]);
 
   // Esc exits fullscreen — small QoL match for the visual cue (the
   // exit button is the same lucide `ZoomOut` icon, but the keyboard
@@ -476,6 +661,45 @@ export function WorkspacePage() {
   // `searchOpen` toggled by the header button OR Cmd/Ctrl+Shift+F.
   // `onOpenResult` opens the file in the editor + jumps the cursor.
   const [searchOpen, setSearchOpen] = useState(false);
+
+  // ─── Sidebar activity bar tab ──────────────────────────────────
+  // Drives which sidebar panel renders to the left of the editor:
+  // built-in tabs ("explorer", "extensions") + per enabled
+  // extension-contributed panels (`ext:<extensionId>:<panelId>`).
+  // Initial value `true` so Explorer still opens by default; in
+  // fullscreen we keep the same default.
+  const [sidebarTab, setSidebarTab] = useState<string>("explorer");
+  const installedExtensions = useInstalledExtensions();
+  const activityBarItems = useMemo<ActivityBarItem[]>(() => {
+    const items: ActivityBarItem[] = [...BUILTIN_ITEMS];
+    for (const ext of installedExtensions) {
+      if (!ext.enabled) continue;
+      const panels = ext.manifest.contributes?.panels ?? [];
+      for (const panel of panels) {
+        items.push({
+          id: `ext:${ext.id}:${panel.id}`,
+          label: panel.title,
+          icon: resolveLucideIcon(panel.icon),
+        });
+      }
+    }
+    return items;
+  }, [installedExtensions]);
+
+  // Listen for navigation requests fired by the extension iframe via
+  // postMessage (`ext:navigate` → custom event). v1 only switches the
+  // sidebar tab; future versions can route to /chat, /notepad, etc.
+  useEffect(() => {
+    function onNavigate(e: Event) {
+      const detail = (e as CustomEvent<{ extensionId: string; panelId: string }>).detail;
+      if (!detail) return;
+      setSidebarTab(`ext:${detail.extensionId}:${detail.panelId}`);
+    }
+    window.addEventListener("lattice-ext:navigate", onNavigate);
+    return () => {
+      window.removeEventListener("lattice-ext:navigate", onNavigate);
+    };
+  }, []);
   const openSearchResult = useCallback(
     async (path: string, line: number, column: number) => {
       await openFile(path);
@@ -1306,7 +1530,11 @@ export function WorkspacePage() {
           </div>
         </header>
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <ExplorerSidebar
+          <WorkspaceSidebar
+            sidebarTab={sidebarTab}
+            setSidebarTab={setSidebarTab}
+            activityBarItems={activityBarItems}
+            installedExtensions={installedExtensions}
             tree={tree ?? null}
             expandedFolders={expandedFolders}
             activePath={activePath}
@@ -1591,7 +1819,11 @@ export function WorkspacePage() {
       <div className="-mx-4 sm:-mx-6 flex h-[calc(100vh-220px)] min-h-[520px] flex-col overflow-hidden rounded-lg border border-border bg-card">
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1">
-            <ExplorerSidebar
+            <WorkspaceSidebar
+              sidebarTab={sidebarTab}
+              setSidebarTab={setSidebarTab}
+              activityBarItems={activityBarItems}
+              installedExtensions={installedExtensions}
               tree={tree ?? null}
               expandedFolders={expandedFolders}
               activePath={activePath}
@@ -1780,4 +2012,187 @@ export function WorkspacePage() {
       />
     </div>
   );
+}
+
+// ─── WorkspaceSidebar ──────────────────────────────────────────────────
+//
+// VS Code-style sidebar: a vertical activity bar (icon strip) plus the
+// currently-selected panel (Explorer / Extensions / extension-contributed
+// panel). Both render branches of `WorkspacePage` use this so the
+// sidebar stays in sync regardless of fullscreen mode.
+//
+// `sidebarTab` ids:
+//   • `"explorer"`    → <ExplorerSidebar />
+//   • `"extensions"`  → <ExtensionsManagerPanel />
+//   • `"ext:<extId>:<panelId>"` → <ExtensionIframeView />
+//
+// Anything else falls back to `"explorer"` (covers the case where an
+// extension was disabled while its tab was active).
+
+interface WorkspaceSidebarProps {
+  sidebarTab: string;
+  setSidebarTab: (id: string) => void;
+  activityBarItems: ActivityBarItem[];
+  installedExtensions: import("@/lib/extensions/types").InstalledExtension[];
+  // All the props <ExplorerSidebar> needs (lifted from WorkspacePage).
+  tree: ReturnType<typeof useDevServer>["tree"];
+  expandedFolders: Set<string>;
+  activePath: string | null;
+  renamingPath: string | null;
+  renameError: string | null;
+  creatingSubfolderPath: string | null;
+  subfolderCreateError: string | null;
+  creatingFilePath: string | null;
+  createFileError: string | null;
+  confirmingDeletePath: string | null;
+  onToggleOpen: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onStartCreateRootFile: () => void;
+  onStartCreateRootFolder: () => void;
+  onCommitCreateRootFile: (name: string) => void;
+  onCancelCreateRootFile: () => void;
+  onCommitCreateRootFolder: (name: string) => void;
+  onCancelCreateRootFolder: () => void;
+  onStartRenameFile: (path: string) => void;
+  onCancelRename: () => void;
+  onCommitRenameFile: (path: string, newName: string) => void;
+  onStartCreateSubfolder: (path: string) => void;
+  onCommitCreateSubfolder: (parent: string, name: string) => void;
+  onCancelCreateSubfolder: () => void;
+  onStartCreateFileInFolder: (path: string) => void;
+  onCommitCreateFileInFolder: (parent: string, name: string) => void;
+  onCancelCreateFile: () => void;
+  onStartDelete: (path: string) => void;
+  onCancelDelete: () => void;
+  onCommitDelete: (path: string) => void;
+  onRefresh: () => void;
+  rootFolderName: string | null;
+  treeLoading: boolean;
+}
+
+function WorkspaceSidebar(props: WorkspaceSidebarProps) {
+  const {
+    sidebarTab,
+    setSidebarTab,
+    activityBarItems,
+    installedExtensions,
+    tree,
+    expandedFolders,
+    activePath,
+    renamingPath,
+    renameError,
+    creatingSubfolderPath,
+    subfolderCreateError,
+    creatingFilePath,
+    createFileError,
+    confirmingDeletePath,
+    onToggleOpen,
+    onOpenFile,
+    onStartCreateRootFile,
+    onStartCreateRootFolder,
+    onCommitCreateRootFile,
+    onCancelCreateRootFile,
+    onCommitCreateRootFolder,
+    onCancelCreateRootFolder,
+    onStartRenameFile,
+    onCancelRename,
+    onCommitRenameFile,
+    onStartCreateSubfolder,
+    onCommitCreateSubfolder,
+    onCancelCreateSubfolder,
+    onStartCreateFileInFolder,
+    onCommitCreateFileInFolder,
+    onCancelCreateFile,
+    onStartDelete,
+    onCancelDelete,
+    onCommitDelete,
+    onRefresh,
+    rootFolderName,
+    treeLoading,
+  } = props;
+
+  // Resolve the active panel content. If the tab references an
+  // extension that's no longer enabled, fall back to Explorer.
+  let effectiveTab = sidebarTab;
+  if (sidebarTab.startsWith("ext:")) {
+    const [, extId, panelId] = sidebarTab.split(":");
+    const ext = installedExtensions.find((e) => e.id === extId);
+    if (!ext || !ext.enabled) {
+      effectiveTab = "explorer";
+    } else if (
+      panelId &&
+      !ext.manifest.contributes?.panels?.some((p) => p.id === panelId)
+    ) {
+      effectiveTab = "explorer";
+    }
+  }
+
+  return (
+    <aside className="flex min-h-0">
+      <SidebarActivityBar
+        items={activityBarItems}
+        activeId={effectiveTab}
+        onSelect={setSidebarTab}
+      />
+      <div className="flex w-64 shrink-0 flex-col border-r border-border bg-muted/30">
+        {effectiveTab === "explorer" && (
+          <ExplorerSidebar
+            tree={tree}
+            expandedFolders={expandedFolders}
+            activePath={activePath}
+            renamingPath={renamingPath}
+            renameError={renameError}
+            creatingSubfolderPath={creatingSubfolderPath}
+            subfolderCreateError={subfolderCreateError}
+            creatingFilePath={creatingFilePath}
+            createFileError={createFileError}
+            confirmingDeletePath={confirmingDeletePath}
+            onToggleOpen={onToggleOpen}
+            onOpenFile={onOpenFile}
+            onStartCreateRootFile={onStartCreateRootFile}
+            onStartCreateRootFolder={onStartCreateRootFolder}
+            onCommitCreateRootFile={onCommitCreateRootFile}
+            onCancelCreateRootFile={onCancelCreateRootFile}
+            onCommitCreateRootFolder={onCommitCreateRootFolder}
+            onCancelCreateRootFolder={onCancelCreateRootFolder}
+            onStartRenameFile={onStartRenameFile}
+            onCancelRename={onCancelRename}
+            onCommitRenameFile={onCommitRenameFile}
+            onStartCreateSubfolder={onStartCreateSubfolder}
+            onCommitCreateSubfolder={onCommitCreateSubfolder}
+            onCancelCreateSubfolder={onCancelCreateSubfolder}
+            onStartCreateFileInFolder={onStartCreateFileInFolder}
+            onCommitCreateFileInFolder={onCommitCreateFileInFolder}
+            onCancelCreateFile={onCancelCreateFile}
+            onStartDelete={onStartDelete}
+            onCancelDelete={onCancelDelete}
+            onCommitDelete={onCommitDelete}
+            onRefresh={onRefresh}
+            rootFolderName={rootFolderName}
+            treeLoading={treeLoading}
+          />
+        )}
+        {effectiveTab === "extensions" && <ExtensionsManagerPanel />}
+        {effectiveTab.startsWith("ext:") && (
+          <ExtensionPanelContent
+            sidebarTab={effectiveTab}
+            installedExtensions={installedExtensions}
+          />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function ExtensionPanelContent({
+  sidebarTab,
+  installedExtensions,
+}: {
+  sidebarTab: string;
+  installedExtensions: import("@/lib/extensions/types").InstalledExtension[];
+}) {
+  const [, extId, panelId] = sidebarTab.split(":");
+  const ext = installedExtensions.find((e) => e.id === extId);
+  if (!ext) return null;
+  return <ExtensionIframeView extension={ext} panelId={panelId} />;
 }

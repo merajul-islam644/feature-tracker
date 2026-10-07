@@ -164,3 +164,202 @@ export function saveWorkspaceRoot(
   }
   writeJSON(key, root);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+//  Workspace tabs — the editor's open file list + active tab.
+//
+//  Scoped per `(user, project, env, folder)` so:
+//
+//  • Page reload / browser close: tabs come back exactly as they were
+//    (the user's stated need — open files stay selected even after
+//    closing the browser).
+//  • Folder switch (within the same project+env): the new folder
+//    starts with its own (separate) tab set. The previous folder's
+//    tabs are preserved under that folder's key — close A, switch
+//    to B, switch back to A, and A's tabs return.
+//  • Project / env switch: a different key, so a different page
+//    instance gets a clean slate.
+//
+//  Same `lattice.mirror.*.v1` family as the workspace id and
+//  workspaceRoot above. The folder segment is a short base36 hash so
+//  Windows backslashes / spaces don't pollute the key.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface WorkspaceTabs {
+  openPaths: string[];
+  activePath: string | null;
+}
+
+// FNV-1a 32-bit hash. Stable across builds, collision-resistant for
+// path strings, short in base36 (~7 chars). Same choice the avatar
+// palette in ExtensionsManagerPanel.tsx uses for distribution; here
+// we want uniqueness, not distribution.
+function hashFolderPath(p: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < p.length; i++) {
+    h ^= p.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function workspaceTabsMirrorKey(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+  folderPath: string,
+): string {
+  return `lattice.mirror.workspaceTabs.${userId}.${projectId}.${envSlug}.${hashFolderPath(folderPath)}.v1`;
+}
+
+function asWorkspaceTabs(value: unknown): WorkspaceTabs | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.openPaths)) return null;
+  // Drop non-string entries defensively — a corrupted mirror should
+  // never crash the editor.
+  const openPaths = v.openPaths.filter((p): p is string => typeof p === "string");
+  const rawActive = v.activePath;
+  const activePath =
+    typeof rawActive === "string" && openPaths.includes(rawActive)
+      ? rawActive
+      : null;
+  return { openPaths, activePath };
+}
+
+/**
+ * Synchronous read. Returns `null` when no tabs have ever been opened in
+ * this folder (or the localStorage row was corrupted).
+ */
+export function loadWorkspaceTabs(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+  folderPath: string,
+): WorkspaceTabs | null {
+  const key = workspaceTabsMirrorKey(userId, projectId, envSlug, folderPath);
+  return asWorkspaceTabs(readJSON(key));
+}
+
+export function saveWorkspaceTabs(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+  folderPath: string,
+  tabs: WorkspaceTabs | null,
+): void {
+  const key = workspaceTabsMirrorKey(userId, projectId, envSlug, folderPath);
+  // Treat empty state as "no tabs" — remove the key so a long-lived
+  // session doesn't accumulate stale rows for folders the user
+  // visited once and abandoned.
+  if (
+    tabs === null ||
+    (tabs.openPaths.length === 0 && tabs.activePath === null)
+  ) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Private mode — best effort.
+    }
+    return;
+  }
+  writeJSON(key, tabs);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Editor zoom — whether the editor column is in fullscreen
+//  ("maximized") mode that hides the IDE chrome (page header, Explorer
+//  sidebar, status bar, terminal) and renders as a viewport overlay.
+//  Scoped per `(user, project, env)` — folder-independent because the
+//  zoom toggle is a per-page preference, not a per-folder one.
+// ─────────────────────────────────────────────────────────────────────
+
+function workspaceFullscreenMirrorKey(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+): string {
+  return `lattice.mirror.workspaceFullscreen.${userId}.${projectId}.${envSlug}.v1`;
+}
+
+/** Synchronous read. Returns `false` when the row is unset or
+ *  corrupted. */
+export function loadWorkspaceFullscreen(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+): boolean {
+  const raw = readJSON(workspaceFullscreenMirrorKey(userId, projectId, envSlug));
+  return raw === true;
+}
+
+export function saveWorkspaceFullscreen(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+  fullscreen: boolean,
+): void {
+  const key = workspaceFullscreenMirrorKey(userId, projectId, envSlug);
+  if (!fullscreen) {
+    // Default state — strip the row so DevTools stays clean.
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Private mode — best effort.
+    }
+    return;
+  }
+  writeJSON(key, true);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Terminal panel collapsed state — same (user, project, env) scope
+//  as `workspaceFullscreen` above. The terminal panel is a per-page
+//  chrome affordance, not a per-folder one, so the folder dimension
+//  is intentionally absent. Default state is collapsed (`true`) — the
+//  user clicks the chevron to expand; we only persist when they
+//  manually expand it so the row is gone for first-time visitors.
+// ─────────────────────────────────────────────────────────────────────
+
+function workspaceTerminalCollapsedMirrorKey(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+): string {
+  return `lattice.mirror.workspaceTerminalCollapsed.${userId}.${projectId}.${envSlug}.v1`;
+}
+
+/** Synchronous read. Returns `true` (= collapsed) when the row
+ *  is unset or corrupted (default state), `false` (= expanded)
+ *  when the user has clicked the chevron at least once. */
+export function loadWorkspaceTerminalCollapsed(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+): boolean {
+  const raw = readJSON(workspaceTerminalCollapsedMirrorKey(userId, projectId, envSlug));
+  // We only persist `false` on expand (the save helper strips the
+  // row on collapse to keep DevTools clean). So `false` is the only
+  // meaningful "expanded" record — anything else (missing,
+  // malformed, accidentally written `true`) → default collapsed.
+  return raw !== false;
+}
+
+export function saveWorkspaceTerminalCollapsed(
+  userId: string,
+  projectId: string,
+  envSlug: string,
+  collapsed: boolean,
+): void {
+  const key = workspaceTerminalCollapsedMirrorKey(userId, projectId, envSlug);
+  if (collapsed) {
+    // Default state — strip the row so DevTools stays clean.
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Private mode — best effort.
+    }
+    return;
+  }
+  writeJSON(key, false);
+}
