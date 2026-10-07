@@ -115,3 +115,132 @@ export interface FileNode {
   kind: "file" | "dir";
   children?: FileNode[];
 }
+
+// ─────────────────────────────────────────────────────────────────────
+//  Interactive shell — type-only surface for the WorkspacePage
+//  terminal panel. The actual socket is owned by `TerminalPanel`
+//  (so it can call xterm.write directly); the context exposes only
+//  the data + commands the panel needs.
+//
+//  One PTY per open terminal panel. Closing the panel or unmounting
+//  WorkspacePage tears down the WebSocket and SIGTERMs the child.
+// ─────────────────────────────────────────────────────────────────────
+
+export type TerminalPhase =
+  | "idle" // not connected yet
+  | "connecting" // WS upgrade in flight
+  | "connected" // PTY spawned; xterm is live
+  /** Transient WS drop — PTY is still alive on mcp-server, auto-
+   *  reconnect in flight. No `[Process exited]` banner; the next
+   *  `started` frame flips back to `connected`. */
+  | "reconnecting"
+  | "exited"; // shell exited; shows last exit code
+
+export interface TerminalStatus {
+  phase: TerminalPhase;
+  /** Filled in once the server sends `{type: "started"}`. */
+  shell?: string;
+  cwd?: string;
+  /** Last exit code, set when `phase === "exited"`. */
+  exitCode?: number | null;
+  /** Human-readable reason if the connection never opened
+   *  (network error, spawn failure, etc.). */
+  error?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  File watcher — streamed from mcp-server via the
+//  `/dev-server/:wsId/watch?root=…` SSE endpoint. Reflects
+//  chokidar's add/change/unlink/addDir/unlinkDir surface verbatim
+//  so consumers can drive tree UIs directly off `kind`. `absPath`
+//  is included for callers that want to re-stat the file; the
+//  frontend mostly uses `path` (forward-slash, root-relative).
+// ─────────────────────────────────────────────────────────────────────
+
+export type WatchEventKind =
+  | "add"
+  | "change"
+  | "unlink"
+  | "addDir"
+  | "unlinkDir";
+
+export interface WatchEvent {
+  kind: WatchEventKind;
+  /** Forward-slash path relative to the watched root. */
+  path: string;
+  /** Absolute on-disk path — handy when re-stat-ing. */
+  absPath: string;
+  /** `Date.now()` at emit. */
+  ts: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Project-wide search — POST /dev-server/:wsId/search. Mirrors
+//  ripgrep's `{path, line, column}` triple so the frontend can
+//  render "Open File" links and navigate to the match position.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface SearchResult {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+  count: number;
+  /** True when the route hit `maxResults` and the UI should show
+   *  "refine your query" instead of "showing all matches". */
+  truncated: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Terminal shell picker — the dropdown menu next to the terminal
+//  panel header lets the user switch between PowerShell 7, Git
+//  Bash, cmd.exe, etc. The catalogue lives server-side because
+//  `whichSync` needs `process.env.PATH` (which the browser can't
+//  see) — the route returns one descriptor per known shell with
+//  `available` flagging whether the binary was found.
+//
+//  `id` is the stable identifier sent over the WS `shellId`
+//  query param on reconnect. Don't rename — old panels keep
+//  working as long as the catalog stays additive.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface ShellDescriptor {
+  /** Stable id — what we send in `?shellId=…`. */
+  id: string;
+  /** Same as `id`; exposed separately so the route can decode it
+   *  without type-cast acrobatics. */
+  shellId: string;
+  /** User-facing label, e.g. "PowerShell 7" / "Git Bash". */
+  label: string;
+  /** False when the binary isn't on PATH. Dropdown disables
+   *  the entry but keeps it visible so the user knows it exists. */
+  available: boolean;
+  /** Absolute path on disk — handy for a "Git Bash →
+   *  C:\Program Files\Git\bin\bash.exe" hover-tooltip. */
+  resolvedPath: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Terminal instance — one tab in the WorkspacePage terminal panel.
+//  Each instance is a separate PTY keyed by `(workspaceId, cwd, id)`,
+//  so two tabs in the same folder are independent shells (env vars /
+//  cwd / running processes do NOT share).
+//
+//  `id` is generated on `[+]` (`term-<base36 timestamp>`) and persisted
+//  to localStorage so refresh keeps the tab identity. `label` is
+//  what the tab strip renders. `shellId` mirrors the per-tab
+//  `selectedShellId` (separate from the global shell pref).
+// ─────────────────────────────────────────────────────────────────────
+
+export interface TerminalInstance {
+  /** Stable per-tab id — used in PTY key + localStorage scrollback key. */
+  id: string;
+  /** User-visible label, e.g. "Term 1" / "Backend" / "Watch". */
+  label: string;
+  /** Per-tab shell preference; null = use the default shell. */
+  shellId: string | null;
+}

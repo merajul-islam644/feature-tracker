@@ -35,7 +35,10 @@ interface FolderTreeItemProps {
   folder: FileNode;
   depth: number;
   tree: FileNode[];
-  closedPaths: Set<string>;
+  /** Folders the user has expanded. A folder renders its children
+   *  only when its path is in this set. Empty = everything
+   *  collapsed. */
+  expandedFolders: Set<string>;
   activePath: string | null;
   renamingPath: string | null;
   renameError: string | null;
@@ -65,12 +68,23 @@ interface FolderTreeItemProps {
   createFileError: string | null;
 }
 
+// One level of horizontal nesting. Same constant used by FileTreeItem so
+// folder rows and sibling file rows land in the same icon column at
+// every depth. Kept compact (14px) so a 12-deep tree still fits a
+// 240px Explorer pane.
+const INDENT_PX = 14;
+// Hard cap on the depth that contributes to the visual indent — past
+// this we stop adding padding so a very deep folder chain (think
+// `node_modules/.../node_modules/...`) doesn't push the row off the
+// right edge of the pane.
+const MAX_INDENT_DEPTH = 12;
+
 export function FolderTreeItem(props: FolderTreeItemProps) {
   const {
     folder,
     depth,
     tree,
-    closedPaths,
+    expandedFolders,
     activePath,
     renamingPath,
     renameError,
@@ -81,7 +95,8 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
     createFileError,
   } = props;
 
-  const isClosed = closedPaths.has(folder.path);
+  const isOpen = expandedFolders.has(folder.path);
+  const isClosed = !isOpen;
   const subfolders = (folder.children ?? []).filter((c) => c.kind === "dir");
   const inside = (folder.children ?? []).filter((c) => c.kind === "file");
   const directChildCount = subfolders.length + inside.length;
@@ -96,20 +111,24 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
       role="treeitem"
       aria-expanded={!isClosed}
       data-path={folder.path}
-      style={{
-        // Cap the indent so a deeply-nested folder chain can't push
-        // the row off the right edge on narrow viewports. 8 levels
-        // × 20px = 160px, comfortably under the typical 240-280px
-        // Explorer pane.
-        paddingLeft: Math.min(depth, 8) * 20,
-      }}
     >
       <div
         onClick={() => props.onToggleOpen(folder.path)}
         className={cn(
-          "group flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-muted",
+          "group relative flex cursor-pointer items-center gap-1 rounded py-1 pl-1.5 pr-1.5 text-xs hover:bg-muted",
+          depth > 0 &&
+            "before:absolute before:top-0 before:h-full before:border-l before:border-border",
           "text-foreground/80 hover:text-foreground",
         )}
+        style={
+          depth > 0
+            ? {
+                paddingLeft: Math.min(depth, MAX_INDENT_DEPTH) * INDENT_PX,
+                "--guide-left": `${Math.min(depth, MAX_INDENT_DEPTH) * INDENT_PX - 7}px`,
+                before: { left: `var(--guide-left)` },
+              } as React.CSSProperties
+            : undefined
+        }
       >
         <button
           type="button"
@@ -202,7 +221,10 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
       </div>
 
       {isCreatingSubfolder && (
-        <div className="pl-5 pr-2 py-1">
+        <div
+          className="pr-2 py-1"
+          style={{ paddingLeft: Math.min(depth + 1, MAX_INDENT_DEPTH) * INDENT_PX + 4 }}
+        >
           <InlineFolderInput
             initialValue=""
             placeholder="Subfolder name"
@@ -227,7 +249,10 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
       )}
 
       {isConfirmingDelete && (
-        <div className="ml-5 mt-1 rounded border border-destructive/40 bg-destructive/5 p-2 text-[11px]">
+        <div
+          className="mt-1 rounded border border-destructive/40 bg-destructive/5 p-2 text-[11px]"
+          style={{ marginLeft: Math.min(depth + 1, MAX_INDENT_DEPTH) * INDENT_PX + 4 }}
+        >
           <p className="mb-1.5 text-foreground">
             Delete folder <b>{folder.name}</b>?
             {subtree.total > 0 && (
@@ -271,8 +296,8 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
             inside.length === 0 &&
             !isCreatingFile && (
               <li
-                style={{ paddingLeft: 20 }}
-                className="px-2 py-1 text-[10px] italic text-muted-foreground"
+                style={{ paddingLeft: Math.min(depth + 1, MAX_INDENT_DEPTH) * INDENT_PX + 4 }}
+                className="py-1 text-[10px] italic text-muted-foreground"
               >
                 empty
               </li>
@@ -282,6 +307,7 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
               key={f.path}
               filePath={f.path}
               fileName={f.name}
+              depth={depth + 1}
               isActive={activePath === f.path}
               isRenaming={renamingPath === f.path}
               renameError={renamingPath === f.path ? renameError : null}
@@ -294,7 +320,7 @@ export function FolderTreeItem(props: FolderTreeItemProps) {
           ))}
           {isCreatingFile && (
             <li
-              style={{ paddingLeft: 20 }}
+              style={{ paddingLeft: Math.min(depth + 1, MAX_INDENT_DEPTH) * INDENT_PX + 4 }}
               className="pr-2 py-1"
               role="treeitem"
               aria-selected="true"

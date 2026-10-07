@@ -47,6 +47,9 @@ import type {
   DevServerWorkspace,
   FileNode,
   Problem,
+  SearchResponse,
+  WatchEvent,
+  WatchEventKind,
   WorkspaceRoot,
 } from "@/types/dev-server";
 import { toast } from "sonner";
@@ -148,6 +151,44 @@ interface DevServerContextValue {
   setWorkspaceRoot: (path: string) => Promise<void>;
   /** Forget the picked folder. Clears localStorage + state. */
   closeFolder: () => void;
+
+  // ─── File watcher — external-edit detection. ─────────────────────────────
+  /**
+   * Subscribe to chokidar events from the picked root. Fires once per
+   * add / change / unlink / addDir / unlinkDir. The context owns the
+   * underlying SSE tail (one chokidar handle per workspaceRoot) and
+   * fans events out to every subscriber.
+   *
+   * Events for paths the editor JUST wrote (within the last 3s) are
+   * filtered out — the save → disk → chokidar round-trip would
+   * otherwise echo back as "external change" and trip the
+   * conflict-detect prompt. The window is intentionally generous
+   * because chokidar's awaitWriteFinish can delay the event by up
+   * to 200ms past the actual write.
+   */
+  subscribeToWatcher: (
+    cb: (event: WatchEvent) => void,
+  ) => () => void;
+  /** True while the SSE tail is healthy. Flips to false after the
+   *  reconnect budget burns (5×; the consumer can use it for a
+   *  "watcher offline" hint in the status bar). */
+  watcherOnline: boolean;
+
+  // ─── Project-wide search — POST /dev-server/:wsId/search. ─────────────
+  /**
+   * Recursive grep over the picked folder. Mirrors ripgrep's
+   * `{path, line, column}` shape so consumers can render results
+   * directly as `(file:line:col)` and navigate on click.
+   */
+  search: (opts: {
+    query: string;
+    caseSensitive?: boolean;
+    wholeWord?: boolean;
+    regex?: boolean;
+    includeGlobs?: string[];
+    excludeGlobs?: string[];
+    maxResults?: number;
+  }) => Promise<SearchResponse>;
 }
 
 const DevServerContext = createContext<DevServerContextValue | null>(null);
@@ -214,6 +255,19 @@ export function DevServerProvider({
 
   const [servers, setServers] = useState<Map<number, DevServerRecord>>(() => new Map());
   const [problems, setProblems] = useState<Problem[]>([]);
+  // ─── File watcher state ────────────────────────────────────────
+  // Fan-out hub — one SSE tail per workspaceRoot, many subscribers.
+  // `watcherOnline` flips false after the reconnect budget burns so
+  // the status bar can render a "watcher offline" hint. `skipChangeFor`
+  // is the just-written filter (path → expiry ts).
+  const [watcherOnline, setWatcherOnline] = useState(false);
+  const watcherListenersRef = useRef<Set<(event: WatchEvent) => void>>(new Set());
+  // Map<path, expiryTs>. Cleared lazily — at lookup time we drop any
+  // entries older than the window. Cap size to avoid a memory leak on
+  // a long-running session that saves many files.
+  const skipChangeForRef = useRef<Map<string, number>>(new Map());
+  const SKIP_WINDOW_MS = 3_000;
+
   // ─── VS Code-style file tree state ─────────────────────────────
   // `null` until the first `refreshTree()` call lands. Cleared when
   // the user closes the folder (or the workspace triple changes). The
@@ -500,6 +554,11 @@ export function DevServerProvider({
                 path: relPath,
                 content: p.content,
               });
+              // Echo-filter: the watcher's "change" event for this
+              // path arrives ~200ms after our write (chokidar's
+              // awaitWriteFinish). Mark the path so the fan-out
+              // doesn't trip the external-change prompt.
+              skipChangeForRef.current.set(relPath, Date.now() + SKIP_WINDOW_MS);
               p.resolve();
             } catch (err) {
               p.reject(err instanceof Error ? err : new Error(String(err)));
@@ -700,6 +759,74 @@ export function DevServerProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceRoot?.path, workspace?.id]);
 
+  // ─── File watcher subscription ──────────────────────────────────
+  // One SSE tail per workspaceRoot, fans out to every subscriber via
+  // `watcherListenersRef`. Reopens on workspaceRoot change; `onGiveUp`
+  // flips `watcherOnline` false so the UI can render a hint.
+  useEffect(() => {
+    if (!workspace || !workspaceRoot) {
+      setWatcherOnline(false);
+      return;
+    }
+    setWatcherOnline(true);
+    const unsub = devServerApi.subscribeWatcher({
+      workspaceId: workspace.id,
+      root: workspaceRoot.path,
+      onEvent: (event) => {
+        // Filter out our own writes. The Map is keyed by path; the
+        // value is the expiry timestamp. We drop expired entries
+        // lazily on every lookup — cheaper than a background sweeper
+        // and bounded by typical editor activity (a few saves per
+        // minute, tops).
+        if (event.kind === "change") {
+          const expiry = skipChangeForRef.current.get(event.path);
+          const now = Date.now();
+          if (expiry && expiry > now) {
+            // Our own write — drop.
+            return;
+          }
+          // Garbage-collect expired entries (cap the sweep cost so
+          // a long-running session with thousands of saves doesn't
+          // slow down every event).
+          if (skipChangeForRef.current.size > 200) {
+            for (const [k, v] of skipChangeForRef.current) {
+              if (v <= now) skipChangeForRef.current.delete(k);
+            }
+          }
+        }
+        // Tree-shape changes (add/unlink/addDir/unlinkDir) imply the
+        // Explorer pane needs to refetch. We don't auto-refresh on
+        // `change` because consumers decide what to do (the editor
+        // checks if the path is open; the Explorer does not care
+        // about content changes).
+        if (event.kind !== "change") {
+          void refreshTree();
+        }
+        // Fan out to subscribers (cheap set copy — listeners get a
+        // defensive clone so a subscriber unmounting mid-fanout
+        // doesn't poison the iteration).
+        for (const cb of Array.from(watcherListenersRef.current)) {
+          try {
+            cb(event);
+          } catch {
+            // Don't let one bad subscriber break the others.
+          }
+        }
+      },
+      onError: () => {
+        // Soft-fail. `onGiveUp` (after 3×) flips the online flag.
+      },
+      onGiveUp: () => {
+        setWatcherOnline(false);
+      },
+    });
+    return () => {
+      unsub();
+      setWatcherOnline(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.id, workspaceRoot?.path]);
+
   // Refresh on tab focus — catches out-of-band edits (user saves
   // the file in their text editor, a watcher fires, etc.). Debounced
   // 1s so a rapid tab-flick doesn't hammer the backend.
@@ -773,6 +900,41 @@ export function DevServerProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, projectId, envSlug]);
 
+  // ─── Imperative surface ─────────────────────────────────────────────
+  const subscribeToWatcher = useCallback((cb: (event: WatchEvent) => void) => {
+    watcherListenersRef.current.add(cb);
+    return () => {
+      watcherListenersRef.current.delete(cb);
+    };
+  }, []);
+
+  const search = useCallback(
+    async (opts: {
+      query: string;
+      caseSensitive?: boolean;
+      wholeWord?: boolean;
+      regex?: boolean;
+      includeGlobs?: string[];
+      excludeGlobs?: string[];
+      maxResults?: number;
+    }): Promise<SearchResponse> => {
+      if (!workspace || !workspaceRoot) {
+        throw new Error("no workspace folder");
+      }
+      const res = await devServerApi.search({
+        workspaceId: workspace.id,
+        root: workspaceRoot.path,
+        ...opts,
+      });
+      return res;
+    },
+    [workspace, workspaceRoot],
+  );
+
+  // Save-side hook removed — `saveFile` itself marks the path on
+  // successful write. External subscribers (the conflict prompt)
+  // see the echo filtered out automatically.
+
   const value = useMemo<DevServerContextValue>(() => ({
     workspace,
     enabled: true,
@@ -794,6 +956,9 @@ export function DevServerProvider({
     openFolder,
     setWorkspaceRoot,
     closeFolder,
+    subscribeToWatcher,
+    watcherOnline,
+    search,
   }), [
     workspace,
     servers,
@@ -814,6 +979,9 @@ export function DevServerProvider({
     openFolder,
     setWorkspaceRoot,
     closeFolder,
+    subscribeToWatcher,
+    watcherOnline,
+    search,
   ]);
 
   return (

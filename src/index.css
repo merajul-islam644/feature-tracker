@@ -370,12 +370,17 @@
 
 /* Hide the visible scrollbar but keep wheel / trackpad / drag-scroll
    working — used by the Workspace Explorer tree so it doesn't render
-   a chunky vertical bar on top of the row hover affordance. */
-.scrollbar-hide {
+   a chunky vertical bar on top of the row hover affordance.
+   The `*` selectors cascade through nested scrollable children (e.g.
+   CodeMirror's `.cm-scroller` lives inside the `.scrollbar-hide`
+   wrapper, so the rule must reach it). */
+.scrollbar-hide,
+.scrollbar-hide * {
   scrollbar-width: none;          /* Firefox */
   -ms-overflow-style: none;       /* IE / old Edge */
 }
-.scrollbar-hide::-webkit-scrollbar {
+.scrollbar-hide::-webkit-scrollbar,
+.scrollbar-hide *::-webkit-scrollbar {
   width: 0;
   height: 0;
   display: none;                   /* Chromium / WebKit / Opera */

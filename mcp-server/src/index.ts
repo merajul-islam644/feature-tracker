@@ -69,6 +69,13 @@
 //                                          folder
 //   POST   /dev-server/:wsId/mkdir       → mkdir -p in the user-picked
 //                                          folder
+//   POST   /dev-server/:wsId/search      → recursive text/regex search
+//                                          over the picked folder
+//                                          (skips node_modules/.git
+//                                          and obvious binaries)
+//   GET    /dev-server/:wsId/watch?root= → SSE stream of chokidar
+//                                          add/change/unlink events
+//                                          for the picked folder
 //
 //   GET    /_agent/status                → bridge status for the SPA
 //                                          banner (always available; reports
@@ -80,6 +87,16 @@
 //                                          connected local agent instead of
 //                                          being executed in this process.
 //                                          See ./agentBridge.ts.
+//
+//   GET    /dev-terminal/shells          → list of shells available
+//                                          on this machine (PowerShell 7,
+//           Windows PowerShell, cmd, Git Bash, …)
+//   WS     /dev-terminal/shell           → real PTY-backed shell for the
+//                                          /panel terminal panel. Spawns
+//                                          powershell.exe (Windows) or
+//                                          /bin/bash (POSIX) at `?cwd=…`
+//                                          and shuttles bytes both ways.
+//                                          See ./terminal.ts.
 //
 // The verification agent runs in headed mode (a real visible Chrome
 // window on the host). The browser window is the preview — there is
@@ -119,6 +136,22 @@ import {
   workspaceRoot,
 } from "./devServer.js";
 import { forwardToAgent, getAgentBridgeStatus, installAgentBridgeHandlers } from "./agentBridge.js";
+import {
+  attachShellToSocket,
+  listShells,
+  safeResolveCwd,
+  shutdownAllPersistentShells,
+  stopPersistentShell,
+} from "./terminal.js";
+import {
+  eventsAfterWatcher,
+  searchInFolder,
+  shutdownAllWatchers,
+  unwatchFolder,
+  waitForWatcherEvents,
+  watchFolder,
+  type WatchEvent,
+} from "./fileIndex.js";
 import type { StartVerificationRequest } from "./types.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8787);
@@ -182,6 +215,116 @@ app.get("/_agent/status", async () => getAgentBridgeStatus());
 app.get("/dev-server/_agent", { websocket: true }, (socket, _req) =>
   installAgentBridgeHandlers(socket),
 );
+
+// Interactive shell bridge for the WorkspacePage terminal panel.
+// One PTY per WS — spawn happens on connect, SIGTERM on disconnect.
+// The terminal panel lives at /projects/:projectId/:envSlug/panel
+// and connects to ws://<host>/dev-terminal/shell?workspaceId=...&cwd=...
+// (vite proxies /api/dev-terminal/* to here).
+
+// GET /dev-terminal/shells — enumerate the shells that exist on
+// THIS machine. The dropdown menu in TerminalPanel renders one row
+// per descriptor; unavailable entries are disabled but stay
+// visible so the user knows "Git Bash isn't installed, click for
+// setup help". Discovery is cheap (whichSync × ~6 paths) so we
+// don't bother with cache headers.
+app.get("/dev-terminal/shells", async (_req, reply) => {
+  return reply.send({ shells: listShells() });
+});
+
+app.get("/dev-terminal/shell", { websocket: true }, async (socket, req) => {
+  // @fastify/websocket unwraps the SocketStream; the socket here is
+  // a bare `ws` WebSocket. We ignore the Fastify `req` envelope —
+  // everything we need is in `req.query`.
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const workspaceId = url.searchParams.get("workspaceId") ?? "";
+  const cwd = url.searchParams.get("cwd") ?? "";
+  const terminalId = url.searchParams.get("terminalId") ?? "";
+  const shellId = url.searchParams.get("shellId") ?? undefined;
+  const cols = Number(url.searchParams.get("cols") ?? "");
+  const rows = Number(url.searchParams.get("rows") ?? "");
+  if (!terminalId) {
+    try {
+      socket.send(
+        JSON.stringify({ type: "exit", code: 2, signal: "missing_terminalId" }),
+      );
+    } catch {
+      /* */
+    }
+    socket.close(4400, "missing_terminalId");
+    return;
+  }
+  if (!workspaceId) {
+    try {
+      socket.send(
+        JSON.stringify({ type: "exit", code: 3, signal: "missing_workspaceId" }),
+      );
+    } catch {
+      /* */
+    }
+    socket.close(4400, "missing_workspaceId");
+    return;
+  }
+  if (!cwd) {
+    try {
+      socket.send(
+        JSON.stringify({ type: "exit", code: 4, signal: "missing_cwd" }),
+      );
+    } catch {
+      /* */
+    }
+    socket.close(4400, "missing_cwd");
+    return;
+  }
+
+  let resolvedCwd: string;
+  try {
+    resolvedCwd = safeResolveCwd(cwd);
+  } catch (err) {
+    try {
+      socket.send(
+        JSON.stringify({
+          type: "exit",
+          code: 5,
+          signal: "invalid_cwd",
+          message: (err as Error).message,
+        }),
+      );
+    } catch {
+      /* */
+    }
+    socket.close(4400, "invalid_cwd");
+    return;
+  }
+
+  try {
+    await attachShellToSocket(socket, {
+      workspaceId,
+      cwd: resolvedCwd,
+      terminalId,
+      shellId,
+      cols: Number.isFinite(cols) && cols > 0 ? cols : undefined,
+      rows: Number.isFinite(rows) && rows > 0 ? rows : undefined,
+    });
+  } catch (err) {
+    // node-pty failed to load (ConPTY binaries missing, etc.) — surface
+    // the error so the panel can render a useful message instead of a
+    // silent disconnect.
+    try {
+      socket.send(
+        JSON.stringify({
+          type: "exit",
+          code: 6,
+          signal: "spawn_failed",
+          message: (err as Error).message,
+        }),
+      );
+    } catch {
+      /* */
+    }
+    socket.close(4400, "spawn_failed");
+  }
+});
 app.get("/_agent", { websocket: true }, (socket /* SocketStream */, _req) => {
   // Handshake — the first frame MUST be { type: "hello", token }.
   // If AGENT_BRIDGE_ENABLED is off we still accept the connection
@@ -870,6 +1013,36 @@ app.post("/dev-server/stop", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
+// Explicit kill for the persistent terminal PTY. Today no UI calls
+// this — the user presses Ctrl+C inside the terminal itself, which is
+// a *natural* shell exit and tears the record down via
+// `handle.onExit`. The route exists for parity with `/dev-server/stop`
+// and for future scripting (e.g. CI teardown).
+const StopShellBody = z.object({
+  workspaceId: z.string().min(1).max(128),
+  cwd: z.string().min(1).max(4096),
+  terminalId: z.string().min(1).max(128),
+});
+
+app.post("/dev-terminal/shell/stop", async (req, reply) => {
+  const parsed = StopShellBody.safeParse(req.body);
+  if (!parsed.success) {
+    return reply.code(400).send({ error: parsed.error.flatten() });
+  }
+  let resolvedCwd: string;
+  try {
+    resolvedCwd = safeResolveCwd(parsed.data.cwd);
+  } catch (err) {
+    return reply.code(400).send({ error: (err as Error).message });
+  }
+  const result = await stopPersistentShell({
+    workspaceId: parsed.data.workspaceId,
+    cwd: resolvedCwd,
+    terminalId: parsed.data.terminalId,
+  });
+  return reply.send(result);
+});
+
 // VS Code-style "Open Folder" — spawns the OS's native folder
 // chooser. Returns `{ path }` on success, `{ cancelled: true }` when
 // the user closes the dialog, `{ cancelled: true, reason: "no_gui" }`
@@ -1139,6 +1312,125 @@ app.post<{ Params: { workspaceId: string } }>("/dev-server/:workspaceId/mkdir", 
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+//  File-system watcher + project-wide search
+//
+//  Watcher: opens a chokidar handle on the user's picked root and
+//  pushes add/change/unlink events to all SSE consumers. One
+//  watcher per (workspaceId, root) — refcount tracks how many
+//  SSE clients are subscribed so closing the panel doesn't kill
+//  the watch for, say, the Explorer refresh path.
+//
+//  Search: recursive regex search over text files in the picked
+//  root, skipping node_modules/.git/etc. and obvious binaries
+//  (by extension + UTF-8 reject).
+// ─────────────────────────────────────────────────────────────────────
+
+const SearchBody = RootPathField.extend({
+  query: z.string().min(1).max(1024),
+  caseSensitive: z.boolean().optional(),
+  wholeWord: z.boolean().optional(),
+  regex: z.boolean().optional(),
+  includeGlobs: z.array(z.string().min(1).max(256)).max(32).optional(),
+  excludeGlobs: z.array(z.string().min(1).max(256)).max(32).optional(),
+  maxResults: z.number().int().min(1).max(50_000).optional(),
+});
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/search",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = SearchBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      const results = await searchInFolder(parsed.data.root, {
+        query: parsed.data.query,
+        caseSensitive: parsed.data.caseSensitive,
+        wholeWord: parsed.data.wholeWord,
+        regex: parsed.data.regex,
+        includeGlobs: parsed.data.includeGlobs,
+        excludeGlobs: parsed.data.excludeGlobs,
+        maxResults: parsed.data.maxResults,
+      });
+      return reply.send({ results, count: results.length, truncated: results.length >= (parsed.data.maxResults ?? 5_000) });
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
+  },
+);
+
+// GET /dev-server/:workspaceId/watch?root=…&since=N
+//
+// SSE stream of WatchEvent JSON, same `data: {…}\n\n` shape as
+// the dev-server events stream. `since` lets a reconnecting
+// client replay events it missed while disconnected.
+//
+// The route bumps the watcher's refcount on connect and decrements
+// on disconnect — multiple panels (Explorer refresh + Watcher SSE)
+// can subscribe without stepping on each other.
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string; since?: string };
+}>("/dev-server/:workspaceId/watch", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const root = (req.query.root ?? "").trim();
+  if (!root) return reply.code(400).send({ error: "missing root" });
+  let since = Math.max(0, Number(req.query.since ?? 0) | 0);
+
+  const rec = watchFolder(ws.data.workspaceId, root);
+
+  // SSE headers — same shape as the dev-server events stream.
+  reply.raw.setHeader("content-type", "text/event-stream");
+  reply.raw.setHeader("cache-control", "no-cache");
+  reply.raw.setHeader("connection", "keep-alive");
+  reply.raw.setHeader("x-accel-buffering", "no");
+  reply.raw.flushHeaders?.();
+
+  // On disconnect, drop our ref so the watcher can be torn down
+  // when the last consumer leaves. `close` fires once for
+  // browser-initiated disconnect; we don't need to track it
+  // per-event.
+  let closed = false;
+  const onClose = () => {
+    if (closed) return;
+    closed = true;
+    unwatchFolder(rec.id);
+    try { reply.raw.end(); } catch { /* */ }
+  };
+  req.raw.on("close", onClose);
+  req.raw.on("error", onClose);
+
+  // Pump — replay since-cursor, then long-poll for new events.
+  // 1.5s heartbeat matches the dev-server SSE tail so the route
+  // stays open through CORS / proxy timeouts.
+  const pump = async () => {
+    try {
+      const evs = await waitForWatcherEvents(rec.id, since, 1_500);
+      if (closed) return;
+      if (evs.length > 0) {
+        for (const ev of evs) {
+          reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+        }
+        since += evs.length;
+      } else {
+        // Heartbeat comment — keeps proxies from killing the SSE.
+        reply.raw.write(`: ping\n\n`);
+      }
+      // Re-arm. We don't await in a tight loop because waitFor…
+      // blocks for up to 1.5s, so this naturally paces itself.
+      setImmediate(pump);
+    } catch (err) {
+      // watcher went away or the client closed. Don't crash the
+      // server — just end the stream.
+      try { reply.raw.end(); } catch { /* */ }
+    }
+  };
+  setImmediate(pump);
+});
+
 // Reverse-proxy to the running dev server. Reads request body if any,
 // forwards headers (stripping `host` so the upstream sees the dev
 // server's expected host), and copies response headers + body back to
@@ -1215,6 +1507,8 @@ try {
 const shutdown = (signal: string) => {
   app.log.info(`Received ${signal}, shutting down dev-server children…`);
   shutdownAllDevServers();
+  void shutdownAllWatchers();
+  shutdownAllPersistentShells();
   process.exit(0);
 };
 process.on("SIGINT", () => shutdown("SIGINT"));

@@ -1,29 +1,44 @@
 // WorkspacePage — VS Code-style file/folder management at
 // `/projects/:projectId/:envSlug/panel`.
 //
-// Layout (always-on, mirrors VS Code):
-//   • Top bar
-//       left  — title + EnvHeaderChip + Close-folder affordance
-//       right — Undo / Redo / Discard / path-input / Open-folder
-//   • Two-column body
-//       left  — ExplorerSidebar (shows inline empty state when no folder)
-//       right — EditorTabs + EditorArea (CodeMirror area when no file)
+// Layout (VS Code-like):
+//   • Page header
+//       left  — icon badge + h1 + EnvHeaderChip + Close-folder
+//       right — Undo / Redo / Discard / Type-path / Open-folder
+//   • Subtitle line ("Open a folder and edit files like VS Code…")
+//   • IDE frame (rounded card)
+//       left  — ExplorerSidebar
+//       right — WorkspaceBreadcrumb + EditorTabs + EditorArea
+//                (or WorkspaceEmptyState when no folder is picked)
+//   • Status bar (page surface, outside the frame)
+//       left  — file/folder counts + language
+//       right — save state + problems + Ln/Col
 //
 // Autosave: every keystroke schedules a 500ms debounced write for the
-// affected path. The Cmd+S / Ctrl+S keyboard shortcut that the previous
+// affected path. The Cmd+S / Ctrl+S keyboard shortcut the previous
 // iteration forced is gone — saving is automatic. Per-tab indicators:
 //   • savingPaths (write in flight) → spinner
 //   • pendingPaths (debounce timer pending) → amber dot
+//   • lastSavedAt → emerald "Saved {n}s ago" in the status bar
 //
-// Undo / Redo: CodeMirror's history is exposed to the top bar via the
+// Undo / Redo: CodeMirror's history is exposed to the header via the
 // `editorViewRef` captured by `EditorArea.onCreateEditor`. Discard
-// reverts the active file's editor doc to the on-disk version (refetched
-// from the mcp-server).
+// reverts the active file's editor doc to the on-disk version
+// (refetched from the mcp-server).
+//
+// Keyboard (Slice B / C):
+//   • Cmd/Ctrl + W → close active tab
+//   • Cmd/Ctrl + S → flush pending autosave immediately
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
+  FolderTree,
+  Maximize2,
+  Minimize2,
   Redo2,
   RotateCcw,
+  Search,
   Undo2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -33,20 +48,107 @@ import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { ExplorerSidebar } from "./ExplorerSidebar";
 import { EditorTabs } from "./EditorTabs";
 import { EditorArea } from "./EditorArea";
-import { basename, checkNameClash, dirname } from "./treeHelpers";
+import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
+import { WorkspaceBreadcrumb } from "./WorkspaceBreadcrumb";
+import { TerminalPanel } from "./TerminalPanel";
+import { TerminalTabs } from "./TerminalTabs";
+import { SearchPanel } from "./SearchPanel";
+import {
+  ExternalChangeDialog,
+  UnsavedConfirmDialog,
+} from "./WorkspaceDialogs";
+import {
+  WorkspaceStatusBar,
+  type SaveState,
+} from "./WorkspaceStatusBar";
+import {
+  basename,
+  checkNameClash,
+  countNodes,
+  dirname,
+} from "./treeHelpers";
+import { languageLabel } from "./languageLabel";
 import { toast } from "sonner";
 import { redo, undo } from "@codemirror/commands";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import { cn } from "@/lib/utils";
+import { devServerApi } from "@/services/devServerApi";
+import type { TerminalInstance } from "@/types/dev-server";
 
 // Debounce window for autosave. Small enough that the dot indicator
 // barely registers; long enough to coalesce a stream of keystrokes
 // into a single PUT.
 const AUTOSAVE_DEBOUNCE_MS = 500;
+// Window after a successful save during which the "Saved {n}s ago"
+// badge stays visible before it auto-hides.
+const SAVED_BADGE_VISIBLE_MS = 1_500;
+
+// ─── Terminal-instance persistence (mirrors `notepad/storage.ts`
+// readJSON/writeJSON pattern — see that file's comments for why we
+// roll our own instead of a project-wide helper). One record per
+// `(workspaceId, cwd)` so each project keeps its own tab list.
+// Refresh-survivable: a tab created yesterday re-appears with the
+// same id and scrollback.
+
+const INSTANCES_KEY = "lattice.terminal.instances.v1";
+
+function loadInstances(workspaceId: string, cwd: string): TerminalInstance[] {
+  try {
+    const raw = window.localStorage.getItem(INSTANCES_KEY);
+    if (!raw) return defaultInstances();
+    const map = JSON.parse(raw) as Record<string, TerminalInstance[]>;
+    const list = map[`${workspaceId}:${cwd}`];
+    if (!Array.isArray(list) || list.length === 0) return defaultInstances();
+    return list;
+  } catch {
+    return defaultInstances();
+  }
+}
+
+function saveInstances(
+  workspaceId: string,
+  cwd: string,
+  list: TerminalInstance[],
+): void {
+  try {
+    const raw = window.localStorage.getItem(INSTANCES_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, TerminalInstance[]>) : {};
+    map[`${workspaceId}:${cwd}`] = list;
+    window.localStorage.setItem(INSTANCES_KEY, JSON.stringify(map));
+  } catch {
+    /* quota / disabled storage — best effort */
+  }
+}
+
+function defaultInstances(): TerminalInstance[] {
+  return [{ id: "term-1", label: "Term 1", shellId: null }];
+}
+
+// Scrub the scrollback for a tab whose PTY is being killed. The
+// TerminalPanel writes here on debounced output (see its mount
+// effect); removing the key prevents a future "[Reattached to
+// running shell]" from restoring a buffer whose PTY is dead.
+function deleteScrubbedTerminalScrollback(
+  workspaceId: string,
+  cwd: string,
+  terminalId: string,
+): void {
+  try {
+    const key = "lattice.terminal.scrollback.v1";
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return;
+    const map = JSON.parse(raw) as Record<string, string>;
+    delete map[`${workspaceId}:${cwd}:${terminalId}`];
+    window.localStorage.setItem(key, JSON.stringify(map));
+  } catch {
+    /* */
+  }
+}
 
 export function WorkspacePage() {
   const t = useT();
   const {
+    workspace,
     workspaceRoot,
     tree,
     refreshTree,
@@ -58,12 +160,22 @@ export function WorkspacePage() {
     openFolder,
     setWorkspaceRoot,
     closeFolder,
+    problems,
+    subscribeToWatcher,
+    watcherOnline,
   } = useDevServer();
 
   // ─── Tab / content state ──────────────────────────────────────
   const [openPaths, setOpenPaths] = useState<string[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
   const [tabContent, setTabContent] = useState<Map<string, string>>(new Map());
+  // External-change prompt — opened when the watcher fires a `change`
+  // for a path that's currently open as a tab. Single-slot: only one
+  // prompt at a time; if a second file changes while the first is
+  // awaiting a decision, the second waits.
+  const [externalChange, setExternalChange] = useState<{ path: string } | null>(
+    null,
+  );
 
   // ─── Autosave state ───────────────────────────────────────────
   // `pendingPaths`: debounce timer scheduled but not yet flushed.
@@ -75,6 +187,14 @@ export function WorkspacePage() {
   const [savingPaths, setSavingPaths] = useState<Set<string>>(
     () => new Set(),
   );
+  /** Timestamp (ms) of the most recent successful save. Used by the
+   *  status bar to render "Saved {n}s ago". `0` = no save yet. */
+  const [savedAt, setSavedAt] = useState(0);
+  /** Auto-hide window — set to `Date.now() + SAVED_BADGE_VISIBLE_MS`
+   *  right after a save. Status bar hides the "Saved" label once
+   *  `Date.now() > hideSavedAt`. Mirrors the pattern in
+   *  `TestCaseSpreadsheet.tsx:137-164`. */
+  const [hideSavedAt, setHideSavedAt] = useState(-Infinity);
   // Map<path, timeoutId> — debounce handles for each in-flight write.
   const debounceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
@@ -126,6 +246,11 @@ export function WorkspacePage() {
       try {
         const content = tabContentRef.current.get(path) ?? "";
         await writeUserFile(path, content);
+        // Only stamp `savedAt` when the write succeeded. The status
+        // bar's "Saved Xs ago" badge tracks the most recent
+        // successful PUT.
+        setSavedAt(Date.now());
+        setHideSavedAt(Date.now() + SAVED_BADGE_VISIBLE_MS);
       } catch (err) {
         toast.error(
           `Autosave failed for ${path}: ${err instanceof Error ? err.message : String(err)}`,
@@ -192,11 +317,45 @@ export function WorkspacePage() {
     null,
   );
 
-  // Collapse state for folders
-  const [closedPaths, setClosedPaths] = useState<Set<string>>(() => new Set());
+  // Expand state for folders. An empty set is the *default* — every
+  // folder starts collapsed on mount / refresh / folder switch, and
+  // the user opens individual folders by clicking the chevron. This
+  // matches VS Code's behaviour (and avoids the "tree explodes open
+  // on every reload" surprise that the previous `closedPaths` model
+  // had, where an empty set meant *everything* was expanded).
+  //
+  // Named `expandedFolders` to disambiguate from the editor-tab
+  // `openPaths` above (open files vs. open folders — different
+  // domains, different shapes, and both legitimately named "open").
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  // Editor fullscreen / zoom mode. When `true`, the page hides the
+  // IDE chrome (page header, Explorer sidebar, status bar, terminal)
+  // and renders just the editor column (breadcrumb + tabs + editor)
+  // in a fixed-position overlay covering the entire viewport. Toggled
+  // by the zoom button next to "Open folder" in the page header.
+  // Not persisted — a refresh always returns to the normal layout.
+  const [editorFullscreen, setEditorFullscreen] = useState(false);
+  const toggleEditorFullscreen = useCallback(() => {
+    setEditorFullscreen((v) => !v);
+  }, []);
+
+  // Esc exits fullscreen — small QoL match for the visual cue (the
+  // exit button is the same lucide `ZoomOut` icon, but the keyboard
+  // shortcut is what power users reach for).
+  useEffect(() => {
+    if (!editorFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setEditorFullscreen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editorFullscreen]);
 
   // Editor view ref — captured from EditorArea.onCreateEditor. The
-  // top bar's Undo/Redo/Discard buttons dispatch directly on it. We
+  // header's Undo/Redo/Discard buttons dispatch directly on it. We
   // also need it because when the user switches tabs the React
   // remounts the CodeMirror editor and we get a fresh view.
   const editorViewRef = useRef<EditorView | null>(null);
@@ -270,6 +429,80 @@ export function WorkspacePage() {
   const focusTab = useCallback((path: string) => {
     setActivePath(path);
   }, []);
+
+  // ─── Unsaved-changes confirmation ───────────────────────────────
+  // When the user tries to close a dirty tab, capture the intent and
+  // show the dialog. The dialog buttons call the variants below.
+  const [unsavedDialog, setUnsavedDialog] = useState<{ path: string } | null>(
+    null,
+  );
+
+  // `closeTabForced` is the variant the dialog calls — bypasses the
+  // dirty check and discards in-memory edits. For the case where the
+  // user typed and the autosave already wrote the latest keystrokes to
+  // disk, `pendingPaths.has(path)` is `false`; calling it is safe.
+  const closeTabForced = useCallback((path: string) => {
+    cancelAutosave(path);
+    setOpenPaths((prev) => prev.filter((p) => p !== path));
+    setTabContent((prev) => {
+      if (!prev.has(path)) return prev;
+      const next = new Map(prev);
+      next.delete(path);
+      return next;
+    });
+    setActivePath((cur) => {
+      if (cur !== path) return cur;
+      const remaining = openPathsRef.current.filter((p) => p !== path);
+      return remaining[remaining.length - 1] ?? null;
+    });
+  }, [cancelAutosave]);
+
+  // Wrap `closeTab` so the dirty path triggers the dialog. The keyboard
+  // shortcut and the EditorTabs close button call this. The dialog
+  // itself re-invokes `closeTabForced` after the user picks Save /
+  // Don't save / Cancel.
+  const closeTabWithConfirm = useCallback(
+    (path: string) => {
+      if (pendingPathsRef.current.has(path)) {
+        setUnsavedDialog({ path });
+        return;
+      }
+      closeTab(path);
+    },
+    [closeTab],
+  );
+
+  // ─── Search panel state ────────────────────────────────────────
+  // `searchOpen` toggled by the header button OR Cmd/Ctrl+Shift+F.
+  // `onOpenResult` opens the file in the editor + jumps the cursor.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const openSearchResult = useCallback(
+    async (path: string, line: number, column: number) => {
+      await openFile(path);
+      // Wait for the EditorArea to mount the new doc + read the view
+      // back from EditorArea. Two-setTimeout is enough — CodeMirror's
+      // initial transaction lands on the next microtask.
+      window.setTimeout(() => {
+        const view = editorViewRef.current;
+        if (!view) return;
+        try {
+          const doc = view.state.doc;
+          const safeLine = Math.max(1, Math.min(line, doc.lines));
+          const lineInfo = doc.line(safeLine);
+          const safeCol = Math.max(0, Math.min(column - 1, lineInfo.length));
+          const pos = lineInfo.from + safeCol;
+          view.dispatch({
+            selection: { anchor: pos, head: pos },
+            effects: EditorView.scrollIntoView(pos, { y: "center" }),
+          });
+          view.focus();
+        } catch {
+          // Position out of bounds — just open the file.
+        }
+      }, 50);
+    },
+    [openFile],
+  );
 
   // ─── Editor change handler — schedules an autosave ────────────
   const handleEditorChange = useCallback(
@@ -347,7 +580,7 @@ export function WorkspacePage() {
 
   // ─── Tree operations ──────────────────────────────────────────
   const onToggleOpen = useCallback((path: string) => {
-    setClosedPaths((prev) => {
+    setExpandedFolders((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -687,6 +920,9 @@ export function WorkspacePage() {
     setConfirmingDeletePath(null);
     setPendingPaths(new Set());
     setSavingPaths(new Set());
+    setSavedAt(0);
+    setHideSavedAt(-Infinity);
+    setCursor(null);
     debounceTimersRef.current.clear();
     setPathInputOpen(false);
   }, [closeFolder, flushSave]);
@@ -714,12 +950,496 @@ export function WorkspacePage() {
     pendingPathsRef.current = pendingPaths;
   }, [pendingPaths]);
 
+  // ─── Cursor tracking (status bar) ──────────────────────────────
+  const [cursor, setCursor] = useState<{ line: number; col: number } | null>(
+    null,
+  );
+  const handleCursorChange = useCallback((line: number, col: number) => {
+    setCursor({ line, col });
+  }, []);
+  // Reset cursor on tab switch so the old position doesn't flash
+  // before the new editor's first updateListener tick.
+  useEffect(() => {
+    setCursor(null);
+  }, [activePath]);
+
+  // ─── Terminal tabs ────────────────────────────────────────────
+  // Per-(workspaceId, cwd) list of independent terminals. Each
+  // entry owns its own PTY on mcp-server (keyed by
+  // `${workspaceId}:${cwd}:${terminalId}`); refreshing the page
+  // re-loads the list from localStorage so tabs survive.
+  //
+  // When `workspaceRoot` or `workspace.id` changes (folder close
+  // + reopen, or switching folders) we re-load from localStorage
+  // rather than carry over the previous folder's tab list — the
+  // PTY key is workspace-bound.
+  const [terminals, setTerminals] = useState<TerminalInstance[]>(() =>
+    defaultInstances(),
+  );
+  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(
+    () => defaultInstances()[0]?.id ?? null,
+  );
+  const terminalsRef = useRef(terminals);
+  useEffect(() => {
+    terminalsRef.current = terminals;
+  }, [terminals]);
+
+  // Load the saved tab list when the workspace/cwd changes.
+  useEffect(() => {
+    if (!workspace?.id || !workspaceRoot) return;
+    const loaded = loadInstances(workspace.id, workspaceRoot.path);
+    setTerminals(loaded);
+    setActiveTerminalId((cur) => {
+      if (cur && loaded.some((t) => t.id === cur)) return cur;
+      return loaded[0]?.id ?? null;
+    });
+  }, [workspace?.id, workspaceRoot?.path]);
+
+  // Persist on every change.
+  useEffect(() => {
+    if (!workspace?.id || !workspaceRoot) return;
+    saveInstances(workspace.id, workspaceRoot.path, terminals);
+  }, [terminals, workspace?.id, workspaceRoot?.path]);
+
+  const onAddTerminal = useCallback(() => {
+    setTerminals((prev) => {
+      // Use a base36 millisecond stamp — short, monotonic per session,
+      // collision-free across rapid `[+]` clicks (Date.now() doesn't
+      // repeat within a single render's microtask).
+      const generated = `term-${Date.now().toString(36)}`;
+      const next: TerminalInstance = {
+        id: generated,
+        label: `Term ${prev.length + 1}`,
+        shellId: null,
+      };
+      setActiveTerminalId(generated);
+      return [...prev, next];
+    });
+  }, []);
+
+  const onCloseTerminal = useCallback(
+    (id: string) => {
+      if (!workspace?.id || !workspaceRoot) return;
+      // Best-effort PTY kill — the shell may already be dead (user
+      // typed Ctrl+C). We don't surface errors here; the panel's
+      // normal `onExit` path handles already-dead shells.
+      void devServerApi.stopTerminal({
+        workspaceId: workspace.id,
+        cwd: workspaceRoot.path,
+        terminalId: id,
+      });
+      setTerminals((prev) => {
+        const filtered = prev.filter((t) => t.id !== id);
+        const next = filtered.length === 0 ? defaultInstances() : filtered;
+        setActiveTerminalId((cur) => {
+          if (cur !== id) return cur;
+          return next[next.length - 1]?.id ?? null;
+        });
+        return next;
+      });
+      // Scrub scrollback so a future WS attach to this id (impossible
+      // now since the record is gone) wouldn't restore stale output.
+      deleteScrubbedTerminalScrollback(workspace.id, workspaceRoot.path, id);
+    },
+    [workspace?.id, workspaceRoot?.path],
+  );
+
+  // ─── Tree counts + language (status bar) ──────────────────────
+  const treeCounts = useMemo(() => countNodes(tree ?? []), [tree]);
+  const language = useMemo(
+    () => (activePath ? languageLabel(activePath) : null),
+    [activePath],
+  );
+
+  // Derive the active save state for the status bar.
+  const activeSaving = activePath ? savingPaths.has(activePath) : false;
+  const activePending = activePath ? pendingPaths.has(activePath) : false;
+  const showSaved =
+    !activeSaving && !activePending && savedAt > 0 && savedAt > hideSavedAt - SAVED_BADGE_VISIBLE_MS;
+  // We re-check `savedAt > hideSavedAt` to actually gate the badge
+  // once the 1.5s window closes.
+  const showSavedNow = showSaved && Date.now() < hideSavedAt;
+  const saveState: SaveState = activeSaving
+    ? "saving"
+    : activePending
+      ? "pending"
+      : showSavedNow
+        ? "saved"
+        : "idle";
+
+  // ─── File watcher subscription ──────────────────────────────────
+  // Subscribe once when the page loads (the context owns the
+  // underlying chokidar handle). For every `change` event whose
+  // path matches an open tab AND isn't in the "just wrote" filter,
+  // queue a "file changed on disk" prompt — single-slot, so a
+  // rapid-fire edit storm only shows one dialog at a time.
+  useEffect(() => {
+    if (!workspaceRoot) return;
+    const unsub = subscribeToWatcher((event) => {
+      if (event.kind !== "change") return;
+      const path = event.path;
+      // Only prompt if the user has the file open in a tab. Closed
+      // tabs don't need confirmation (they get the fresh disk version
+      // when re-opened anyway).
+      const isOpen = openPathsRef.current.includes(path);
+      if (!isOpen) return;
+      // Don't interrupt an active dialog for a second file — the
+      // second change is queued via state but the dialog is single.
+      // (If a third changes, it overwrites the second silently — the
+      // user can re-trigger via the menu. Acceptable.)
+      setExternalChange((cur) => cur ?? { path });
+    });
+    return unsub;
+  }, [workspaceRoot, subscribeToWatcher]);
+
+  // ─── External-change handlers ─────────────────────────────────
+  // "Reload" — overwrite the editor doc with the disk version.
+  const handleReloadFromDisk = useCallback(async () => {
+    if (!externalChange) return;
+    const path = externalChange.path;
+    setExternalChange(null);
+    cancelAutosave(path);
+    try {
+      const fresh = await readUserFile(path);
+      const next = fresh ?? "";
+      setTabContent((prev) => {
+        const m = new Map(prev);
+        m.set(path, next);
+        return m;
+      });
+      const view = editorViewRef.current;
+      if (view && activePathRef.current === path && view.state.doc.toString() !== next) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: next },
+        });
+      }
+      toast.success(`Reloaded ${basename(path)} from disk`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }, [externalChange, cancelAutosave, readUserFile]);
+
+  // "Keep mine" — drop the dialog. The disk version is left alone.
+  const handleKeepMine = useCallback(() => {
+    setExternalChange(null);
+  }, []);
+
+  // ─── Unsaved dialog handlers ──────────────────────────────────
+  // Save → flushSave, then close the tab via closeTabForced (which
+  // skips the dirty check the unsaved dialog just satisfied).
+  const handleUnsavedSave = useCallback(async () => {
+    if (!unsavedDialog) return;
+    const path = unsavedDialog.path;
+    setUnsavedDialog(null);
+    await flushSave(path);
+    closeTabForced(path);
+  }, [unsavedDialog, flushSave, closeTabForced]);
+
+  // Discard → close without saving.
+  const handleUnsavedDiscard = useCallback(() => {
+    if (!unsavedDialog) return;
+    const path = unsavedDialog.path;
+    setUnsavedDialog(null);
+    closeTabForced(path);
+  }, [unsavedDialog, closeTabForced]);
+
+  // Cancel → drop the dialog.
+  const handleUnsavedCancel = useCallback(() => {
+    setUnsavedDialog(null);
+  }, []);
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (!event.metaKey && !event.ctrlKey) return;
+      const key = event.key.toLowerCase();
+      // Cmd/Ctrl + Shift + F → open the project search panel.
+      if (key === "f" && event.shiftKey) {
+        if (!workspaceRoot) return;
+        event.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
+      // Cmd/Ctrl + W → close the active tab.
+      if (key === "w") {
+        const path = activePathRef.current;
+        if (!path) return;
+        event.preventDefault();
+        closeTabWithConfirm(path);
+        return;
+      }
+      // Cmd/Ctrl + S → flush any pending autosave immediately.
+      if (key === "s") {
+        event.preventDefault();
+        const path = activePathRef.current;
+        if (!path) return;
+        if (pendingPathsRef.current.has(path)) {
+          void flushSave(path);
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [closeTabWithConfirm, flushSave, workspaceRoot]);
+
   // ─── Render ───────────────────────────────────────────────────
 
+  const hasFolder = workspaceRoot !== null;
+
+  // Fullscreen overlay — keeps the Explorer sidebar visible (so the
+  // user can keep navigating files) but hides the Lattice app chrome
+  // (Navigation, top bar), page header, status bar, and terminal panel.
+  // The editor column expands to fill the remaining viewport width.
+  // Used by the zoom button next to "Open folder" and dismissible via
+  // the same button, the explicit exit button, or the Esc key.
+  //
+  // Rendered via `createPortal` to `document.body` so its
+  // `position: fixed` is anchored to the viewport, not to whatever
+  // stacked-context the React route happens to live in. Without the
+  // portal, a chain of ancestors (Lattice sidebar-wrapper → main →
+  // padded route container) caused the fixed element to land ~16px
+  // below the top edge, leaving a visible band of the AI Assistant
+  // launcher and the Lattice top app bar uncovered.
+  //
+  // Gated on `hasFolder` only — if the user closes the active tab
+  // while in fullscreen, the EditorArea renders its own "No file
+  // open" hint, so we don't need to bounce out of fullscreen just
+  // because the active file changed.
+  if (editorFullscreen && hasFolder) {
+    const overlay = (
+      <div
+        // `fixed inset-0` covers the whole viewport, z-[60] to sit
+        // above the Lattice page chrome (sidebar + top app bar) and
+        // the AI Assistant launcher (z-40). `bg-card` matches the
+        // IDE frame so the jump into fullscreen isn't a colour
+        // flash. `w-screen h-screen` is the belt-and-braces pair to
+        // `inset-0` for browsers that don't honour `inset` on a
+        // portal-rendered element.
+        className="fixed inset-0 z-[60] flex h-screen w-screen flex-col overflow-hidden bg-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Fullscreen editor"
+      >
+        <header className="flex h-9 shrink-0 items-center justify-between gap-1.5 border-b border-border bg-muted/30 px-3">
+          <div className="flex items-center gap-1 truncate font-mono text-xs text-muted-foreground">
+            <span className="truncate text-foreground/80">
+              {workspaceRoot?.name ?? "Workspace"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleUndo}
+              disabled={!activePath}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="Undo"
+              title="Undo (Cmd+Z)"
+            >
+              <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleRedo}
+              disabled={!activePath}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="Redo"
+              title="Redo (Cmd+Shift+Z)"
+            >
+              <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => void handleDiscard()}
+              disabled={!activePath}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="Discard changes"
+              title="Discard changes — revert to the saved version on disk"
+            >
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSearchOpen(true)}
+              disabled={!workspaceRoot}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="Search in project"
+              title="Search in project (Cmd/Ctrl+Shift+F)"
+            >
+              <Search className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={startTypePath}
+              className="h-7 gap-1.5 px-2 text-xs font-mono"
+              aria-label="Type folder path"
+              title="Type a folder path"
+            >
+              {workspaceRoot?.path ?? t("issueTracker.workspace.typePath", "Type path")}
+            </Button>
+            <Button
+              onClick={onOpenFolder}
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-xs"
+              aria-label="Open folder"
+              title="Open folder (pick from your machine)"
+            >
+              <i
+                className="codicon codicon-folder-opened text-[14px] leading-none text-amber-500"
+                aria-hidden="true"
+              />
+              {t("issueTracker.workspace.openFolder", "Open folder")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleEditorFullscreen}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="Exit fullscreen"
+              aria-pressed={editorFullscreen}
+              title="Exit fullscreen (Esc)"
+            >
+              <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+          </div>
+        </header>
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <ExplorerSidebar
+            tree={tree ?? null}
+            expandedFolders={expandedFolders}
+            activePath={activePath}
+            renamingPath={renamingPath}
+            renameError={renameError}
+            creatingSubfolderPath={creatingSubfolderPath}
+            subfolderCreateError={subfolderCreateError}
+            creatingFilePath={creatingFilePath}
+            createFileError={createFileError}
+            confirmingDeletePath={confirmingDeletePath}
+            onToggleOpen={onToggleOpen}
+            onOpenFile={openFile}
+            onStartCreateRootFile={startCreateRootFile}
+            onStartCreateRootFolder={startCreateRootFolder}
+            onCommitCreateRootFile={commitCreateRootFile}
+            onCancelCreateRootFile={cancelCreateRootFile}
+            onCommitCreateRootFolder={commitCreateRootFolder}
+            onCancelCreateRootFolder={cancelCreateRootFolder}
+            onStartRenameFile={startRenameFile}
+            onCancelRename={cancelRename}
+            onCommitRenameFile={commitRenameFile}
+            onStartCreateSubfolder={startCreateSubfolder}
+            onCommitCreateSubfolder={commitCreateSubfolder}
+            onCancelCreateSubfolder={cancelCreateSubfolder}
+            onStartCreateFileInFolder={startCreateFileInFolder}
+            onCommitCreateFileInFolder={commitCreateFileInFolder}
+            onCancelCreateFile={cancelCreateFile}
+            onStartDelete={startDelete}
+            onCancelDelete={cancelDelete}
+            onCommitDelete={commitDelete}
+            onRefresh={() => void refreshTree()}
+            rootFolderName={workspaceRoot?.name ?? null}
+            treeLoading={Boolean(workspaceRoot && !tree)}
+          />
+          <section className="flex min-w-0 flex-1 flex-col">
+            <WorkspaceBreadcrumb
+              folderName={workspaceRoot?.name ?? null}
+              activePath={activePath}
+              onJumpToSegment={(path) => {
+                if (!path) {
+                  if (activePath) closeTabWithConfirm(activePath);
+                  return;
+                }
+                if (activePath) closeTabWithConfirm(activePath);
+              }}
+            />
+            <EditorTabs
+              openPaths={openPaths}
+              activePath={activePath}
+              pendingPaths={pendingPaths}
+              savingPaths={savingPaths}
+              onFocusTab={focusTab}
+              onCloseTab={closeTabWithConfirm}
+            />
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <EditorArea
+                activePath={activePath}
+                content={activePath ? tabContent.get(activePath) ?? "" : ""}
+                hasFolder={hasFolder}
+                onChange={handleEditorChange}
+                onCreateEditor={handleEditorView}
+                onCursorChange={handleCursorChange}
+              />
+            </div>
+            {/* Terminal stays mounted across fullscreen entry / exit so
+                each PTY survives. All tab instances render (inactive
+                ones are CSS-hidden) — same pattern as the normal layout. */}
+            <TerminalTabs
+              terminals={terminals}
+              activeId={activeTerminalId}
+              onFocus={setActiveTerminalId}
+              onAdd={onAddTerminal}
+              onClose={onCloseTerminal}
+            />
+            {terminals.map((t) => {
+              const isActive = t.id === activeTerminalId;
+              return (
+                // Inactive tabs use `visibility: hidden` (not
+                // `display: none`) so xterm's CharSizeService keeps
+                // valid dimensions — a hidden-via-display-none panel
+                // throws "Cannot read properties of undefined (reading
+                // 'dimensions')" from Viewport.syncScrollArea on every
+                // output frame. `visibility: hidden` + `position:
+                // absolute` keeps the panel in the DOM and laid out but
+                // out of the document flow, so the active panel sits
+                // at its natural position.
+                <div
+                  key={t.id}
+                  aria-hidden={!isActive}
+                  style={
+                    isActive
+                      ? undefined
+                      : {
+                          visibility: "hidden",
+                          position: "absolute",
+                          inset: "0 0 0 0",
+                          pointerEvents: "none",
+                        }
+                  }
+                >
+                  <TerminalPanel
+                    workspaceId={workspace!.id}
+                    cwd={workspaceRoot!.path}
+                    terminalId={t.id}
+                    shellIdOverride={t.shellId}
+                  />
+                </div>
+              );
+            })}
+          </section>
+        </div>
+      </div>
+    );
+    // SSR guard — `createPortal` needs a real DOM node. During the
+    // first render (or in a test environment without `document`)
+    // we fall back to rendering inline. The page is client-only
+    // anyway, so this branch is hit at most once on hydration.
+    if (typeof document !== "undefined") {
+      return createPortal(overlay, document.body);
+    }
+    return overlay;
+  }
+
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+    <div className="space-y-4">
+      <div className="space-y-1">
         <div className="flex flex-wrap items-center gap-2">
+          <span
+            aria-hidden="true"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary-muted text-primary"
+          >
+            <FolderTree className="h-4 w-4" />
+          </span>
           <h1 className="text-xl font-semibold text-foreground">
             {t("issueTracker.workspace.title", "Workspace")}
           </h1>
@@ -741,161 +1461,323 @@ export function WorkspacePage() {
             </Button>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleUndo}
-            disabled={!activePath}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            aria-label="Undo"
-            title="Undo (Cmd+Z)"
-          >
-            <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleRedo}
-            disabled={!activePath}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            aria-label="Redo"
-            title="Redo (Cmd+Shift+Z)"
-          >
-            <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => void handleDiscard()}
-            disabled={!activePath}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            aria-label="Discard changes"
-            title="Discard changes — revert to the saved version on disk"
-          >
-            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button>
-          {pathInputOpen ? (
-            <div className="flex items-center gap-1">
-              <input
-                type="text"
-                autoFocus
-                value={pathDraft}
-                onChange={(e) => setPathDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void submitTypePath();
-                  else if (e.key === "Escape") setPathInputOpen(false);
-                }}
-                placeholder={t(
-                  "issueTracker.workspace.pathPlaceholder",
-                  "C:\\path\\to\\folder",
-                )}
-                className="h-7 w-64 rounded border border-input bg-background px-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                aria-label="Folder path"
-              />
-              <Button
-                onClick={() => void submitTypePath()}
-                size="sm"
-                className="h-7 px-2 text-xs"
-                aria-label="Open path"
-              >
-                {t("issueTracker.workspace.open", "Open")}
-              </Button>
-            </div>
-          ) : (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={startTypePath}
-              className="h-7 gap-1.5 px-2 text-xs font-mono"
-              aria-label="Type folder path"
-              title="Type a folder path"
-            >
-              {workspaceRoot?.path ?? t("issueTracker.workspace.typePath", "Type path")}
-            </Button>
+        <p className="text-sm text-muted-foreground">
+          {t(
+            "issueTracker.workspace.subtitle",
+            "Open a folder and edit files like VS Code. Changes autosave to disk.",
           )}
-          <Button
-            onClick={onOpenFolder}
-            size="sm"
-            className="h-7 gap-1.5 px-2.5 text-xs"
-            aria-label="Open folder"
-            title="Open folder (pick from your machine)"
-          >
-            <i
-              className="codicon codicon-folder-opened text-[14px] leading-none text-amber-500"
-              aria-hidden="true"
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleUndo}
+          disabled={!activePath}
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          aria-label="Undo"
+          title="Undo (Cmd+Z)"
+        >
+          <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleRedo}
+          disabled={!activePath}
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          aria-label="Redo"
+          title="Redo (Cmd+Shift+Z)"
+        >
+          <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => void handleDiscard()}
+          disabled={!activePath}
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          aria-label="Discard changes"
+          title="Discard changes — revert to the saved version on disk"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setSearchOpen(true)}
+          disabled={!workspaceRoot}
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          aria-label="Search in project"
+          title="Search in project (Cmd/Ctrl+Shift+F)"
+        >
+          <Search className="h-3.5 w-3.5" aria-hidden="true" />
+        </Button>
+        {pathInputOpen ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              autoFocus
+              value={pathDraft}
+              onChange={(e) => setPathDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitTypePath();
+                else if (e.key === "Escape") setPathInputOpen(false);
+              }}
+              placeholder={t(
+                "issueTracker.workspace.pathPlaceholder",
+                "C:\\path\\to\\folder",
+              )}
+              className="h-7 w-64 rounded border border-input bg-background px-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              aria-label="Folder path"
             />
-            {t("issueTracker.workspace.openFolder", "Open folder")}
+            <Button
+              onClick={() => void submitTypePath()}
+              size="sm"
+              className="h-7 px-2 text-xs"
+              aria-label="Open path"
+            >
+              {t("issueTracker.workspace.open", "Open")}
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={startTypePath}
+            className="h-7 gap-1.5 px-2 text-xs font-mono"
+            aria-label="Type folder path"
+            title="Type a folder path"
+          >
+            {workspaceRoot?.path ?? t("issueTracker.workspace.typePath", "Type path")}
           </Button>
+        )}
+        <Button
+          onClick={onOpenFolder}
+          size="sm"
+          className="h-7 gap-1.5 px-2.5 text-xs"
+          aria-label="Open folder"
+          title="Open folder (pick from your machine)"
+        >
+          <i
+            className="codicon codicon-folder-opened text-[14px] leading-none text-amber-500"
+            aria-hidden="true"
+          />
+          {t("issueTracker.workspace.openFolder", "Open folder")}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleEditorFullscreen}
+          disabled={!hasFolder}
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          aria-label={editorFullscreen ? "Exit fullscreen" : "Maximize editor"}
+          aria-pressed={editorFullscreen}
+          title={
+            editorFullscreen
+              ? "Exit fullscreen (Esc)"
+              : "Maximize editor (fullscreen)"
+          }
+        >
+          {editorFullscreen ? (
+            <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : (
+            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+        </Button>
+      </div>
+
+      <div className="-mx-4 sm:-mx-6 flex h-[calc(100vh-220px)] min-h-[520px] flex-col overflow-hidden rounded-lg border border-border bg-card">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1">
+            <ExplorerSidebar
+              tree={tree ?? null}
+              expandedFolders={expandedFolders}
+              activePath={activePath}
+              renamingPath={renamingPath}
+              renameError={renameError}
+              creatingSubfolderPath={creatingSubfolderPath}
+              subfolderCreateError={subfolderCreateError}
+              creatingFilePath={creatingFilePath}
+              createFileError={createFileError}
+              confirmingDeletePath={confirmingDeletePath}
+              onToggleOpen={onToggleOpen}
+              onOpenFile={openFile}
+              onStartCreateRootFile={startCreateRootFile}
+              onStartCreateRootFolder={startCreateRootFolder}
+              onCommitCreateRootFile={commitCreateRootFile}
+              onCancelCreateRootFile={cancelCreateRootFile}
+              onCommitCreateRootFolder={commitCreateRootFolder}
+              onCancelCreateRootFolder={cancelCreateRootFolder}
+              onStartRenameFile={startRenameFile}
+              onCancelRename={cancelRename}
+              onCommitRenameFile={commitRenameFile}
+              onStartCreateSubfolder={startCreateSubfolder}
+              onCommitCreateSubfolder={commitCreateSubfolder}
+              onCancelCreateSubfolder={cancelCreateSubfolder}
+              onStartCreateFileInFolder={startCreateFileInFolder}
+              onCommitCreateFileInFolder={commitCreateFileInFolder}
+              onCancelCreateFile={cancelCreateFile}
+              onStartDelete={startDelete}
+              onCancelDelete={cancelDelete}
+              onCommitDelete={commitDelete}
+              onRefresh={() => void refreshTree()}
+              rootFolderName={workspaceRoot?.name ?? null}
+              treeLoading={Boolean(workspaceRoot && !tree)}
+            />
+
+            <section className="flex min-w-0 flex-1 flex-col">
+              {hasFolder && (
+                <WorkspaceBreadcrumb
+                  folderName={workspaceRoot?.name ?? null}
+                  activePath={activePath}
+                  onJumpToSegment={(path) => {
+                    if (!path) {
+                      // Folder root click → drop the active tab so
+                      // the right column collapses to its
+                      // "no file open" hint.
+                      if (activePath) closeTabWithConfirm(activePath);
+                      return;
+                    }
+                    // Segment click on a parent dir — VS Code's
+                    // behaviour is "collapse the active tab and
+                    // focus the parent" but the Explorer only
+                    // supports file clicks, so the simplest honest
+                    // behaviour is to drop the tab and let the
+                    // user open a sibling from the tree.
+                    if (activePath) closeTabWithConfirm(activePath);
+                  }}
+                />
+              )}
+              <EditorTabs
+                openPaths={openPaths}
+                activePath={activePath}
+                pendingPaths={pendingPaths}
+                savingPaths={savingPaths}
+                onFocusTab={focusTab}
+                onCloseTab={closeTabWithConfirm}
+              />
+              {hasFolder ? (
+                <EditorArea
+                  activePath={activePath}
+                  content={activePath ? tabContent.get(activePath) ?? "" : ""}
+                  hasFolder={hasFolder}
+                  onChange={handleEditorChange}
+                  onCreateEditor={handleEditorView}
+                  onCursorChange={handleCursorChange}
+                />
+              ) : (
+                <WorkspaceEmptyState
+                  onOpenFolder={() => void onOpenFolder()}
+                  onTypePath={startTypePath}
+                />
+              )}
+            </section>
+          </div>
         </div>
+
+        {hasFolder && workspaceRoot && workspace?.id && (
+          <div>
+            <TerminalTabs
+              terminals={terminals}
+              activeId={activeTerminalId}
+              onFocus={setActiveTerminalId}
+              onAdd={onAddTerminal}
+              onClose={onCloseTerminal}
+            />
+            {/* All terminals stay mounted — inactive ones are CSS-
+                hidden so their xterm + WS don't tear down on tab
+                switch. The ResizeObserver inside TerminalPanel fires
+                when `hidden` toggles, calling fit.fit() to keep the
+                active xterm sized correctly. */}
+            {terminals.map((t) => {
+              const isActive = t.id === activeTerminalId;
+              return (
+                // Inactive tabs use `visibility: hidden` (not
+                // `display: none`) so xterm's CharSizeService keeps
+                // valid dimensions — see the matching comment in the
+                // other render branch for context.
+                <div
+                  key={t.id}
+                  aria-hidden={!isActive}
+                  style={
+                    isActive
+                      ? undefined
+                      : {
+                          visibility: "hidden",
+                          position: "absolute",
+                          inset: "0 0 0 0",
+                          pointerEvents: "none",
+                        }
+                  }
+                >
+                  <TerminalPanel
+                    workspaceId={workspace.id}
+                    cwd={workspaceRoot.path}
+                    terminalId={t.id}
+                    shellIdOverride={t.shellId}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      <div className="-mx-4 sm:-mx-6 flex h-[calc(100vh-160px)] min-h-[480px] overflow-hidden border border-border bg-background">
-        <ExplorerSidebar
-          tree={tree ?? null}
-          closedPaths={closedPaths}
-          activePath={activePath}
-          renamingPath={renamingPath}
-          renameError={renameError}
-          creatingSubfolderPath={creatingSubfolderPath}
-          subfolderCreateError={subfolderCreateError}
-          creatingFilePath={creatingFilePath}
-          createFileError={createFileError}
-          confirmingDeletePath={confirmingDeletePath}
-          onToggleOpen={onToggleOpen}
-          onOpenFile={openFile}
-          onStartCreateRootFile={startCreateRootFile}
-          onStartCreateRootFolder={startCreateRootFolder}
-          onCommitCreateRootFile={commitCreateRootFile}
-          onCancelCreateRootFile={cancelCreateRootFile}
-          onCommitCreateRootFolder={commitCreateRootFolder}
-          onCancelCreateRootFolder={cancelCreateRootFolder}
-          onStartRenameFile={startRenameFile}
-          onCancelRename={cancelRename}
-          onCommitRenameFile={commitRenameFile}
-          onStartCreateSubfolder={startCreateSubfolder}
-          onCommitCreateSubfolder={commitCreateSubfolder}
-          onCancelCreateSubfolder={cancelCreateSubfolder}
-          onStartCreateFileInFolder={startCreateFileInFolder}
-          onCommitCreateFileInFolder={commitCreateFileInFolder}
-          onCancelCreateFile={cancelCreateFile}
-          onStartDelete={startDelete}
-          onCancelDelete={cancelDelete}
-          onCommitDelete={commitDelete}
-          onRefresh={() => void refreshTree()}
-          rootFolderName={workspaceRoot?.name ?? null}
-          onOpenFolder={onOpenFolder}
-          onTypePath={startTypePath}
-          treeLoading={Boolean(workspaceRoot && !tree)}
-        />
-
-        <section className="flex min-w-0 flex-1 flex-col bg-background">
-          <EditorTabs
-            openPaths={openPaths}
-            activePath={activePath}
-            pendingPaths={pendingPaths}
-            savingPaths={savingPaths}
-            onFocusTab={focusTab}
-            onCloseTab={closeTab}
-          />
-          <EditorArea
-            activePath={activePath}
-            content={activePath ? tabContent.get(activePath) ?? "" : ""}
-            onChange={handleEditorChange}
-            onCreateEditor={handleEditorView}
-          />
-        </section>
-      </div>
+      <WorkspaceStatusBar
+        cursor={cursor}
+        language={language}
+        saveState={saveState}
+        lastSavedAt={savedAt > 0 ? savedAt : null}
+        fileCount={treeCounts.files}
+        folderCount={treeCounts.dirs}
+        problemsCount={problems.length}
+        onShowProblems={() =>
+          toast.info(
+            t(
+              "issueTracker.workspace.openDevServer",
+              "Open the Dev Server panel to view problems.",
+            ),
+          )
+        }
+      />
 
       {/* Hidden filename indicator so screen readers can announce the
           active tab. Keeps the visual UI clean. */}
       <span className="sr-only" aria-live="polite">
         {activePath ? basename(activePath) : ""}
       </span>
+      {!watcherOnline && workspaceRoot && (
+        <span className="sr-only" aria-live="polite">
+          File watcher is offline. External edits won't be detected.
+        </span>
+      )}
+
+      {/* Project-wide search panel (Cmd/Ctrl+Shift+F). */}
+      <SearchPanel
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        onOpenResult={openSearchResult}
+      />
+
+      {/* Unsaved-changes confirmation. */}
+      <UnsavedConfirmDialog
+        open={unsavedDialog !== null}
+        path={unsavedDialog?.path ?? ""}
+        onSave={() => void handleUnsavedSave()}
+        onDiscard={handleUnsavedDiscard}
+        onCancel={handleUnsavedCancel}
+      />
+
+      {/* External-change prompt — fires when the watcher reports a
+          `change` for an open tab's path. */}
+      <ExternalChangeDialog
+        open={externalChange !== null}
+        path={externalChange?.path ?? ""}
+        onReload={() => void handleReloadFromDisk()}
+        onKeepMine={handleKeepMine}
+      />
     </div>
   );
 }
-
-// Empty obj literal pattern: keep imports referenced even when a
-// useMemo lookup is removed. (Linter-cleanup helper.)
-void useMemo;

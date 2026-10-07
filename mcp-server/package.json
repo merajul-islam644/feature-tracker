@@ -15,7 +15,9 @@
     "@fastify/websocket": "^10.0.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@playwright/test": "^1.47.2",
+    "chokidar": "^3.6.0",
     "fastify": "^4.28.1",
+    "node-pty": "^1.0.0",
     "playwright": "^1.47.2",
     "ws": "^8.22.0",
     "zod": "^3.25.76"

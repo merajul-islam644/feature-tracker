@@ -538,11 +538,15 @@ function devServerProxy(env: Record<string, string>): Plugin {
           notConfigured(res);
           return;
         }
-        // SSE pump for `/events` — preserves the streaming response so
-        // the terminal panel gets a frame per stdout/stderr line.
+        // SSE pump for `/events` and `/watch` — preserves the streaming
+        // response so the terminal/dev-server panel and the file
+        // watcher get their frames without buffering. Without this
+        // branch, the JSON-forward fallback below would `await
+        // upstream.text()` and never complete on a long-lived SSE.
         if (
           req.method === "GET" &&
-          (req.url ?? "").split("?")[0].endsWith("/events")
+          ((req.url ?? "").split("?")[0].endsWith("/events") ||
+            (req.url ?? "").split("?")[0].endsWith("/watch"))
         ) {
           try {
             const upstream = await fetch(
@@ -652,8 +656,13 @@ function agentBridgeProxy(env: Record<string, string>): Plugin {
       const bind = (httpServer: import("node:http").Server) => {
         httpServer.on("upgrade", (req, clientSocket, head) => {
           const reqUrl = req.url || "";
+          // Only consume upgrades targeted at the agent bridge. For
+          // every other path (Vite's own HMR, etc.) we just return
+          // so the remaining "upgrade" listeners — Node's
+          // EventEmitter fires them all — handle it. Destroying
+          // here would also kill Vite's HMR socket and freeze the
+   // dev page on a blank screen.
           if (!reqUrl.startsWith("/api/dev-server/_agent")) {
-            clientSocket.destroy();
             return;
           }
           // Dynamic import so `ws` is only loaded when the upgrade
@@ -736,6 +745,155 @@ function agentBridgeProxy(env: Record<string, string>): Plugin {
       };
       // httpServer is created during Vite's setup; bind immediately
       // if it exists, otherwise wait for the listening event.
+      const httpServer = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
+      if (httpServer) {
+        bind(httpServer);
+      } else {
+        server.httpServer?.once("listening", () => {
+          const hs = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
+          if (hs) bind(hs);
+        });
+      }
+    },
+  };
+}
+
+// Interactive shell bridge — forward `/api/dev-terminal/*` WebSocket
+// upgrades to `ws://localhost:8787/dev-terminal/*` (or wherever
+// `DEV_SERVER_BACKEND_URL` points). The terminal panel in
+// WorkspacePage opens a single WS that mcp-server keeps alive for
+// the duration of the PTY — this proxy is the leg from the visitor
+// to the backend. Bytes pass through bidirectionally with no
+// framing: xterm.js' `term.onData` strings go up, PTY output
+// strings come back down.
+function terminalProxy(env: Record<string, string>): Plugin {
+  const mcpHttpUrl = (
+    env.DEV_SERVER_BACKEND_URL !== undefined
+      ? env.DEV_SERVER_BACKEND_URL
+      : "http://localhost:8787"
+  ).replace(/\/+$/, "");
+  const mcpWsUrl = mcpHttpUrl.replace(/^http/, "ws");
+
+  return {
+    name: "feature-tracker:terminal-proxy",
+    apply: "serve",
+    configureServer(server) {
+      // HTTP forward for the non-WS routes under `/api/dev-terminal/*`
+      // (today: only `GET /shells` — the dropdown catalog). The
+      // upgrade handler below covers `GET /shell` (the PTY WS). The
+      // plugin's middleware must run before Vite's SPA fallback, so
+      // we mount it explicitly here.
+      server.middlewares.use("/api/dev-terminal", async (req, res) => {
+        try {
+          const upstream = await fetch(
+            `${mcpHttpUrl}/dev-terminal${req.url ?? "/"}`,
+            {
+              method: req.method,
+              headers: { "content-type": "application/json" },
+              body: ["GET", "HEAD"].includes((req.method ?? "GET").toUpperCase())
+                ? undefined
+                : await readBody(req),
+            },
+          );
+          const text = await upstream.text();
+          res.statusCode = upstream.status;
+          res.setHeader(
+            "content-type",
+            upstream.headers.get("content-type") ?? "application/json",
+          );
+          res.end(text);
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("content-type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: "upstream_failure",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        }
+      });
+      const bind = (httpServer: import("node:http").Server) => {
+        httpServer.on("upgrade", (req, clientSocket, head) => {
+          const reqUrl = req.url || "";
+          // Same fan-out rule as the agent-bridge plugin: only
+          // consume upgrades for our path; every other upgrade
+          // (Vite's own HMR, etc.) must pass through untouched.
+          if (!reqUrl.startsWith("/api/dev-terminal/")) {
+            return;
+          }
+          import("ws").then(({ WebSocket, WebSocketServer }) => {
+            const upstreamPath = reqUrl.replace(/^\/api\/dev-terminal/, "");
+            const upstreamUrl = `${mcpWsUrl}/dev-terminal${upstreamPath}`;
+            const wss = new WebSocketServer({ noServer: true });
+            wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
+              const upstreamHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(req.headers)) {
+                if (!v) continue;
+                if (k === "host") continue;
+                upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
+              }
+              const upstream = new WebSocket(upstreamUrl, {
+                headers: upstreamHeaders,
+              });
+
+              let closed = false;
+              const cleanup = (code: number, reason: string) => {
+                if (closed) return;
+                closed = true;
+                try {
+                  clientWs.close(code, reason);
+                } catch {
+                  /* */
+                }
+                try {
+                  if (upstream.readyState <= 1) upstream.close(code, reason);
+                } catch {
+                  /* */
+                }
+              };
+
+              clientWs.on("message", (data, isBinary) => {
+                try {
+                  if (upstream.readyState === 1) {
+                    upstream.send(data as Buffer, { binary: isBinary });
+                  }
+                } catch {
+                  cleanup(1011, "upstream_send_failed");
+                }
+              });
+              clientWs.on("close", (code, reason) =>
+                cleanup(code, reason?.toString?.() ?? ""),
+              );
+              clientWs.on("error", () => cleanup(1011, "client_error"));
+
+              upstream.on("message", (data, isBinary) => {
+                try {
+                  const buf = isBinary
+                    ? Buffer.isBuffer(data)
+                      ? data
+                      : Buffer.from(data as ArrayBuffer)
+                    : Buffer.from(data as unknown as string);
+                  clientWs.send(buf, { binary: isBinary });
+                } catch {
+                  cleanup(1011, "client_send_failed");
+                }
+              });
+              upstream.on("close", (code, reason) => {
+                cleanup(code, reason?.toString?.() ?? "");
+              });
+              upstream.on("error", () => cleanup(1011, "upstream_error"));
+            });
+          }).catch(() => {
+            try {
+              clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+              clientSocket.destroy();
+            } catch {
+              /* */
+            }
+          });
+        });
+      };
       const httpServer = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
       if (httpServer) {
         bind(httpServer);
@@ -1939,6 +2097,7 @@ export default defineConfig(({ mode, command }) => {
     verifyProxy(env),
     devServerProxy(env),
     agentBridgeProxy(env),
+    terminalProxy(env),
     mailBridgeProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],

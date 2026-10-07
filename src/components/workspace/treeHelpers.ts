@@ -124,3 +124,53 @@ export function dirname(path: string): string {
   parts.pop();
   return parts.join("/");
 }
+
+/** Count files + directories in a tree (BFS). Mirrors the inline
+ *  helper that previously lived at ExplorerSidebar.tsx:329-343.
+ *  Used by the status bar to surface total counts. */
+export function countNodes(
+  tree: FileNode[],
+): { files: number; dirs: number } {
+  let files = 0;
+  let dirs = 0;
+  const stack: FileNode[] = [...tree];
+  while (stack.length > 0) {
+    const n = stack.pop()!;
+    if (n.kind === "dir") {
+      dirs++;
+      for (const c of n.children ?? []) stack.push(c);
+    } else {
+      files++;
+    }
+  }
+  return { files, dirs };
+}
+
+/** Filter a file tree by substring match on file/folder name. Case-
+ *  insensitive. Always keeps parent folders of any matching node so
+ *  the Explorer pane doesn't show "matches" floating in mid-air.
+ *  Returns a new array of nodes with their `children` arrays pruned;
+ *  the original tree is never mutated. Returns an empty array when
+ *  the query is empty (callers should short-circuit and render the
+ *  full tree). */
+export function filterTreeByName(
+  tree: FileNode[],
+  query: string,
+): FileNode[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return tree;
+  const result: FileNode[] = [];
+  for (const node of tree) {
+    if (node.kind === "file") {
+      if (node.name.toLowerCase().includes(q)) result.push(node);
+    } else {
+      // Recurse first — if any descendant matches, keep the folder
+      // (with only the matching sub-tree inside).
+      const filteredChildren = filterTreeByName(node.children ?? [], q);
+      if (filteredChildren.length > 0 || node.name.toLowerCase().includes(q)) {
+        result.push({ ...node, children: filteredChildren });
+      }
+    }
+  }
+  return result;
+}

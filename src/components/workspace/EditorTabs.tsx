@@ -10,6 +10,14 @@
 // (nothing). The dirty dot was the only pre-autosave signal; now
 // it shows the pending-save state until the next debounce flushes
 // the write to disk.
+//
+// Polish (Slice C):
+//   • Middle-click a tab to close it (no native menu).
+//   • Active tab gets a 2px primary bottom border + raised
+//     background (background is the IDE frame color, not the tab
+//     strip, so the active tab visually merges with the editor).
+//   • The close (X) button on the active tab stays visible without
+//     hover; inactive tabs reveal their X on hover only.
 
 import { Loader2, X } from "lucide-react";
 import { basename } from "./treeHelpers";
@@ -50,11 +58,26 @@ export function EditorTabs({
             role="tab"
             aria-selected={isActive}
             onClick={() => onFocusTab(tabPath)}
+            onMouseDown={(e) => {
+              // Middle-click closes the tab (VS Code behaviour).
+              if (e.button === 1) {
+                e.preventDefault();
+                onCloseTab(tabPath);
+              }
+            }}
+            onAuxClick={(e) => {
+              // Some browsers fire `auxclick` for middle-click;
+              // belt-and-braces with the mousedown handler.
+              if (e.button === 1) {
+                e.preventDefault();
+                onCloseTab(tabPath);
+              }
+            }}
             className={cn(
-              "group flex h-full shrink-0 cursor-pointer items-center gap-1.5 rounded-t px-3 text-xs",
+              "group flex h-full shrink-0 cursor-pointer items-center gap-1.5 rounded-t border-b-2 px-3 text-xs",
               isActive
-                ? "border-t border-x border-border bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground",
+                ? "border-b-primary bg-card text-foreground"
+                : "border-b-transparent text-muted-foreground hover:bg-muted/50 hover:text-foreground",
             )}
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center [&_svg]:h-4 [&_svg]:w-4">
@@ -78,7 +101,12 @@ export function EditorTabs({
                 e.stopPropagation();
                 onCloseTab(tabPath);
               }}
-              className="ml-1 flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+              className={cn(
+                "ml-1 flex h-4 w-4 items-center justify-center rounded text-muted-foreground transition-opacity hover:bg-muted hover:text-foreground",
+                isActive
+                  ? "opacity-100"
+                  : "opacity-0 group-hover:opacity-100",
+              )}
               aria-label={`Close ${name}`}
               title="Close"
             >
