@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import path from "path";
 import fs from "fs";
+import { WebSocket as NodeWebSocket, WebSocketServer as NodeWebSocketServer } from "ws";
 import type { ServerResponse } from "http";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -816,16 +817,21 @@ function terminalProxy(env: Record<string, string>): Plugin {
       const bind = (httpServer: import("node:http").Server) => {
         httpServer.on("upgrade", (req, clientSocket, head) => {
           const reqUrl = req.url || "";
+          console.log("[vite:dev-terminal-proxy] upgrade", reqUrl);
           // Same fan-out rule as the agent-bridge plugin: only
           // consume upgrades for our path; every other upgrade
           // (Vite's own HMR, etc.) must pass through untouched.
           if (!reqUrl.startsWith("/api/dev-terminal/")) {
             return;
           }
-          import("ws").then(({ WebSocket, WebSocketServer }) => {
+          (() => {
+            const WebSocket = NodeWebSocket;
+            const WebSocketServer = NodeWebSocketServer;
             const upstreamPath = reqUrl.replace(/^\/api\/dev-terminal/, "");
             const upstreamUrl = `${mcpWsUrl}/dev-terminal${upstreamPath}`;
             const wss = new WebSocketServer({ noServer: true });
+            try {
+            console.log("[vite:dev-terminal-proxy] handleUpgrade", upstreamUrl);
             wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
               const upstreamHeaders: Record<string, string> = {};
               for (const [k, v] of Object.entries(req.headers)) {
@@ -884,14 +890,15 @@ function terminalProxy(env: Record<string, string>): Plugin {
               });
               upstream.on("error", () => cleanup(1011, "upstream_error"));
             });
-          }).catch(() => {
-            try {
-              clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-              clientSocket.destroy();
             } catch {
-              /* */
+              try {
+                clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+                clientSocket.destroy();
+              } catch {
+                /* */
+              }
             }
-          });
+          })();
         });
       };
       const httpServer = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;

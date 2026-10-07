@@ -230,18 +230,33 @@ export function DevServerProvider({
 }: ProviderProps) {
   // Workspace identity — load on mount, save on first write. The id
   // survives across page reloads so files stay on disk.
-  const [workspace, setWorkspace] = useState<DevServerWorkspace | null>(() => {
-    if (!userId || !projectId || !envSlug) return null;
-    return loadDevServerWorkspace(userId, projectId, envSlug);
-  });
+  //
+  // The id is keyed by the `(user, project, env)` triple plus a short
+  // random segment. We can't compute the id lazily on mount because
+  // `useAuth().currentUser?.id` resolves asynchronously and the lazy
+  // `useState` initializer only runs once — if it fires while
+  // `userId` is still undefined, the load returns null and the next
+  // effect run generates a *fresh* random id, overwriting the
+  // previously persisted one. That breaks every consumer keyed by
+  // `workspace.id` (terminal scrollback, instance list, dev-server
+  // records): refresh → new id → saved data orphan → user sees an
+  // empty terminal every time. The same race was the root cause of
+  // the editorFullscreen bug fixed in WorkspacePage.tsx.
+  const [workspace, setWorkspace] = useState<DevServerWorkspace | null>(null);
+  const workspaceLoadKeyRef = useRef<string | null>(null);
 
-  // Persist the workspace on first mount if it didn't exist.
   useEffect(() => {
     if (!userId || !projectId || !envSlug) return;
-    if (workspace && workspace.userId === userId && workspace.projectId === projectId && workspace.envSlug === envSlug) {
+    const key = `${userId}|${projectId}|${envSlug}`;
+    if (key === workspaceLoadKeyRef.current) return;
+    workspaceLoadKeyRef.current = key;
+    const loaded = loadDevServerWorkspace(userId, projectId, envSlug);
+    if (loaded) {
+      setWorkspace(loaded);
       return;
     }
-    const ws: DevServerWorkspace = workspace ?? {
+    // First visit for this triple — synthesize an id and persist.
+    const ws: DevServerWorkspace = {
       id: `ws-${Math.random().toString(36).slice(2, 8)}`,
       userId,
       projectId,
@@ -251,7 +266,7 @@ export function DevServerProvider({
     };
     saveDevServerWorkspace(ws);
     setWorkspace(ws);
-  }, [userId, projectId, envSlug, workspace]);
+  }, [userId, projectId, envSlug]);
 
   const [servers, setServers] = useState<Map<number, DevServerRecord>>(() => new Map());
   const [problems, setProblems] = useState<Problem[]>([]);

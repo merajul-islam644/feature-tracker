@@ -6,6 +6,7 @@ import { Topbar } from "./Topbar";
 import { Toaster } from "@/components/ui/sonner";
 import { IssueTrackerStoreProvider } from "@/hooks/issueTrackerStore";
 import { ActiveEnvProvider } from "@/contexts/ActiveEnvContext";
+import { ExtensionsProvider } from "@/contexts/ExtensionsContext";
 import { GlobalChatAssistant } from "@/components/issue-tracker/GlobalChatAssistant";
 import { IncomingCallDialog } from "@/components/team-chat/IncomingCallDialog";
 import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
@@ -34,6 +35,7 @@ export function AppLayout() {
     // only requires anything-renders-inside, so placing it outermost
     // here at the layout root works for the whole authenticated tree.
     <ActiveEnvProvider>
+    <ExtensionsProvider>
     <IssueTrackerStoreProvider>
       {/* URL → ActiveEnv sync. Renders no UI — just stamps the URL's
           (projectId, envSlug) pair into the ActiveEnv context on every
@@ -79,6 +81,7 @@ export function AppLayout() {
         </SidebarProvider>
       </TooltipProvider>
     </IssueTrackerStoreProvider>
+    </ExtensionsProvider>
     </ActiveEnvProvider>
   );
 }

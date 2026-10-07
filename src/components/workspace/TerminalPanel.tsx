@@ -48,6 +48,11 @@ import "@xterm/xterm/css/xterm.css";
 
 import { devServerApi } from "@/services/devServerApi";
 import type { ShellDescriptor, TerminalPhase } from "@/types/dev-server";
+import {
+  loadWorkspaceTerminalCollapsed,
+  saveWorkspaceTerminalCollapsed,
+} from "@/lib/blocks/devServerStorage";
+import { useDevServer } from "@/contexts/DevServerContext";
 
 interface TerminalPanelProps {
   /** Workspace id (passed to the backend for routing/audit). */
@@ -179,9 +184,59 @@ export function TerminalPanel({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   // Local collapse state — owned here (not by the parent) so the
   // terminal survives a parent re-render unchanged. Default
-  // expanded: first-time visitors can `npm install` without an
-  // extra click.
-  const [collapsed, setCollapsed] = useState(false);
+  // collapsed: the workspace editor takes the full viewport on
+  // first paint and the user clicks the chevron to reveal the
+  // shell. Avoids burning the panel on existing editors and the
+  // `npm install`-on-day-one flow is now opt-in via the chevron
+  // rather than a permanent fixture.
+  //
+  // Persisted per (user, project, env) via the mirror in
+  // devServerStorage.ts. We can't lazy-init from localStorage the
+  // way the shell prefs do — the workspace identity isn't known
+  // until `useDevServer()` resolves, and a lazy `useState` init
+  // would race against that hydration (read undefined → store
+  // collapsed=true → mirror row gets clobbered to default on the
+  // first persist). So we hydrate via effect with an identity-key
+  // guard, mirroring `editorFullscreen` in WorkspacePage.
+  const { workspace } = useDevServer();
+  const collapsedLoadKeyRef = useRef<string | null>(null);
+  const [collapsed, setCollapsed] = useState<boolean>(true);
+
+  // Hydrate `collapsed` from the mirror once the workspace identity
+  // is known. The ref guard means we only ever read once per
+  // (user, project, env) triple — subsequent renders keep the
+  // in-memory value so a transient workspace re-resolve (auth
+  // bouncing, the context re-running its load effect) can't reset
+  // the panel to the stale persisted value mid-session.
+  useEffect(() => {
+    if (!workspace) return;
+    const key = `${workspace.userId}|${workspace.projectId}|${workspace.envSlug}`;
+    if (key === collapsedLoadKeyRef.current) return;
+    collapsedLoadKeyRef.current = key;
+    setCollapsed(
+      loadWorkspaceTerminalCollapsed(
+        workspace.userId,
+        workspace.projectId,
+        workspace.envSlug,
+      ),
+    );
+  }, [workspace?.userId, workspace?.projectId, workspace?.envSlug]);
+
+  // Persist on every change. Skip the very first render after the
+  // hydration effect above has run — otherwise we'd write back the
+  // value we just read and the row never changes for users who
+  // never click the chevron.
+  useEffect(() => {
+    if (!workspace) return;
+    const key = `${workspace.userId}|${workspace.projectId}|${workspace.envSlug}`;
+    if (key !== collapsedLoadKeyRef.current) return;
+    saveWorkspaceTerminalCollapsed(
+      workspace.userId,
+      workspace.projectId,
+      workspace.envSlug,
+      collapsed,
+    );
+  }, [workspace?.userId, workspace?.projectId, workspace?.envSlug, collapsed]);
 
   // Shell catalog + the user's current pick. Fetched once on
   // mount; the dropdown re-renders from `shells`. `selectedShellId`
@@ -272,32 +327,53 @@ export function TerminalPanel({
     // `serialize()` — restore is `term.write(saved)`. The saved
     // string is a stream of ANSI escape codes; the terminal's
     // input handler paints them back into the buffer.
+    //
+    // Defer the scrollback write one frame: `term.write` walks into
+    // `Viewport.syncScrollArea` which reads `this._renderer.value.dimensions`
+    // — undefined until after `term.open()` returns AND the next
+    // event-loop tick has run. Writing synchronously throws
+    // `Cannot read properties of undefined (reading 'dimensions')`
+    // and the scrollback silently disappears. rAF yields the tick.
     const recordKey = scrollbackRecordKey(workspaceId, cwd, terminalId);
     const saved = readScrollback(recordKey);
-    if (saved !== null && saved.length > 0) {
+    const raf =
+      typeof window.requestAnimationFrame === "function"
+        ? window.requestAnimationFrame
+        : (cb: FrameRequestCallback) =>
+            window.setTimeout(() => cb(performance.now()), 0);
+    raf(() => {
       try {
-        term.write(saved);
+        fit.fit();
+        if (saved !== null && saved.length > 0) {
+          try {
+            term.write(saved);
+          } catch {
+            /* malformed — drop it so we don't try again next mount */
+            deleteScrollback(recordKey);
+          }
+        }
       } catch {
-        /* malformed — drop it so we don't try again next mount */
         deleteScrollback(recordKey);
       }
-    }
-
-    // Initial fit — the container has its height from the parent's
-    // `style={{ height }}` prop, so this works on first paint.
-    try {
-      fit.fit();
-    } catch {
-      /* container not yet measurable — retry on ResizeObserver */
-    }
+    });
 
     // ResizeObserver: keep PTY cols/rows in sync with the panel's
     // actual pixel size. The fit() call writes the new dimensions
     // to xterm; we then send them up via the latest handle.
+    //
+    // Skip the resize message when the inner has zero size — that
+    // happens during the 200 ms collapse animation and whenever the
+    // panel starts in the default-collapsed state. PTYs reject
+    // 0×0 resize frames, and re-sending them on every animation
+    // tick spams the WS for nothing.
     const ro = new ResizeObserver(() => {
+      const el = containerRef.current;
+      if (!el) return;
       try {
         fit.fit();
-        handleRef.current?.resize(term.cols, term.rows);
+        if (term.cols > 0 && term.rows > 0) {
+          handleRef.current?.resize(term.cols, term.rows);
+        }
       } catch {
         /* container detached */
       }
@@ -311,9 +387,21 @@ export function TerminalPanel({
       // Best effort: if the addon throws (e.g. mid-dispose) we
       // silently lose the last fragment; the user will see the
       // previous saved state on next mount.
+      //
+      // Skip when the buffer is empty: under React StrictMode the
+      // mount-unmount-mount cycle in dev fires the first cleanup
+      // before `term.write(saved)` from the new mount has flushed
+      // into the xterm buffer, so serialize() reads back "" — and
+      // writing that empty string would clobber the previously
+      // persisted scrollback before the replay even runs. The
+      // debounced save path already covers steady-state output, so
+      // the only thing we'd lose by skipping is a tiny post-write
+      // fragment that the next debounce tick will pick up.
       try {
         const data = serializeAddon.serialize();
-        writeScrollback(recordKey, data);
+        if (data.length > 0) {
+          writeScrollback(recordKey, data);
+        }
       } catch {
         /* */
       }
@@ -495,7 +583,7 @@ export function TerminalPanel({
 
   return (
     <div
-      className="flex flex-col border-t border-border bg-card"
+      className="flex flex-col overflow-hidden border-t border-border bg-card transition-[height] duration-200 ease-out"
       style={{ height: collapsed ? COLLAPSED_HEADER_PX : height }}
     >
       <header className="flex h-8 shrink-0 items-center justify-between border-b border-border text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -533,16 +621,22 @@ export function TerminalPanel({
           </button>
         </div>
       </header>
-      {!collapsed && (
-        <div
-          ref={containerRef}
-          // Padding keeps xterm's text from sitting flush against
-          // the panel border. xterm.js ignores box-sizing: border-box
-          // for its canvas so we need the inner padding.
-          className="flex-1 overflow-hidden p-2"
-          style={{ minHeight: 0 }}
-        />
-      )}
+      {/*
+        Always render the inner so xterm + the PTY stay mounted across
+        toggles (recreating them on every click would clobber
+        scrollback and the running process). When collapsed, the
+        flex item's `flex-1` collapses to 0 height (outer is exactly
+        the header height) and `opacity-0 pointer-events-none`
+        hides it visually during the 200 ms height transition.
+      */}
+      <div
+        ref={containerRef}
+        // Padding keeps xterm's text from sitting flush against
+        // the panel border. xterm.js ignores box-sizing: border-box
+        // for its canvas so we need the inner padding.
+        className={`flex-1 overflow-hidden p-2 transition-opacity duration-200 ease-out ${collapsed ? "pointer-events-none opacity-0" : "opacity-100"}`}
+        style={{ minHeight: 0 }}
+      />
     </div>
   );
 }
