@@ -37,7 +37,15 @@
 // styles — keeps the global CSS file lean.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronUp, ChevronsUpDown, Terminal as TerminalIcon } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
+  Maximize2,
+  Minimize2,
+  Terminal as TerminalIcon,
+} from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -67,6 +75,22 @@ interface TerminalPanelProps {
   shellIdOverride?: string | null;
   /** Default height in pixels when expanded. */
   height?: number;
+  /** When true the panel fills its flex slot (the dock wrapper is
+   *  `flex-1`) instead of using the fixed `height` — VS Code's
+   *  maximized panel. The parent hides the editor rows to make the
+   *  slot actually available. */
+  maximized?: boolean;
+  /** Flips the parent's maximize flag. Only the active tab gets a
+   *  handler — inactive panels render the button inert. */
+  onToggleMaximize?: () => void;
+  /** True while the user is dragging the dock's resize sash. Kills
+   *  the 200 ms height transition so the panel tracks the cursor
+   *  1:1 instead of rubber-banding behind it. */
+  resizing?: boolean;
+  /** Mirrors `collapsed` up to the parent (which hides the resize
+   *  sash and drops maximize when the panel folds). Fired on user
+   *  toggle AND on the hydration read below. */
+  onCollapsedChange?: (collapsed: boolean) => void;
 }
 
 const DEFAULT_FG = "#e4e4e7";
@@ -161,6 +185,10 @@ export function TerminalPanel({
   terminalId,
   shellIdOverride = null,
   height = 240,
+  maximized = false,
+  onToggleMaximize,
+  resizing = false,
+  onCollapsedChange,
 }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -213,14 +241,22 @@ export function TerminalPanel({
     const key = `${workspace.userId}|${workspace.projectId}|${workspace.envSlug}`;
     if (key === collapsedLoadKeyRef.current) return;
     collapsedLoadKeyRef.current = key;
-    setCollapsed(
-      loadWorkspaceTerminalCollapsed(
-        workspace.userId,
-        workspace.projectId,
-        workspace.envSlug,
-      ),
+    const persisted = loadWorkspaceTerminalCollapsed(
+      workspace.userId,
+      workspace.projectId,
+      workspace.envSlug,
     );
-  }, [workspace?.userId, workspace?.projectId, workspace?.envSlug]);
+    setCollapsed(persisted);
+    // Sync the parent's mirror (it starts `true` to match this
+    // component's initial state) so the dock's sash hides/shows
+    // correctly before the user's first chevron click.
+    onCollapsedChange?.(persisted);
+  }, [
+    workspace?.userId,
+    workspace?.projectId,
+    workspace?.envSlug,
+    onCollapsedChange,
+  ]);
 
   // Persist on every change. Skip the very first render after the
   // hydration effect above has run — otherwise we'd write back the
@@ -237,6 +273,28 @@ export function TerminalPanel({
       collapsed,
     );
   }, [workspace?.userId, workspace?.projectId, workspace?.envSlug, collapsed]);
+
+  // Chevron click — flip collapse and mirror it up in the same tick
+  // so the dock hides the resize sash while folded and the parent
+  // can drop maximize (an expanded editor + 32px folded strip is
+  // the useful combination, not a maximized one).
+  const toggleCollapsed = useCallback(() => {
+    const next = !collapsed;
+    setCollapsed(next);
+    onCollapsedChange?.(next);
+  }, [collapsed, onCollapsedChange]);
+
+  // Maximize button — VS Code's panel "maximize / restore" pair. A
+  // collapsed panel can't be maximized meaningfully (the editor
+  // would hide behind a 32px header), so maximizing from the folded
+  // state expands first, then flips the layout flag.
+  const handleMaximizeToggle = useCallback(() => {
+    if (!maximized && collapsed) {
+      setCollapsed(false);
+      onCollapsedChange?.(false);
+    }
+    onToggleMaximize?.();
+  }, [maximized, collapsed, onCollapsedChange, onToggleMaximize]);
 
   // Shell catalog + the user's current pick. Fetched once on
   // mount; the dropdown re-renders from `shells`. `selectedShellId`
@@ -582,9 +640,22 @@ export function TerminalPanel({
   );
 
   return (
+    // Maximized: no fixed height — `flex-1` stretches to the slot the
+    // parent opened up by hiding the editor rows. Normal: the fixed
+    // `height` from the dock's resizable state. While the dock sash
+    // is being dragged, `transition-none` stops the 200 ms ease-out
+    // from lagging every pointermove.
     <div
-      className="flex flex-col overflow-hidden border-t border-border bg-card transition-[height] duration-200 ease-out"
-      style={{ height: collapsed ? COLLAPSED_HEADER_PX : height }}
+      className={`flex flex-col overflow-hidden border-t border-border bg-card ${
+        maximized ? "min-h-0 flex-1" : ""
+      } ${
+        resizing ? "transition-none" : "transition-[height] duration-200 ease-out"
+      }`}
+      style={
+        maximized
+          ? undefined
+          : { height: collapsed ? COLLAPSED_HEADER_PX : height }
+      }
     >
       <header className="flex h-8 shrink-0 items-center justify-between border-b border-border text-[11px] uppercase tracking-wider text-muted-foreground">
         <div className="flex items-center gap-2 px-3">
@@ -606,9 +677,25 @@ export function TerminalPanel({
             disabled={catalogError !== null || shells.length === 0}
             onSelect={onSelectShell}
           />
+          {onToggleMaximize && (
+            <button
+              type="button"
+              onClick={handleMaximizeToggle}
+              aria-label={maximized ? "Restore terminal" : "Maximize terminal"}
+              aria-pressed={maximized}
+              title={maximized ? "Restore terminal" : "Maximize terminal"}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              {maximized ? (
+                <Minimize2 className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <Maximize2 className="h-4 w-4" aria-hidden="true" />
+              )}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setCollapsed((c) => !c)}
+            onClick={toggleCollapsed}
             aria-label={collapsed ? "Expand terminal" : "Collapse terminal"}
             aria-expanded={!collapsed}
             className="text-muted-foreground hover:text-foreground"

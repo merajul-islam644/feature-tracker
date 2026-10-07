@@ -30,7 +30,14 @@
 //   • Cmd/Ctrl + W → close active tab
 //   • Cmd/Ctrl + S → flush pending autosave immediately
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   FolderTree,
@@ -157,6 +164,87 @@ function deleteScrubbedTerminalScrollback(
     window.localStorage.setItem(key, JSON.stringify(map));
   } catch {
     /* */
+  }
+}
+
+// ─── Sidebar width persistence (same mirror pattern as the terminal
+// instances above). One number per browser — VS Code keeps a single
+// side-bar width across workspaces too. Clamped on read so a stale or
+// hand-edited value can't push the editor column off-screen.
+
+const SIDEBAR_WIDTH_KEY = "lattice.workspace.sidebarWidth.v1";
+export const SIDEBAR_WIDTH_MIN = 170;
+export const SIDEBAR_WIDTH_MAX = 520;
+export const SIDEBAR_WIDTH_DEFAULT = 256;
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, width));
+}
+
+function loadSidebarWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    const n = raw === null ? NaN : Number(raw);
+    if (!Number.isFinite(n)) return SIDEBAR_WIDTH_DEFAULT;
+    return clampSidebarWidth(n);
+  } catch {
+    return SIDEBAR_WIDTH_DEFAULT;
+  }
+}
+
+function saveSidebarWidth(width: number): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(width)));
+  } catch {
+    /* quota / disabled storage — best effort */
+  }
+}
+
+// ─── Terminal dock height persistence (same mirror pattern as the
+// sidebar width above). One number per browser; the sash on the
+// dock's top edge drives it and double-click resets. `max` is the
+// drag-time clamp (container height minus the editor reserve) —
+// without it a big stored height could push the editor off-screen
+// on a small window, so the loader clamps to the absolute max and
+// the drag clamps tighter.
+
+const TERMINAL_HEIGHT_KEY = "lattice.workspace.terminalHeight.v1";
+export const TERMINAL_HEIGHT_MIN = 120;
+export const TERMINAL_HEIGHT_MAX = 720;
+export const TERMINAL_HEIGHT_DEFAULT = 240;
+// Vertical pixels kept visible above the dock while dragging — the
+// editor tab strip + a few code lines never fully disappear (VS Code
+// clamps panel drags the same way).
+const TERMINAL_RESERVE_PX = 200;
+
+function clampTerminalHeight(
+  height: number,
+  max: number = TERMINAL_HEIGHT_MAX,
+): number {
+  // Never let a bogus `max` push the floor below the minimum.
+  const upper = Math.max(TERMINAL_HEIGHT_MIN + 40, max);
+  return Math.min(upper, Math.max(TERMINAL_HEIGHT_MIN, height));
+}
+
+function loadTerminalHeight(): number {
+  try {
+    const raw = window.localStorage.getItem(TERMINAL_HEIGHT_KEY);
+    const n = raw === null ? NaN : Number(raw);
+    if (!Number.isFinite(n)) return TERMINAL_HEIGHT_DEFAULT;
+    return clampTerminalHeight(n);
+  } catch {
+    return TERMINAL_HEIGHT_DEFAULT;
+  }
+}
+
+function saveTerminalHeight(height: number): void {
+  try {
+    window.localStorage.setItem(
+      TERMINAL_HEIGHT_KEY,
+      String(Math.round(height)),
+    );
+  } catch {
+    /* quota / disabled storage — best effort */
   }
 }
 
@@ -539,6 +627,23 @@ export function WorkspacePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [editorFullscreen]);
 
+  // Page-level horizontal scroll lockdown. At browser zoom levels ≠
+  // 100%, fractional device-pixel rounding can push some element a
+  // few px past the layout viewport; the document then grows a
+  // full-width horizontal scrollbar, and scrolling right slides the
+  // workspace content under the fixed navigation sidebar. Nothing on
+  // this page has legitimate page-level horizontal overflow — the
+  // IDE card is overflow-hidden and the breadcrumb/tab strips scroll
+  // internally — so clip the overflow at the root while mounted.
+  // Also zeroes a stuck horizontal offset left over from a session
+  // where the scrollbar did appear. Vertical scrolling is untouched.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.add("overflow-x-hidden");
+    if (window.scrollX !== 0) window.scrollTo(0, window.scrollY);
+    return () => root.classList.remove("overflow-x-hidden");
+  }, []);
+
   // Editor view ref — captured from EditorArea.onCreateEditor. The
   // header's Undo/Redo/Discard buttons dispatch directly on it. We
   // also need it because when the user switches tabs the React
@@ -669,6 +774,45 @@ export function WorkspacePage() {
   // Initial value `true` so Explorer still opens by default; in
   // fullscreen we keep the same default.
   const [sidebarTab, setSidebarTab] = useState<string>("explorer");
+
+  // ─── Sidebar width (drag-to-resize) ────────────────────────────
+  // Pixel width of the sidebar panel column (activity bar excluded —
+  // VS Code keeps its activity bar fixed too). Persisted per browser;
+  // the sash in `WorkspaceSidebar` drives it, double-click resets.
+  const [sidebarWidth, setSidebarWidth] = useState<number>(loadSidebarWidth);
+
+  // ─── Terminal dock (drag-to-resize + maximize) ─────────────────
+  // Pixel height of the terminal dock (tabs strip + active panel).
+  // Persisted per browser like the sidebar width; the horizontal
+  // sash on the dock's top edge drives it, double-click resets.
+  const [terminalHeight, setTerminalHeight] =
+    useState<number>(loadTerminalHeight);
+  // Maximize is session-only on purpose — a reload always restores
+  // the split layout so a stale flag can't strand the user in front
+  // of a bare terminal before the (async) collapse hydration runs.
+  const [terminalMaximized, setTerminalMaximized] = useState(false);
+  // Mirror of the active TerminalPanel's collapsed state. The real
+  // state lives inside TerminalPanel (see its hydration comment);
+  // this copy only drives the dock's sash visibility. Starts `true`
+  // to match the panel's initial state, then the panel's hydration
+  // effect syncs it.
+  const [terminalCollapsed, setTerminalCollapsed] = useState(true);
+  // Bounded IDE container (the `h-[calc(100vh-220px)]` card in the
+  // normal layout, the fullscreen section otherwise). The dock's
+  // drag clamp measures it at drag start. Only one branch renders
+  // at a time, so a single ref serves both.
+  const ideContainerRef = useRef<HTMLDivElement | null>(null);
+  const toggleTerminalMaximized = useCallback(
+    () => setTerminalMaximized((m) => !m),
+    [],
+  );
+  const handleTerminalCollapsedChange = useCallback((collapsed: boolean) => {
+    setTerminalCollapsed(collapsed);
+    // Collapse wins over maximize — maximize only makes sense with
+    // an expanded panel; otherwise the editor stays hidden behind a
+    // 32px header row.
+    if (collapsed) setTerminalMaximized(false);
+  }, []);
   const installedExtensions = useInstalledExtensions();
   const activityBarItems = useMemo<ActivityBarItem[]>(() => {
     const items: ActivityBarItem[] = [...BUILTIN_ITEMS];
@@ -1434,10 +1578,14 @@ export function WorkspacePage() {
         // above the Lattice page chrome (sidebar + top app bar) and
         // the AI Assistant launcher (z-40). `bg-card` matches the
         // IDE frame so the jump into fullscreen isn't a colour
-        // flash. `w-screen h-screen` is the belt-and-braces pair to
-        // `inset-0` for browsers that don't honour `inset` on a
-        // portal-rendered element.
-        className="fixed inset-0 z-[60] flex h-screen w-screen flex-col overflow-hidden bg-card"
+        // flash. Deliberately NOT `w-screen h-screen`: `100vw/100vh`
+        // include the classic (layout-reserving) scrollbar, so on a
+        // machine with visible scrollbars the overlay lands ~17px
+        // wider than the layout viewport and grows a page-level
+        // horizontal scrollbar. Percentages on a fixed element
+        // resolve against the viewport minus scrollbars — same
+        // belt-and-braces as `inset-0`, without the overflow.
+        className="fixed inset-0 z-[60] flex h-full w-full flex-col overflow-hidden bg-card"
         role="dialog"
         aria-modal="true"
         aria-label="Fullscreen editor"
@@ -1533,6 +1681,8 @@ export function WorkspacePage() {
           <WorkspaceSidebar
             sidebarTab={sidebarTab}
             setSidebarTab={setSidebarTab}
+            sidebarWidth={sidebarWidth}
+            onSidebarWidthChange={setSidebarWidth}
             activityBarItems={activityBarItems}
             installedExtensions={installedExtensions}
             tree={tree ?? null}
@@ -1569,27 +1719,44 @@ export function WorkspacePage() {
             rootFolderName={workspaceRoot?.name ?? null}
             treeLoading={Boolean(workspaceRoot && !tree)}
           />
-          <section className="flex min-w-0 flex-1 flex-col">
-            <WorkspaceBreadcrumb
-              folderName={workspaceRoot?.name ?? null}
-              activePath={activePath}
-              onJumpToSegment={(path) => {
-                if (!path) {
+          <section
+            ref={ideContainerRef}
+            className="flex min-w-0 flex-1 flex-col"
+          >
+            {/* Maximizing the dock folds the editor chrome away —
+                breadcrumb + tab strip unmount (stateless), the
+                CodeMirror wrapper stays mounted but `hidden` so the
+                doc, undo stack and cursor survive the toggle. */}
+            {!terminalMaximized && (
+              <WorkspaceBreadcrumb
+                folderName={workspaceRoot?.name ?? null}
+                activePath={activePath}
+                onJumpToSegment={(path) => {
+                  if (!path) {
+                    if (activePath) closeTabWithConfirm(activePath);
+                    return;
+                  }
                   if (activePath) closeTabWithConfirm(activePath);
-                  return;
-                }
-                if (activePath) closeTabWithConfirm(activePath);
-              }}
-            />
-            <EditorTabs
-              openPaths={openPaths}
-              activePath={activePath}
-              pendingPaths={pendingPaths}
-              savingPaths={savingPaths}
-              onFocusTab={focusTab}
-              onCloseTab={closeTabWithConfirm}
-            />
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                }}
+              />
+            )}
+            {!terminalMaximized && (
+              <EditorTabs
+                openPaths={openPaths}
+                activePath={activePath}
+                pendingPaths={pendingPaths}
+                savingPaths={savingPaths}
+                onFocusTab={focusTab}
+                onCloseTab={closeTabWithConfirm}
+              />
+            )}
+            <div
+              className={
+                terminalMaximized
+                  ? "hidden"
+                  : "flex min-h-0 flex-1 flex-col overflow-hidden"
+              }
+            >
               <EditorArea
                 activePath={activePath}
                 content={activePath ? tabContent.get(activePath) ?? "" : ""}
@@ -1600,50 +1767,25 @@ export function WorkspacePage() {
               />
             </div>
             {/* Terminal stays mounted across fullscreen entry / exit so
-                each PTY survives. All tab instances render (inactive
-                ones are CSS-hidden) — same pattern as the normal layout. */}
-            <TerminalTabs
+                each PTY survives — the dock owns tabs, panels and the
+                resize sash. All tab instances render (inactive ones
+                are CSS-hidden) — same pattern as the normal layout. */}
+            <TerminalDock
+              workspaceId={workspace!.id}
+              cwd={workspaceRoot!.path}
               terminals={terminals}
-              activeId={activeTerminalId}
-              onFocus={setActiveTerminalId}
-              onAdd={onAddTerminal}
-              onClose={onCloseTerminal}
+              activeTerminalId={activeTerminalId}
+              onFocusTerminal={setActiveTerminalId}
+              onAddTerminal={onAddTerminal}
+              onCloseTerminal={onCloseTerminal}
+              height={terminalHeight}
+              onHeightChange={setTerminalHeight}
+              maximized={terminalMaximized}
+              onToggleMaximize={toggleTerminalMaximized}
+              collapsed={terminalCollapsed}
+              onCollapsedChange={handleTerminalCollapsedChange}
+              containerRef={ideContainerRef}
             />
-            {terminals.map((t) => {
-              const isActive = t.id === activeTerminalId;
-              return (
-                // Inactive tabs use `visibility: hidden` (not
-                // `display: none`) so xterm's CharSizeService keeps
-                // valid dimensions — a hidden-via-display-none panel
-                // throws "Cannot read properties of undefined (reading
-                // 'dimensions')" from Viewport.syncScrollArea on every
-                // output frame. `visibility: hidden` + `position:
-                // absolute` keeps the panel in the DOM and laid out but
-                // out of the document flow, so the active panel sits
-                // at its natural position.
-                <div
-                  key={t.id}
-                  aria-hidden={!isActive}
-                  style={
-                    isActive
-                      ? undefined
-                      : {
-                          visibility: "hidden",
-                          position: "absolute",
-                          inset: "0 0 0 0",
-                          pointerEvents: "none",
-                        }
-                  }
-                >
-                  <TerminalPanel
-                    workspaceId={workspace!.id}
-                    cwd={workspaceRoot!.path}
-                    terminalId={t.id}
-                    shellIdOverride={t.shellId}
-                  />
-                </div>
-              );
-            })}
           </section>
         </div>
       </div>
@@ -1816,12 +1958,28 @@ export function WorkspacePage() {
         </Button>
       </div>
 
-      <div className="-mx-4 sm:-mx-6 flex h-[calc(100vh-220px)] min-h-[520px] flex-col overflow-hidden rounded-lg border border-border bg-card">
-        <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={ideContainerRef}
+        className="-mx-4 sm:-mx-6 flex h-[calc(100vh-220px)] min-h-[520px] flex-col overflow-hidden rounded-lg border border-border bg-card"
+      >
+        {/* Maximize folds this whole column away — `hidden`, not
+            unmount (the CodeMirror doc, undo stack and open tabs all
+            survive). The column itself must hide, not just the row
+            inside it: an empty flex-1 container would still claim
+            half the card and the dock would only fill the rest. */}
+        <div
+          className={
+            terminalMaximized
+              ? "hidden"
+              : "flex min-h-0 flex-1 flex-col"
+          }
+        >
           <div className="flex min-h-0 flex-1">
             <WorkspaceSidebar
               sidebarTab={sidebarTab}
               setSidebarTab={setSidebarTab}
+              sidebarWidth={sidebarWidth}
+              onSidebarWidthChange={setSidebarWidth}
               activityBarItems={activityBarItems}
               installedExtensions={installedExtensions}
               tree={tree ?? null}
@@ -1910,50 +2068,22 @@ export function WorkspacePage() {
         </div>
 
         {hasFolder && workspaceRoot && workspace?.id && (
-          <div>
-            <TerminalTabs
-              terminals={terminals}
-              activeId={activeTerminalId}
-              onFocus={setActiveTerminalId}
-              onAdd={onAddTerminal}
-              onClose={onCloseTerminal}
-            />
-            {/* All terminals stay mounted — inactive ones are CSS-
-                hidden so their xterm + WS don't tear down on tab
-                switch. The ResizeObserver inside TerminalPanel fires
-                when `hidden` toggles, calling fit.fit() to keep the
-                active xterm sized correctly. */}
-            {terminals.map((t) => {
-              const isActive = t.id === activeTerminalId;
-              return (
-                // Inactive tabs use `visibility: hidden` (not
-                // `display: none`) so xterm's CharSizeService keeps
-                // valid dimensions — see the matching comment in the
-                // other render branch for context.
-                <div
-                  key={t.id}
-                  aria-hidden={!isActive}
-                  style={
-                    isActive
-                      ? undefined
-                      : {
-                          visibility: "hidden",
-                          position: "absolute",
-                          inset: "0 0 0 0",
-                          pointerEvents: "none",
-                        }
-                  }
-                >
-                  <TerminalPanel
-                    workspaceId={workspace.id}
-                    cwd={workspaceRoot.path}
-                    terminalId={t.id}
-                    shellIdOverride={t.shellId}
-                  />
-                </div>
-              );
-            })}
-          </div>
+          <TerminalDock
+            workspaceId={workspace.id}
+            cwd={workspaceRoot.path}
+            terminals={terminals}
+            activeTerminalId={activeTerminalId}
+            onFocusTerminal={setActiveTerminalId}
+            onAddTerminal={onAddTerminal}
+            onCloseTerminal={onCloseTerminal}
+            height={terminalHeight}
+            onHeightChange={setTerminalHeight}
+            maximized={terminalMaximized}
+            onToggleMaximize={toggleTerminalMaximized}
+            collapsed={terminalCollapsed}
+            onCollapsedChange={handleTerminalCollapsedChange}
+            containerRef={ideContainerRef}
+          />
         )}
       </div>
 
@@ -2032,6 +2162,10 @@ export function WorkspacePage() {
 interface WorkspaceSidebarProps {
   sidebarTab: string;
   setSidebarTab: (id: string) => void;
+  /** Pixel width of the panel column (activity bar excluded). */
+  sidebarWidth: number;
+  /** Live width updates while the sash is being dragged. */
+  onSidebarWidthChange: (width: number) => void;
   activityBarItems: ActivityBarItem[];
   installedExtensions: import("@/lib/extensions/types").InstalledExtension[];
   // All the props <ExplorerSidebar> needs (lifted from WorkspacePage).
@@ -2074,6 +2208,8 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const {
     sidebarTab,
     setSidebarTab,
+    sidebarWidth,
+    onSidebarWidthChange,
     activityBarItems,
     installedExtensions,
     tree,
@@ -2127,6 +2263,64 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     }
   }
 
+  // ─── Drag-to-resize sash (VS Code-style side bar) ──────────────
+  // Pointer-capture based: `setPointerCapture` on pointerdown routes
+  // every subsequent pointermove to the sash even when the cursor
+  // crosses into the editor column or an extension iframe (which
+  // would otherwise swallow the events and stall the drag).
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeRef = useRef<{
+    startX: number;
+    startWidth: number;
+    width: number;
+  } | null>(null);
+
+  const handleResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    resizeRef.current = {
+      startX: e.clientX,
+      startWidth: sidebarWidth,
+      width: sidebarWidth,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setIsResizing(true);
+    // Keep the resize cursor + stop text selection while dragging
+    // outside the sash's own bounds.
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  const handleResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const s = resizeRef.current;
+    if (!s) return;
+    const next = clampSidebarWidth(s.startWidth + (e.clientX - s.startX));
+    s.width = next;
+    onSidebarWidthChange(next);
+  };
+
+  const endResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const s = resizeRef.current;
+    if (!s) return;
+    resizeRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* pointer already released */
+    }
+    setIsResizing(false);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    // Save the ref value, not the `sidebarWidth` prop — the prop can
+    // be one render behind the final pointermove.
+    saveSidebarWidth(s.width);
+  };
+
+  const resetResize = () => {
+    onSidebarWidthChange(SIDEBAR_WIDTH_DEFAULT);
+    saveSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+  };
+
   return (
     <aside className="flex min-h-0">
       <SidebarActivityBar
@@ -2134,7 +2328,29 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         activeId={effectiveTab}
         onSelect={setSidebarTab}
       />
-      <div className="flex w-64 shrink-0 flex-col border-r border-border bg-muted/30">
+      <div
+        className="relative flex shrink-0 flex-col border-r border-border bg-muted/30"
+        style={{ width: sidebarWidth }}
+      >
+        {/* Resize sash — invisible 8px hit area over the border,
+            lights up on hover/drag like VS Code's sash. Double-click
+            snaps back to the default width. */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          title="Drag to resize · double-click to reset"
+          onPointerDown={handleResizeStart}
+          onPointerMove={handleResizeMove}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={resetResize}
+          className={`absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize touch-none after:absolute after:inset-y-0 after:left-1/2 after:w-0.5 after:-translate-x-1/2 after:rounded-full after:content-[''] ${
+            isResizing
+              ? "after:bg-primary/70"
+              : "after:bg-transparent hover:after:bg-primary/40"
+          }`}
+        />
         {effectiveTab === "explorer" && (
           <ExplorerSidebar
             tree={tree}
@@ -2181,6 +2397,207 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         )}
       </div>
     </aside>
+  );
+}
+
+// ─── Terminal dock (tabs + panels + resize sash) ────────────────
+// Shared by both render branches (normal IDE + editor fullscreen).
+// Owns the horizontal resize sash on the dock's top edge — same
+// pointer-capture pattern as the sidebar's sash, but `row`
+// orientation: dragging UP grows the dock. The height persists per
+// browser alongside the sidebar width. Maximize flips the
+// surrounding layout (the parent hides the editor rows); collapse
+// lives inside TerminalPanel and is mirrored up via
+// `onCollapsedChange` so the sash can hide itself while there is
+// nothing to drag.
+interface TerminalDockProps {
+  workspaceId: string;
+  cwd: string;
+  terminals: TerminalInstance[];
+  activeTerminalId: string | null;
+  onFocusTerminal: (id: string) => void;
+  onAddTerminal: () => void;
+  onCloseTerminal: (id: string) => void;
+  /** Resizable dock height in pixels (persisted by the parent). */
+  height: number;
+  onHeightChange: (height: number) => void;
+  maximized: boolean;
+  onToggleMaximize: () => void;
+  /** Mirror of the active panel's collapsed state — hides the sash. */
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
+  /** Bounded IDE container — source of the drag clamp. Structural
+   *  ref type so it accepts either React 18 `MutableRefObject` or
+   *  React 19 `RefObject` from the parent's `useRef` call. */
+  containerRef: { current: HTMLDivElement | null };
+}
+
+function TerminalDock({
+  workspaceId,
+  cwd,
+  terminals,
+  activeTerminalId,
+  onFocusTerminal,
+  onAddTerminal,
+  onCloseTerminal,
+  height,
+  onHeightChange,
+  maximized,
+  onToggleMaximize,
+  collapsed,
+  onCollapsedChange,
+  containerRef,
+}: TerminalDockProps) {
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeRef = useRef<{
+    startY: number;
+    startHeight: number;
+    height: number;
+    maxHeight: number;
+  } | null>(null);
+
+  const handleResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // Clamp against the live container so the dock can't push the
+    // editor fully off-screen on a small window. Falls back to the
+    // absolute max when the ref hasn't attached yet.
+    const containerH = containerRef.current?.clientHeight ?? 0;
+    const maxHeight =
+      containerH > 0
+        ? containerH - TERMINAL_RESERVE_PX
+        : TERMINAL_HEIGHT_MAX;
+    resizeRef.current = {
+      startY: e.clientY,
+      startHeight: height,
+      height,
+      maxHeight,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setIsResizing(true);
+    // Keep the resize cursor + stop text selection while dragging
+    // outside the sash's own bounds.
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  const handleResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const s = resizeRef.current;
+    if (!s) return;
+    // Bottom-docked: dragging up (clientY shrinks) grows the panel,
+    // mirroring VS Code's panel sash.
+    const next = clampTerminalHeight(
+      s.startHeight + (s.startY - e.clientY),
+      s.maxHeight,
+    );
+    s.height = next;
+    onHeightChange(next);
+  };
+
+  const endResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const s = resizeRef.current;
+    if (!s) return;
+    resizeRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* pointer already released */
+    }
+    setIsResizing(false);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    // Save the ref value, not the `height` prop — the prop can be
+    // one render behind the final pointermove (same as the sidebar).
+    saveTerminalHeight(s.height);
+  };
+
+  const resetResize = () => {
+    onHeightChange(TERMINAL_HEIGHT_DEFAULT);
+    saveTerminalHeight(TERMINAL_HEIGHT_DEFAULT);
+  };
+
+  return (
+    // `relative` anchors the sash; `shrink-0` keeps the natural-height
+    // dock from flex-shrinking in the parent column (the editor row's
+    // `flex-1 min-h-0` absorbs all size changes instead). Maximized:
+    // the dock becomes the flex remainder — the parent hides the
+    // editor rows to open the slot up.
+    <div
+      className={`relative ${
+        maximized ? "flex min-h-0 flex-1 flex-col" : "shrink-0"
+      }`}
+    >
+      {/* No sash while maximized (restore first, like VS Code) or
+          collapsed (a 32px header has nothing to resize). */}
+      {!maximized && !collapsed && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize terminal"
+          title="Drag to resize · double-click to reset"
+          onPointerDown={handleResizeStart}
+          onPointerMove={handleResizeMove}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={resetResize}
+          className={`absolute inset-x-0 -top-1 z-20 h-2 cursor-row-resize touch-none before:absolute before:inset-x-0 before:top-1/2 before:h-0.5 before:-translate-y-1/2 before:rounded-full before:content-[''] ${
+            isResizing
+              ? "before:bg-primary/70"
+              : "before:bg-transparent hover:before:bg-primary/40"
+          }`}
+        />
+      )}
+      <TerminalTabs
+        terminals={terminals}
+        activeId={activeTerminalId}
+        onFocus={onFocusTerminal}
+        onAdd={onAddTerminal}
+        onClose={onCloseTerminal}
+      />
+      {terminals.map((t) => {
+        const isActive = t.id === activeTerminalId;
+        return (
+          // Inactive tabs use `visibility: hidden` (not
+          // `display: none`) so xterm's CharSizeService keeps valid
+          // dimensions — a hidden-via-display-none panel throws
+          // "Cannot read properties of undefined (reading
+          // 'dimensions')" from Viewport.syncScrollArea on every
+          // output frame. `visibility: hidden` + `position: absolute`
+          // keeps the panel in the DOM and laid out but out of the
+          // document flow, so the active panel sits at its natural
+          // position.
+          <div
+            key={t.id}
+            aria-hidden={!isActive}
+            className={
+              isActive && maximized ? "flex min-h-0 flex-1 flex-col" : undefined
+            }
+            style={
+              isActive
+                ? undefined
+                : {
+                    visibility: "hidden",
+                    position: "absolute",
+                    inset: "0 0 0 0",
+                    pointerEvents: "none",
+                  }
+            }
+          >
+            <TerminalPanel
+              workspaceId={workspaceId}
+              cwd={cwd}
+              terminalId={t.id}
+              shellIdOverride={t.shellId}
+              height={height}
+              maximized={maximized}
+              resizing={isResizing}
+              onToggleMaximize={isActive ? onToggleMaximize : undefined}
+              onCollapsedChange={onCollapsedChange}
+            />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

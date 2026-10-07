@@ -37,7 +37,9 @@ export function TerminalTabs({
   // single xterm or an empty placeholder when length is 0.
   if (terminals.length === 0) return null;
   return (
-    <div className="flex h-9 items-center gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2">
+    // `shrink-0` — inside the maximized dock's flex column the tab
+    // strip must keep its row height instead of flex-shrinking away.
+    <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-muted/30 px-2">
       {terminals.map((term) => {
         const isActive = term.id === activeId;
         return (
