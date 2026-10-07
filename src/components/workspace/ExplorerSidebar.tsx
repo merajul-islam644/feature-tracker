@@ -149,7 +149,14 @@ export function ExplorerSidebar(props: ExplorerSidebarProps) {
   return (
     <aside
       aria-label="Explorer"
-      className="flex w-64 shrink-0 flex-col border-r border-border bg-muted/30"
+      // `min-h-0 flex-1` — the column parent (WorkspaceSidebar's w-64
+      // wrapper) has a bounded height, but a flex item's min-content
+      // floor would otherwise stretch this aside to the full tree
+      // height; the tree <ul> then never overflows and never scrolls
+      // (the outer overflow-hidden just clips the tail). Shrinking the
+      // aside to the wrapper height pushes the overflow down into the
+      // <ul>, where `overflow-y-auto` actually scrolls.
+      className="flex min-h-0 w-full flex-1 flex-col border-r border-border bg-muted/30"
     >
       <header className="flex h-9 items-center justify-between border-b border-border px-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         <span>Explorer</span>
