@@ -170,9 +170,11 @@ import {
 import {
   gitBranches,
   gitCheckout,
+  gitBlame,
   gitCommit,
   gitDiff,
   gitDiscard,
+  gitFileDiffHunks,
   gitPull,
   gitPush,
   gitStage,
@@ -1597,6 +1599,8 @@ app.get<{
 //
 //    GET  /dev-server/:wsId/git/status?root=   porcelain parse
 //    GET  /dev-server/:wsId/git/diff?root=&path=&staged=
+//    GET  /dev-server/:wsId/git/file-hunks?root=&path=   gutter data
+//    GET  /dev-server/:wsId/git/blame?root=&path=        blame readout
 //    GET  /dev-server/:wsId/git/branches?root=
 //    POST /dev-server/:wsId/git/stage          { root, paths[] }
 //    POST /dev-server/:wsId/git/unstage        { root, paths[] }
@@ -1647,6 +1651,42 @@ app.get<{
   try {
     const diff = await gitDiff(q.data.root, q.data.path, q.data.staged === "1");
     return reply.send({ diff });
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string; path?: string };
+}>("/dev-server/:workspaceId/git/file-hunks", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const q = GitRootQuery.extend({
+    path: z.string().min(1).max(2048),
+  }).safeParse(req.query);
+  if (!q.success) return reply.code(400).send({ error: q.error.flatten() });
+  try {
+    const hunks = await gitFileDiffHunks(q.data.root, q.data.path);
+    return reply.send({ hunks });
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string; path?: string };
+}>("/dev-server/:workspaceId/git/blame", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const q = GitRootQuery.extend({
+    path: z.string().min(1).max(2048),
+  }).safeParse(req.query);
+  if (!q.success) return reply.code(400).send({ error: q.error.flatten() });
+  try {
+    const blame = await gitBlame(q.data.root, q.data.path);
+    return reply.send({ blame });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
   }

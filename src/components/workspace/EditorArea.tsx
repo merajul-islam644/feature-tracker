@@ -24,12 +24,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Decoration,
   EditorView,
+  GutterMarker,
   hoverTooltip,
   keymap,
+  WidgetType,
+  gutter,
   type EditorView as EditorViewType,
 } from "@codemirror/view";
-import { EditorState, type Extension } from "@codemirror/state";
+import {
+  EditorState,
+  RangeSet,
+  StateEffect,
+  StateField,
+  type Extension,
+  type Range,
+} from "@codemirror/state";
 import {
   completeFromList,
   type Completion,
@@ -48,6 +59,9 @@ import type {
   LspHover,
   LspLocation,
 } from "@/types/dev-server";
+import type { GitBlameLine, GitDiffHunk } from "@/types/git";
+import { devServerApi } from "@/services/devServerApi";
+import { useDevServer } from "@/contexts/DevServerContext";
 import { basename } from "./treeHelpers";
 
 interface EditorAreaProps {
@@ -98,6 +112,10 @@ interface EditorAreaProps {
   renameSignal?: number;
   /** Open a path at a 1-indexed line/column — how peek rows navigate. */
   onNavigate?: (path: string, line: number, column: number) => void;
+  // ── Editor git integration ──────────────────────────────────────
+  /** Inline blame readout on the cursor line. Gutter change-bars are
+   *  always on; blame is toggled from the status bar (persisted). */
+  blameEnabled?: boolean;
 }
 
 // Maps a file path to a CodeMirror language name. Mirrors
@@ -317,6 +335,182 @@ function hoverContentText(contents: unknown): string {
   return "";
 }
 
+// ─── Editor git integration ──────────────────────────────────────
+// Two always-registered extensions fed from React via StateEffects:
+//   1. diff gutter — a colored bar per changed line, from the server's
+//      `git diff -U0 HEAD` hunk parse. Bars follow the doc through
+//      edits (RangeSet.map) and are rebuilt wholesale on each fetch.
+//   2. inline blame — a ghost-text widget at the end of the CURSOR
+//      line (GitLens-style current-line blame), rebuilt whenever the
+//      blame data lands or the selection moves.
+// Both fields are module-level singletons: @uiw reconfigures the full
+// extension list on every render, and a per-render StateField would
+// reset its state each time. Gutter bars sit right of the line
+// numbers (GitHub-web placement) — VS Code's left-of-numbers position
+// would require rebuilding basicSetup's gutter order.
+
+/** Apply a fresh hunk list (1-based lines, from the server). */
+const applyDiffHunks = StateEffect.define<GitDiffHunk[]>();
+
+class GitBarMarker extends GutterMarker {
+  constructor(private kind: "added" | "modified" | "deleted") {
+    super();
+  }
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = `cm-git-bar cm-git-bar-${this.kind}`;
+    return el;
+  }
+}
+const BAR_ADDED = new GitBarMarker("added");
+const BAR_MODIFIED = new GitBarMarker("modified");
+const BAR_DELETED = new GitBarMarker("deleted");
+/** Invisible spacer — keeps the gutter a constant width so bars don't
+ *  shift the line numbers on repos whose first view has no changes. */
+const BAR_SPACER = new (class extends GutterMarker {
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = "cm-git-bar cm-git-bar-spacer";
+    return el;
+  }
+})();
+
+const diffField = StateField.define<RangeSet<GutterMarker>>({
+  create: () => RangeSet.empty,
+  update(value, tr) {
+    const effect = tr.effects.find((e) => e.is(applyDiffHunks));
+    if (effect) {
+      const doc = tr.state.doc;
+      const ranges: Range<GutterMarker>[] = [];
+      for (const h of effect.value) {
+        const marker =
+          h.kind === "added"
+            ? BAR_ADDED
+            : h.kind === "modified"
+              ? BAR_MODIFIED
+              : BAR_DELETED;
+        // Pure-deletion hunks report the line that now sits where the
+        // block was (1-based) — clamp to the last line at EOF.
+        const firstLine = Math.min(Math.max(h.line, 1), doc.lines);
+        for (let i = 0; i < Math.min(h.count, 400); i++) {
+          const lineObj = doc.line(Math.min(firstLine + i, doc.lines));
+          // Same-position duplicates (a deleted marker landing on the
+          // next hunk's first line) are collapsed — RangeSet rejects
+          // two side-0 ranges at one position.
+          if (ranges.length > 0 && ranges[ranges.length - 1].from === lineObj.from) {
+            continue;
+          }
+          ranges.push({ from: lineObj.from, to: lineObj.from, value: marker });
+        }
+      }
+      return RangeSet.of(ranges, true);
+    }
+    if (tr.docChanged) return value.map(tr.changes);
+    return value;
+  },
+});
+
+const gitGutterExtension = gutter({
+  class: "cm-gitgutter",
+  markers: (view) => view.state.field(diffField, false) ?? RangeSet.empty,
+  initialSpacer: () => BAR_SPACER,
+});
+
+/** Apply a fresh blame map (1-based line → row). */
+const applyBlameData = StateEffect.define<Map<number, GitBlameLine>>();
+
+class BlameWidget extends WidgetType {
+  constructor(readonly row: GitBlameLine) {
+    super();
+  }
+  eq(other: BlameWidget) {
+    return (
+      other.row.line === this.row.line &&
+      other.row.hash === this.row.hash &&
+      other.row.time === this.row.time
+    );
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-git-blame";
+    span.setAttribute("data-testid", "git-blame");
+    span.textContent = `${this.row.hash} ${this.row.author} · ${blameRelativeTime(this.row.time)} · ${this.row.summary}`;
+    return span;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+/** "3 days ago" — GitLens-style compact author-time. Epoch seconds in,
+ *  coarse human string out; future clocks round down to "just now". */
+function blameRelativeTime(epochSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  const weeks = Math.floor(days / 7);
+  if (days < 30) return `${weeks}w ago`;
+  const months = Math.floor(days / 30);
+  if (days < 365) return `${months}mo ago`;
+  const years = Math.floor(days / 365);
+  return `${years}y ago`;
+}
+
+interface BlameFieldState {
+  map: Map<number, GitBlameLine>;
+  cursorLine: number;
+  decos: RangeSet<Decoration>;
+}
+
+function blameDecos(
+  state: EditorState,
+  map: Map<number, GitBlameLine>,
+  cursorLine: number,
+): RangeSet<Decoration> {
+  const row = map.get(cursorLine);
+  if (!row) return RangeSet.empty;
+  try {
+    const line = state.doc.line(cursorLine);
+    return RangeSet.of([
+      Decoration.widget({ widget: new BlameWidget(row), side: 1 }).range(
+        line.to,
+      ),
+    ]);
+  } catch {
+    return RangeSet.empty;
+  }
+}
+
+const blameField = StateField.define<BlameFieldState>({
+  create: () => ({
+    map: new Map(),
+    cursorLine: 1,
+    decos: RangeSet.empty,
+  }),
+  update(value, tr) {
+    const effect = tr.effects.find((e) => e.is(applyBlameData));
+    const map = effect ? effect.value : value.map;
+    const cursorLine = tr.state.doc.lineAt(tr.state.selection.main.head).number;
+    if (!effect && cursorLine === value.cursorLine && !tr.docChanged) {
+      return value;
+    }
+    return {
+      map,
+      cursorLine,
+      decos: blameDecos(tr.state, map, cursorLine),
+    };
+  },
+  // Field value is a BlameFieldState wrapper, not a bare RangeSet,
+  // so derive the decoration facet from `.decos` instead of `.from`.
+  provide: (f) =>
+    EditorView.decorations.compute([f], (state) => state.field(f).decos),
+});
+
 export function EditorArea({
   activePath,
   content,
@@ -332,6 +526,7 @@ export function EditorArea({
   onRename,
   renameSignal,
   onNavigate,
+  blameEnabled = true,
 }: EditorAreaProps) {
   // Build the updateListener extension once per `onCursorChange`
   // reference. The callback itself is captured at extension-create
@@ -464,9 +659,15 @@ export function EditorArea({
   // Internal view ref — the rename input and references peek need
   // cursor positions without a parent callback round-trip.
   const viewRef = useRef<EditorViewType | null>(null);
+  // Bumped once the CodeMirror view exists. The git dispatch effects
+  // below depend on it: their fetches can resolve before the view is
+  // created (Vite transform latency on first open), and the plain
+  // `viewRef.current` guard would silently drop that first payload.
+  const [editorReady, setEditorReady] = useState(false);
   const handleView = useCallback(
     (view: EditorViewType) => {
       viewRef.current = view;
+      setEditorReady(true);
       onCreateEditor?.(view);
     },
     [onCreateEditor],
@@ -657,6 +858,94 @@ export function EditorArea({
   // line they point at without re-reading the file.
   const activeLines = useMemo(() => content.split("\n"), [content]);
 
+  // ─── Editor git integration: fetch + dispatch ───────────────────
+  // The panel-level git data lives on the server; this component only
+  // needs the per-file slices. Like OutlinePanel, it self-fetches via
+  // devServerApi and feeds the editors' module-level fields through
+  // StateEffects. Both fetches debounce behind the autosave rhythm so
+  // a typing burst costs one git spawn, not one per keystroke.
+  const { workspace, workspaceRoot } = useDevServer();
+  const workspaceId = workspace?.id ?? null;
+  const root = workspaceRoot?.path ?? null;
+
+  // Diff hunks (gutter bars) — `git diff -U0 HEAD` server-side.
+  const [diffHunks, setDiffHunks] = useState<GitDiffHunk[]>([]);
+  useEffect(() => {
+    setDiffHunks([]);
+    if (!activePath || !workspaceId || !root) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      devServerApi
+        .gitFileHunks({ workspaceId, root, path: activePath })
+        .then((hunks) => {
+          if (!cancelled) setDiffHunks(hunks);
+        })
+        .catch(() => {
+          // Not a repo / git missing / file vanished — an empty gutter
+          // is the honest state; the Source Control panel owns toasts.
+          if (!cancelled) setDiffHunks([]);
+        });
+    }, 700);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [activePath, content, workspaceId, root]);
+
+  // Blame — heavier spawn, so it also rate-limits: while typing keeps
+  // autosave firing, a refetch younger than 4s keeps the previous map
+  // (lines drift by a few until it settles — invisible at a glance).
+  const [blameMap, setBlameMap] = useState<Map<number, GitBlameLine> | null>(
+    null,
+  );
+  const blameFetchedAt = useRef(0);
+  useEffect(() => {
+    if (!activePath || !workspaceId || !root) {
+      setBlameMap(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (Date.now() - blameFetchedAt.current < 4_000) return;
+      blameFetchedAt.current = Date.now();
+      devServerApi
+        .gitBlame({ workspaceId, root, path: activePath })
+        .then((rows) => {
+          if (cancelled) return;
+          if (!rows) {
+            setBlameMap(null);
+            return;
+          }
+          const map = new Map<number, GitBlameLine>();
+          for (const r of rows) map.set(r.line, r);
+          setBlameMap(map);
+        })
+        .catch(() => {
+          if (!cancelled) setBlameMap(null);
+        });
+    }, 900);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [blameEnabled, activePath, content, workspaceId, root]);
+
+  // Feed the fields. The dispatches are idempotent — a re-render with
+  // unchanged data re-applies the same payload and the fields no-op.
+  // `editorReady` re-fires them once the view exists, covering the
+  // fetch-won-the-race case above.
+  useEffect(() => {
+    if (!editorReady) return;
+    viewRef.current?.dispatch({ effects: applyDiffHunks.of(diffHunks) });
+  }, [diffHunks, editorReady]);
+
+  useEffect(() => {
+    if (!editorReady) return;
+    viewRef.current?.dispatch({
+      effects: applyBlameData.of(blameEnabled ? (blameMap ?? new Map()) : new Map()),
+    });
+  }, [blameMap, blameEnabled, editorReady]);
+
   // No folder → parent owns the empty state.
   if (!hasFolder) return null;
 
@@ -689,6 +978,14 @@ export function EditorArea({
   for (const l of lintExtension) extensions.push(l);
   for (const h of hoverExtension) extensions.push(h);
   extensions.push(...lspNavExtensions);
+  // Editor git integration — change bars + inline blame (module-level
+  // extensions; data flows in via the StateEffect dispatches above).
+  // diffField MUST be registered on the editor state: the gutter only
+  // READS it (`markers` callback); without registration every
+  // applyDiffHunks dispatch lands on a field that doesn't exist.
+  extensions.push(diffField);
+  extensions.push(gitGutterExtension);
+  extensions.push(blameField);
   return (
     // The wrapper is the editor's flex slot (`flex-1` for height,
     // `overflow-hidden` so a too-tall canvas never escapes the column).

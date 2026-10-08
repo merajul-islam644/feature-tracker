@@ -483,3 +483,41 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Editor git integration (EditorArea) — gutter change bars + the
+   inline blame ghost text. Same as .cm-lsp-hover: the editor is
+   permanently oneDark, so a fixed zinc-family palette is deliberate.
+   The bars live in their own cm-gutter to the right of the line
+   numbers (GitHub-web placement — VS Code's left-of-numbers spot
+   would need basicSetup's gutter order rebuilt). */
+.cm-gitgutter {
+  width: 7px;
+}
+.cm-git-bar {
+  width: 3px;
+  height: 66%;
+  margin-top: 17%;
+  border-radius: 1.5px;
+}
+.cm-git-bar-added {
+  background: #4ade80;
+}
+.cm-git-bar-modified {
+  background: #60a5fa;
+}
+.cm-git-bar-deleted {
+  background: #f87171;
+}
+.cm-git-bar-spacer {
+  background: transparent;
+}
+.cm-git-blame {
+  margin-left: 28px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  font-style: italic;
+  color: #8b8b96;
+  white-space: pre;
+  pointer-events: none;
+  user-select: none;
+}

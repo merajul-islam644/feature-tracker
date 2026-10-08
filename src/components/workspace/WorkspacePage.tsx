@@ -1920,6 +1920,28 @@ export function WorkspacePage() {
     setCursor(null);
   }, [activePath]);
 
+  // ─── Inline blame toggle (editor git integration) ─────────────
+  // Persisted separately from the terminals/tabs — it's a preference,
+  // not workspace state. Default on (GitLens's current-line blame).
+  const [blameEnabled, setBlameEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("lattice.workspace.blame.v1") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleBlame = useCallback(() => {
+    setBlameEnabled((on) => {
+      const next = !on;
+      try {
+        window.localStorage.setItem("lattice.workspace.blame.v1", next ? "1" : "0");
+      } catch {
+        // Storage unavailable — the toggle still works for the session.
+      }
+      return next;
+    });
+  }, []);
+
   // ─── Terminal tabs ────────────────────────────────────────────
   // Per-(workspaceId, cwd) list of independent terminals. Each
   // entry owns its own PTY on mcp-server (keyed by
@@ -2706,6 +2728,7 @@ export function WorkspacePage() {
                   onRename={handleRename}
                   onNavigate={openSearchResult}
                   renameSignal={renameSignal}
+                  blameEnabled={blameEnabled}
                 />
               ) : (
                 <WorkspaceEmptyState
@@ -2747,6 +2770,8 @@ export function WorkspacePage() {
         folderCount={treeCounts.dirs}
         problemsCount={problems.length + lspProblemCount}
         onShowProblems={() => setSidebarTab("problems")}
+        blameEnabled={blameEnabled}
+        onToggleBlame={toggleBlame}
       />
 
       {/* Hidden filename indicator so screen readers can announce the

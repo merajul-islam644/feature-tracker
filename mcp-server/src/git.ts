@@ -449,3 +449,186 @@ export async function gitDiff(
   if (res.code !== 0) gitFail("diff", res);
   return capTail(res.stdout, DIFF_MAX_BYTES);
 }
+
+// ────────────────────────────────────────────────────────────────────
+//  Per-file change hunks + blame — data for the editor gutter
+//  decorations and the inline blame readout (editor git integration).
+//
+//  Hunks come from `diff -U0 HEAD`: comparing against HEAD (not the
+//  index) matches VS Code's gutter, which colors staged and unstaged
+//  edits alike. A pure-deletion hunk leaves no new-file line to color,
+//  so it reports the line that now sits where the block was — the
+//  editor clamps it to the last line at EOF.
+// ────────────────────────────────────────────────────────────────────
+
+export interface GitDiffHunk {
+  kind: "added" | "modified" | "deleted";
+  /** 1-based first NEW-file line the marker covers. */
+  line: number;
+  /** New-file lines covered; for `deleted`, how many lines vanished. */
+  count: number;
+}
+
+/** Number of lines in a workspace file (counted here so the client
+ *  doesn't need a second round-trip for the whole-file-added case). */
+async function countLines(root: string, relPath: string): Promise<number> {
+  const abs = safeResolveUserFolder(root, relPath);
+  if (!abs) return 0;
+  const fs = await import("node:fs/promises");
+  try {
+    const text = await fs.readFile(abs, "utf8");
+    return text.length === 0 ? 0 : text.split("\n").length;
+  } catch {
+    return 0;
+  }
+}
+
+function parseDiffHunks(diffText: string): GitDiffHunk[] {
+  const hunks: GitDiffHunk[] = [];
+  const re = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(diffText))) {
+    const oldCount = m[2] === undefined ? 1 : Number(m[2]);
+    const newStart = Number(m[3]);
+    const newCount = m[4] === undefined ? 1 : Number(m[4]);
+    if (oldCount === 0 && newCount > 0) {
+      hunks.push({ kind: "added", line: newStart, count: newCount });
+    } else if (newCount === 0 && oldCount > 0) {
+      hunks.push({ kind: "deleted", line: newStart, count: oldCount });
+    } else if (oldCount > 0 && newCount > 0) {
+      hunks.push({ kind: "modified", line: newStart, count: newCount });
+      if (oldCount > newCount) {
+        hunks.push({
+          kind: "deleted",
+          line: newStart + newCount,
+          count: oldCount - newCount,
+        });
+      }
+    }
+  }
+  return hunks;
+}
+
+export async function gitFileDiffHunks(
+  root: string,
+  relPath: string,
+): Promise<GitDiffHunk[]> {
+  requireRoot(root);
+  validatedPath(root, relPath);
+  const args = [
+    "--no-optional-locks",
+    "diff",
+    "--no-color",
+    "-U0",
+    "HEAD",
+    "--",
+    relPath,
+  ];
+  const res = await runGit(root, args);
+  if (res.code !== 0) {
+    // `diff HEAD` on an unborn HEAD (no commits yet) fails; a brand-new
+    // repo should still show every line as added — same as untracked.
+    const head = await runGit(root, ["rev-parse", "--verify", "-q", "HEAD"]);
+    if (head.code !== 0) {
+      const lineCount = await countLines(root, relPath);
+      return lineCount > 0 ? [{ kind: "added", line: 1, count: lineCount }] : [];
+    }
+    gitFail("diff", res);
+  }
+  const hunks = parseDiffHunks(capTail(res.stdout, DIFF_MAX_BYTES));
+  if (hunks.length > 0) return hunks;
+  // No hunks — genuinely unchanged, or never committed (untracked
+  // files have no baseline so diff prints nothing). One cheap call
+  // tells them apart.
+  const tracked = await runGit(root, [
+    "--no-optional-locks",
+    "ls-files",
+    "--error-unmatch",
+    "--",
+    relPath,
+  ]);
+  if (tracked.code !== 0) {
+    const lineCount = await countLines(root, relPath);
+    return lineCount > 0 ? [{ kind: "added", line: 1, count: lineCount }] : [];
+  }
+  return hunks;
+}
+
+// ────────────────────────────────────────────────────────────────────
+//  Blame — `blame --porcelain` parsed to one row per working-file
+//  line. Porcelain groups consecutive lines from the same commit: one
+//  header (`hash origLine finalLine [numLines]`) + a metadata block,
+//  then `numLines` tab-prefixed content lines. Only author/time/
+//  summary survive — the editor's readout needs nothing else.
+// ────────────────────────────────────────────────────────────────────
+
+export interface GitBlameLine {
+  /** 1-based line in the current working file. */
+  line: number;
+  /** Abbreviated commit hash (8 chars, GitLens-style). */
+  hash: string;
+  author: string;
+  /** Author-time as epoch seconds. */
+  time: number;
+  summary: string;
+}
+
+export async function gitBlame(
+  root: string,
+  relPath: string,
+): Promise<GitBlameLine[] | null> {
+  requireRoot(root);
+  validatedPath(root, relPath);
+  const res = await runGit(root, [
+    "--no-optional-locks",
+    "blame",
+    "--porcelain",
+    "--",
+    relPath,
+  ]);
+  if (res.code !== 0) {
+    const detail = res.stderr.trim();
+    if (/not a git repository|no such path.*exists|does not have a commit/i.test(detail)) {
+      return null;
+    }
+    gitFail("blame", res);
+  }
+  const rows: GitBlameLine[] = [];
+  let cur: { hash: string; author: string; time: number; summary: string } = {
+    hash: "",
+    author: "",
+    time: 0,
+    summary: "",
+  };
+  let remaining = 0;
+  let nextLine = 0;
+  for (const raw of capTail(res.stdout, DIFF_MAX_BYTES).split("\n")) {
+    if (remaining > 0) {
+      if (raw.startsWith("\t")) {
+        rows.push({
+          line: nextLine,
+          hash: cur.hash,
+          author: cur.author,
+          time: cur.time,
+          summary: cur.summary,
+        });
+        nextLine += 1;
+        remaining -= 1;
+        continue;
+      }
+      // A header before the group's content ran out shouldn't happen;
+      // fall through and re-parse defensively.
+    }
+    const header = /^([0-9a-f]{7,40}) (\d+) (\d+)(?: (\d+))?$/.exec(raw);
+    if (header) {
+      cur = { hash: header[1].slice(0, 8), author: "", time: 0, summary: "" };
+      nextLine = Number(header[3]);
+      remaining = header[4] ? Number(header[4]) : 1;
+      continue;
+    }
+    if (raw.startsWith("author ")) cur.author = raw.slice(7);
+    else if (raw.startsWith("author-time ")) cur.time = Number(raw.slice(12));
+    else if (raw.startsWith("summary ")) cur.summary = raw.slice(8);
+  }
+  return rows;
+}
