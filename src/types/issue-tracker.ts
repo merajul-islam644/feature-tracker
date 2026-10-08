@@ -353,7 +353,29 @@ export type ChatToolName =
   | "create_flow"
   | "update_flow"
   | "delete_flow"
-  | "verify_live_url";
+  | "verify_live_url"
+  // ── Workspace (/panel) tools — VS Code-style file, terminal, search
+  // and git actions over the folder the user picked in the workspace.
+  | "workspace_list_files"
+  | "workspace_read_file"
+  | "workspace_write_file"
+  | "workspace_create_folder"
+  | "workspace_delete_path"
+  | "workspace_rename_path"
+  | "workspace_search"
+  | "workspace_exec_command"
+  | "workspace_npm_scripts"
+  | "workspace_open_file"
+  | "workspace_git_status"
+  | "workspace_git_branches"
+  | "workspace_git_diff"
+  | "workspace_git_stage"
+  | "workspace_git_unstage"
+  | "workspace_git_discard"
+  | "workspace_git_commit"
+  | "workspace_git_push"
+  | "workspace_git_pull"
+  | "workspace_git_checkout";
 
 // Anthropic `tools` array shape — declared here once so both the
 // client payload and the proxy can speak the same vocabulary.

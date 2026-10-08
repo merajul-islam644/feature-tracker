@@ -533,6 +533,321 @@ export const chatTools: AnthropicTool[] = [
       required: ["url"],
     },
   },
+
+  // ── Workspace (/panel) tools ────────────────────────────────────
+  // Every one of these operates on the folder the user picked in the
+  // VS Code-style workspace (`/projects/:projectId/:envSlug/panel`).
+  // All resolve the workspace id + root from CURRENT STATE `workspace`;
+  // when that block is absent the dispatch refuses with "no workspace
+  // folder is open" — never guess a path. Relative paths ONLY (they are
+  // resolved against the workspace root server-side; an absolute path
+  // or a `..` escape is refused by the backend's traversal guard).
+
+  {
+    name: "workspace_list_files",
+    description:
+      "List the file tree of the workspace folder (Explorer view). Use when the user asks what files exist, or before reading a file whose exact path you don't know. Hides node_modules/.git; caps at 5000 entries and 8 levels deep. Keep maxDepth small (1-3) — the response is a tree string, and deep trees waste context.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Optional sub-folder to list, relative to the workspace root. Omit for the root.",
+        },
+        maxDepth: {
+          type: "number",
+          description:
+            "How many levels deep to walk (1-8). Default 2. Use 1 for a quick overview, 3+ only when the user asks for the full tree of a small folder.",
+        },
+      },
+    },
+  },
+  {
+    name: "workspace_read_file",
+    description:
+      "Read a text file from the workspace. Use to inspect code, config, or output before editing it (ALWAYS read before you rewrite a whole file). The path is workspace-relative. Returns the UTF-8 content — long files are truncated with a notice. Refuses .env / credential files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "File path relative to the workspace root, e.g. \"src/main.ts\".",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "workspace_write_file",
+    description:
+      "Create or overwrite a text file in the workspace (auto-creates parent folders, 1MB cap). Use for new files or complete rewrites. For SMALL targeted edits to an existing file, still read the file first and write back the full updated content. Do NOT use for renaming (use workspace_rename_path) or deletion. Refuses .env / credential files. After writing, offer to run the tests or the build to verify.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "File path relative to the workspace root. Missing parents are created.",
+        },
+        content: {
+          type: "string",
+          description: "The FULL new file content (UTF-8).",
+        },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "workspace_create_folder",
+    description:
+      "Create a directory in the workspace (mkdir -p — missing parents are created). Use when the user asks for a new folder, or before writing a file you want grouped somewhere that doesn't exist yet (though workspace_write_file already creates parents).",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Folder path relative to the workspace root.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "workspace_delete_path",
+    description:
+      "PERMANENTLY delete a file or folder (recursive for folders) from the workspace. DESTRUCTIVE and irreversible — call ONLY when the user explicitly asks to delete that path by name, and NEVER for .env / credential files. If the workspace is a git repo and the path is tracked, prefer mentioning `git checkout`/discard semantics first for tracked files the user merely wants reverted. The Allow/Deny card is the user's confirmation.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Path relative to the workspace root.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "workspace_rename_path",
+    description:
+      "Rename or move a file/folder inside the workspace. Refused if the destination already exists. Use when the user says rename/move; do NOT use copy — there is no copy tool, so copying means read + write.",
+    input_schema: {
+      type: "object",
+      properties: {
+        oldPath: {
+          type: "string",
+          description: "Current path relative to the workspace root.",
+        },
+        newPath: {
+          type: "string",
+          description: "New path relative to the workspace root.",
+        },
+      },
+      required: ["oldPath", "newPath"],
+    },
+  },
+  {
+    name: "workspace_search",
+    description:
+      "Full-text search across the workspace folder (ripgrep-style, recursive, hides node_modules/.git). Use to locate code by name, symbol, or error string before reading files — far cheaper than walking the tree. Supports regex and include/exclude globs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Text or regex to search for.",
+        },
+        caseSensitive: { type: "boolean" },
+        wholeWord: { type: "boolean" },
+        regex: {
+          type: "boolean",
+          description: "Treat the query as a regular expression.",
+        },
+        includeGlobs: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Only search files matching these globs, e.g. [\"src/**/*.ts\"].",
+        },
+        excludeGlobs: {
+          type: "array",
+          items: { type: "string" },
+          description: "Skip files/folders matching these globs.",
+        },
+        maxResults: {
+          type: "number",
+          description: "Cap on matches returned (server default 5000).",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "workspace_exec_command",
+    description:
+      "Run a one-shot shell command with cwd = the workspace root and get back exit code + stdout + stderr. Use for builds, test runs, package installs, git plumbing the dedicated git tools don't cover, lint, and anything a developer would type in the terminal. BLOCKING — the call waits for the command to finish; default timeout 120s (max 300s), so NEVER use it for `npm run dev` or other long-lived servers (the workspace's Dev-servers panel owns those). Each stream is capped at 2MB. Prefer `npm run <script>` (see workspace_npm_scripts) over raw node/npx invocations. Refuses to echo .env / credential files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description:
+            "The command line to run, e.g. \"npm test\" or \"npx tsc --noEmit\".",
+        },
+        timeoutMs: {
+          type: "number",
+          description:
+            "Kill the child after this long. 1000-300000, default 120000. Pick a tight budget for quick commands.",
+        },
+      },
+      required: ["command"],
+    },
+  },
+  {
+    name: "workspace_npm_scripts",
+    description:
+      "Read the workspace's package.json summary — name, scripts, and key dependency lists. Use before running anything, so you call `npm run <script>` with a script that actually exists, and to check whether a dependency is installed.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "workspace_open_file",
+    description:
+      "Open a workspace file in the user's editor as a new tab (and focus it). Use AFTER writing or editing a file so the user sees the result, or when the user asks to open/show a file. The file must exist — create it first with workspace_write_file if needed.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "File path relative to the workspace root.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "workspace_git_status",
+    description:
+      "Read the git status of the workspace repo — current branch, staged/unstaged/untracked files. Use before any git action to see what would be committed, and after edits to confirm what changed.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "workspace_git_branches",
+    description:
+      "List the branches of the workspace repo with the current one marked. Use before workspace_git_checkout.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "workspace_git_diff",
+    description:
+      "Get the unified diff of one file in the workspace repo. staged=false compares against the index; staged=true compares the index against HEAD. Empty for untracked files. Use to review changes before staging/committing.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "File path relative to the workspace root.",
+        },
+        staged: {
+          type: "boolean",
+          description: "true = show the staged diff. Default false.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "workspace_git_stage",
+    description:
+      "Stage files for the next commit (git add). Paths are workspace-relative; an empty array stages EVERYTHING (git add -A). Use after edits, paired with workspace_git_status to pick the right files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Files to stage, relative to the workspace root. Empty array = stage all changes.",
+        },
+      },
+      required: ["paths"],
+    },
+  },
+  {
+    name: "workspace_git_unstage",
+    description:
+      "Unstage files (git reset HEAD -- <paths>) — keeps the working-tree changes, just takes them out of the index.",
+    input_schema: {
+      type: "object",
+      properties: {
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description: "Files to unstage, relative to the workspace root.",
+        },
+      },
+      required: ["paths"],
+    },
+  },
+  {
+    name: "workspace_git_discard",
+    description:
+      "DISCARD the uncommitted changes of the given files (git checkout -- <paths>) — the edits are LOST. DESTRUCTIVE — call ONLY when the user explicitly asks to discard/revert changes they named. The Allow/Deny card is the user's confirmation.",
+    input_schema: {
+      type: "object",
+      properties: {
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description: "Files to discard, relative to the workspace root.",
+        },
+      },
+      required: ["paths"],
+    },
+  },
+  {
+    name: "workspace_git_commit",
+    description:
+      "Commit the staged index with the given message. Stage first (workspace_git_stage) — an empty index fails. Write the commit message in the repo's own convention, concise and imperative.",
+    input_schema: {
+      type: "object",
+      properties: {
+        message: {
+          type: "string",
+          description: "The commit message.",
+        },
+      },
+      required: ["message"],
+    },
+  },
+  {
+    name: "workspace_git_push",
+    description:
+      "Push the workspace repo's current branch to its remote (git push). Use only when the user explicitly asks to push. Network failures are possible — report the stderr verbatim and let the user decide about retries.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "workspace_git_pull",
+    description:
+      "Pull the workspace repo's current branch from its remote (git pull). Use when the user asks to sync/update, or before starting new work. Merge conflicts come back in the output — surface them to the user instead of trying to resolve them yourself.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "workspace_git_checkout",
+    description:
+      "Switch the workspace repo to another branch (git checkout <branch>). Use workspace_git_branches first to confirm the exact name; uncommitted changes may block or carry over — check workspace_git_status first when the tree is dirty.",
+    input_schema: {
+      type: "object",
+      properties: {
+        branch: {
+          type: "string",
+          description: "Branch name to switch to.",
+        },
+      },
+      required: ["branch"],
+    },
+  },
 ];
 
 // The official Playwright MCP browser tools (browser_navigate, browser_click,
@@ -588,6 +903,26 @@ export const toolLabel: Record<AnthropicTool["name"], string> = {
   update_flow: "edit a flow's name or status",
   delete_flow: "permanently delete a flow and its clones",
   verify_live_url: "verify an arbitrary URL live",
+  workspace_list_files: "list the workspace file tree",
+  workspace_read_file: "read a workspace file",
+  workspace_write_file: "write a workspace file",
+  workspace_create_folder: "create a folder in the workspace",
+  workspace_delete_path: "permanently delete a file/folder from the workspace",
+  workspace_rename_path: "rename or move a workspace file/folder",
+  workspace_search: "search text across the workspace",
+  workspace_exec_command: "run a shell command in the workspace",
+  workspace_npm_scripts: "read the workspace package.json scripts",
+  workspace_open_file: "open a file in the editor",
+  workspace_git_status: "read the workspace git status",
+  workspace_git_branches: "list the workspace git branches",
+  workspace_git_diff: "show a workspace file's git diff",
+  workspace_git_stage: "stage workspace files",
+  workspace_git_unstage: "unstage workspace files",
+  workspace_git_discard: "discard uncommitted workspace changes",
+  workspace_git_commit: "commit the staged workspace changes",
+  workspace_git_push: "push the workspace repo",
+  workspace_git_pull: "pull the workspace repo",
+  workspace_git_checkout: "switch the workspace git branch",
 };
 
 // Short summary per tool, used in the post-execution "✓ Done" line so
@@ -706,4 +1041,45 @@ export const toolActionSummary: Record<
     const url = input.url as string;
     return `Live verification of ${url} dispatched.`;
   },
+  workspace_list_files: (input) =>
+    `Listed the workspace tree${input.path ? ` under ${input.path as string}` : ""}.`,
+  workspace_read_file: (input) =>
+    `Read ${input.path as string}.`,
+  workspace_write_file: (input) =>
+    `Wrote ${input.path as string}.`,
+  workspace_create_folder: (input) =>
+    `Created folder ${input.path as string}.`,
+  workspace_delete_path: (input) =>
+    `Deleted ${input.path as string}.`,
+  workspace_rename_path: (input) =>
+    `Renamed ${input.oldPath as string} → ${input.newPath as string}.`,
+  workspace_search: (input) =>
+    `Searched the workspace for "${input.query as string}".`,
+  workspace_exec_command: (input) =>
+    `Ran \`${input.command as string}\`.`,
+  workspace_npm_scripts: () => "Read the workspace package.json.",
+  workspace_open_file: (input) =>
+    `Opened ${input.path as string} in the editor.`,
+  workspace_git_status: () => "Read the git status.",
+  workspace_git_branches: () => "Listed the git branches.",
+  workspace_git_diff: (input) =>
+    `Showed the ${input.staged ? "staged " : ""}diff of ${input.path as string}.`,
+  workspace_git_stage: (input) => {
+    const paths = (input.paths as string[]) ?? [];
+    return paths.length ? `Staged ${paths.join(", ")}.` : "Staged all changes.";
+  },
+  workspace_git_unstage: (input) => {
+    const paths = (input.paths as string[]) ?? [];
+    return `Unstaged ${paths.join(", ")}.`;
+  },
+  workspace_git_discard: (input) => {
+    const paths = (input.paths as string[]) ?? [];
+    return `Discarded changes in ${paths.join(", ")}.`;
+  },
+  workspace_git_commit: (input) =>
+    `Committed: "${input.message as string}".`,
+  workspace_git_push: () => "Pushed to the remote.",
+  workspace_git_pull: () => "Pulled from the remote.",
+  workspace_git_checkout: (input) =>
+    `Switched to branch ${input.branch as string}.`,
 };
