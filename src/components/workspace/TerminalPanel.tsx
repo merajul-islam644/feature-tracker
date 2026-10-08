@@ -229,6 +229,23 @@ export function TerminalPanel({
   const { workspace } = useDevServer();
   const collapsedLoadKeyRef = useRef<string | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(true);
+  // The (user, project, env) key whose persisted collapse state has
+  // actually landed in `collapsed` — set by the hydration effect,
+  // but observed by the persist effect only AFTER React has applied
+  // the batched update. Refs can't express this gate: both effects
+  // run in the same commit, so a ref would already be set when the
+  // persist effect fired and the stale value would still win. The
+  // state flag closes the one-frame window where the persist effect
+  // wrote the pre-hydration default (`true`) over a stored `false`
+  // — exactly what a Vite HMR remount does (mount → persist(true) →
+  // unmount before the hydration commit lands), which collapsed
+  // everyone's terminal on every hot reload. As a bonus the same
+  // gate covers workspace switches (the old triple's `collapsed`
+  // could otherwise be written to the NEW triple before its
+  // hydration read).
+  const [collapsedHydratedKey, setCollapsedHydratedKey] = useState<
+    string | null
+  >(null);
 
   // Hydrate `collapsed` from the mirror once the workspace identity
   // is known. The ref guard means we only ever read once per
@@ -247,6 +264,11 @@ export function TerminalPanel({
       workspace.envSlug,
     );
     setCollapsed(persisted);
+    // Arm persistence for THIS identity — but only in the commit
+    // where `collapsed` above has also landed (batched), so the
+    // persist effect's first eligible run already carries the
+    // hydrated value.
+    setCollapsedHydratedKey(key);
     // Sync the parent's mirror (it starts `true` to match this
     // component's initial state) so the dock's sash hides/shows
     // correctly before the user's first chevron click.
@@ -258,21 +280,27 @@ export function TerminalPanel({
     onCollapsedChange,
   ]);
 
-  // Persist on every change. Skip the very first render after the
-  // hydration effect above has run — otherwise we'd write back the
-  // value we just read and the row never changes for users who
-  // never click the chevron.
+  // Persist on every change — but never before this identity's
+  // hydration read has landed (see `collapsedHydratedKey`). Writing
+  // earlier would echo the pre-hydration default over the stored
+  // value.
   useEffect(() => {
     if (!workspace) return;
     const key = `${workspace.userId}|${workspace.projectId}|${workspace.envSlug}`;
-    if (key !== collapsedLoadKeyRef.current) return;
+    if (collapsedHydratedKey !== key) return;
     saveWorkspaceTerminalCollapsed(
       workspace.userId,
       workspace.projectId,
       workspace.envSlug,
       collapsed,
     );
-  }, [workspace?.userId, workspace?.projectId, workspace?.envSlug, collapsed]);
+  }, [
+    workspace?.userId,
+    workspace?.projectId,
+    workspace?.envSlug,
+    collapsed,
+    collapsedHydratedKey,
+  ]);
 
   // Chevron click — flip collapse and mirror it up in the same tick
   // so the dock hides the resize sash while folded and the parent

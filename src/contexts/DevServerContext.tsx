@@ -46,6 +46,7 @@ import type {
   DevServerRecord,
   DevServerWorkspace,
   FileNode,
+  LspDiagnostic,
   Problem,
   SearchResponse,
   WatchEvent,
@@ -76,6 +77,16 @@ interface DevServerContextValue {
   servers: Map<number, DevServerRecord>;
   /** Rolling list of `devserver_error` events — the Problems tab. */
   problems: Problem[];
+
+  /** Language-server diagnostics (Phase 1: TypeScript) keyed by
+   *  root-relative path. Entries with an empty array mean "this file
+   *  is clean as of the last publish". Feed for the Problems panel
+   *  and the CodeMirror lint gutter. */
+  lspDiagnostics: Record<string, LspDiagnostic[]>;
+  /** False after the LSP subscription exhausts its reconnect budget
+   *  (binary missing / route absent) — the Problems panel shows a
+   *  hint instead of an empty list. */
+  lspOnline: boolean;
 
   /** Folder the user picked via "Open Folder". `null` when no
    *  folder has been opened in this session (or the persisted one
@@ -270,6 +281,16 @@ export function DevServerProvider({
 
   const [servers, setServers] = useState<Map<number, DevServerRecord>>(() => new Map());
   const [problems, setProblems] = useState<Problem[]>([]);
+
+  // ─── Language-server diagnostics state (Phase 1: TS) ───────────
+  // One SSE tail per workspaceRoot feeding a path-keyed map. Empty
+  // arrays are kept (a publish with zero diagnostics means "clean
+  // now") so consumers can distinguish "never analysed" from "no
+  // problems".
+  const [lspDiagnostics, setLspDiagnostics] = useState<
+    Record<string, LspDiagnostic[]>
+  >({});
+  const [lspOnline, setLspOnline] = useState(false);
   // ─── File watcher state ────────────────────────────────────────
   // Fan-out hub — one SSE tail per workspaceRoot, many subscribers.
   // `watcherOnline` flips false after the reconnect budget burns so
@@ -720,6 +741,13 @@ export function DevServerProvider({
         path,
         content,
       });
+      // Echo-filter: this is the editor's own autosave write. The
+      // watcher's "change" event for it arrives a few hundred ms later
+      // (chokidar awaitWriteFinish) — mark the path so the fan-out
+      // drops it instead of tripping the "file changed on disk"
+      // prompt. Same contract as the sandbox writer above; without
+      // this every autosave dialog-popped itself.
+      skipChangeForRef.current.set(path, Date.now() + SKIP_WINDOW_MS);
     },
     [workspace, workspaceRoot],
   );
@@ -842,6 +870,47 @@ export function DevServerProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace?.id, workspaceRoot?.path]);
 
+  // ─── LSP diagnostics subscription ────────────────────────────────
+  // One SSE tail per workspaceRoot, same lifecycle as the watcher
+  // above. The first event is a full snapshot; publishes patch one
+  // path at a time. Soft-fails: after 3 strikes `lspOnline` drops
+  // and the Problems panel renders an offline hint — the rest of
+  // the editor keeps working (the language server is an enhancement,
+  // never a dependency).
+  useEffect(() => {
+    if (!workspace || !workspaceRoot) {
+      setLspDiagnostics({});
+      setLspOnline(false);
+      return;
+    }
+    setLspOnline(true);
+    const unsub = devServerApi.subscribeLspDiagnostics({
+      workspaceId: workspace.id,
+      root: workspaceRoot.path,
+      onEvent: (event) => {
+        if (event.kind === "snapshot") {
+          setLspDiagnostics(event.files ?? {});
+        } else {
+          setLspDiagnostics((prev) => ({
+            ...prev,
+            [event.path]: event.diagnostics,
+          }));
+        }
+      },
+      onError: () => {
+        // Soft-fail — onGiveUp handles the UI downgrade.
+      },
+      onGiveUp: () => {
+        setLspOnline(false);
+      },
+    });
+    return () => {
+      unsub();
+      setLspOnline(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.id, workspaceRoot?.path]);
+
   // Refresh on tab focus — catches out-of-band edits (user saves
   // the file in their text editor, a watcher fires, etc.). Debounced
   // 1s so a rapid tab-flick doesn't hammer the backend.
@@ -955,6 +1024,8 @@ export function DevServerProvider({
     enabled: true,
     servers,
     problems,
+    lspDiagnostics,
+    lspOnline,
     workspaceRoot,
     tree,
     refreshTree,
@@ -978,6 +1049,8 @@ export function DevServerProvider({
     workspace,
     servers,
     problems,
+    lspDiagnostics,
+    lspOnline,
     workspaceRoot,
     tree,
     refreshTree,
