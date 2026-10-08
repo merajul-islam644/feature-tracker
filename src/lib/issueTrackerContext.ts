@@ -23,6 +23,7 @@ import type {
   VerificationTarget,
 } from "@/types/issue-tracker";
 import type { Project } from "@/lib/blocks/data";
+import type { WorkspaceChatData } from "@/lib/workspaceChatContext";
 import { verificationChecks } from "@/data/issueTrackerConstants";
 
 export interface IssueTrackerContextSnapshot {
@@ -121,6 +122,11 @@ export interface IssueTrackerContextSnapshot {
     enabledTargets: number;
     enabledChecks: number;
   };
+  // Live /panel workspace snapshot, when the user has the VS Code-style
+  // workspace page open (any page route — it's stamped module-globally).
+  // `null` = no workspace folder is open, and every workspace_* tool will
+  // refuse until the user picks a folder there.
+  workspace: WorkspaceChatData | null;
 }
 
 export function buildIssueTrackerContext(input: {
@@ -145,6 +151,9 @@ export function buildIssueTrackerContext(input: {
   // VerificationTarget rows. Required for `hasCredential` /
   // `boundToTargetNames` to match what the UI renders.
   boundTargetsBySecretId?: Record<string, string[]>;
+  // Live workspace state from `workspaceChatContext.ts` — pass
+  // `getWorkspaceChatState()` here. Null/omitted = workspace not open.
+  workspace?: WorkspaceChatData | null;
 }): IssueTrackerContextSnapshot {
   const {
     targets,
@@ -157,6 +166,7 @@ export function buildIssueTrackerContext(input: {
     activeEnv = null,
     checkLabels = {},
     boundTargetsBySecretId = {},
+    workspace = null,
   } = input;
   // Merge built-in + per-env row labels so the AI can answer "what does
   // this scope do?" for any id the user has enabled, including
@@ -291,6 +301,7 @@ export function buildIssueTrackerContext(input: {
       enabledTargets: targets.filter((t) => t.enabled).length,
       enabledChecks: scope.length,
     },
+    workspace,
   };
 }
 

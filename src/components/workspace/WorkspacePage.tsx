@@ -51,6 +51,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/blocks/i18n";
 import { useDevServer } from "@/contexts/DevServerContext";
+import { setWorkspaceChatState } from "@/lib/workspaceChatContext";
 import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { ExplorerSidebar } from "./ExplorerSidebar";
 import { EditorTabs } from "./EditorTabs";
@@ -842,6 +843,29 @@ export function WorkspacePage() {
     },
     [readUserFile, syncLspDoc],
   );
+
+  // ─── Chat-assistant bridge ─────────────────────────────────────
+  // Stamp the live workspace state so the global AI chat's workspace_*
+  // tools can act on this folder, and clear it on unmount / folder
+  // close so the chat never acts on a stale root. Re-runs on every
+  // stamped field change (tab open/close, active tab, folder switch),
+  // so the CURRENT STATE snapshot the model sees each turn is fresh.
+  useEffect(() => {
+    if (!workspace?.id || !folderPath) {
+      setWorkspaceChatState(null);
+      return;
+    }
+    setWorkspaceChatState({
+      workspaceId: workspace.id,
+      root: folderPath,
+      openPaths,
+      activePath,
+      openFile: (path: string) => {
+        void openFile(path);
+      },
+    });
+    return () => setWorkspaceChatState(null);
+  }, [workspace?.id, folderPath, openPaths, activePath, openFile]);
 
   const closeTab = useCallback((path: string) => {
     // Flush any pending autosave before discarding the cached content.

@@ -87,6 +87,13 @@ import {
   bindingsEqual,
 } from "@/lib/issueTrackerBindings";
 import { chatTools, browserToolSummary } from "@/lib/chatTools";
+import {
+  getWorkspaceChatState,
+  getWorkspaceOpenFile,
+} from "@/lib/workspaceChatContext";
+import { devServerApi } from "@/services/devServerApi";
+import type { FileNode } from "@/types/dev-server";
+import type { GitStatus } from "@/types/git";
 import type {
   AnthropicTool,
   ChatAction,
@@ -118,6 +125,105 @@ const defaultFilters: IssueFilters = {
   application: null,
   sort: "newest",
 };
+
+// ─── Workspace (/panel) tool helpers ─────────────────────────────
+// Pure formatters + guards for the workspace_* dispatch cases below.
+// Module-level on purpose — executeTool's useCallback deps stay clean.
+
+// Any path segment named `.env` or `.env.<anything>` — the chatbot must
+// never read, write, delete, or echo these. The user's real .env files
+// (IAM credentials included) can sit at the workspace root.
+const PROTECTED_ENV_PATH = /(^|[\\/])\.env($|\.[^\\/]*$)/i;
+
+function isProtectedEnvPath(path: string): boolean {
+  return PROTECTED_ENV_PATH.test(path);
+}
+
+function guardWorkspacePath(path: string): string | null {
+  if (!path || !path.trim()) return "Skipped — missing path.";
+  if (path.includes("..")) {
+    return "Skipped — paths must stay inside the workspace root (no `..`).";
+  }
+  if (/^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("/")) {
+    return "Skipped — use a path relative to the workspace root, not an absolute path.";
+  }
+  if (isProtectedEnvPath(path)) {
+    return "Skipped — .env / credential files are protected and never read, written, or deleted through chat. The user manages those directly.";
+  }
+  return null;
+}
+
+function guardWorkspaceCommand(command: string): string | null {
+  if (!command || !command.trim()) return "Skipped — missing command.";
+  if (/\.env\b/i.test(command)) {
+    return "Skipped — commands that touch .env / credential files are refused in chat.";
+  }
+  return null;
+}
+
+// Cap a tool result string so one giant read/exec doesn't eat the
+// model's context budget.
+function clip(text: string, max = 6000): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n… (truncated, ${text.length - max} more chars)`;
+}
+
+function formatWorkspaceTree(nodes: FileNode[], indent = 0): string[] {
+  const lines: string[] = [];
+  for (const node of nodes) {
+    lines.push(
+      `${"  ".repeat(indent)}${node.kind === "dir" ? "▸ " : "  "}${node.name}${node.kind === "dir" ? "/" : ""}`,
+    );
+    if (node.children && lines.length < 160) {
+      lines.push(...formatWorkspaceTree(node.children, indent + 1));
+    }
+    if (lines.length >= 160) {
+      lines.push("  … (tree truncated)");
+      break;
+    }
+  }
+  return lines;
+}
+
+function formatGitFile(f: {
+  path: string;
+  x: string;
+  y: string;
+  untracked: boolean;
+}): string {
+  if (f.untracked) return `?? ${f.path}`;
+  return `${f.x === " " ? "_" : f.x}${f.y === " " ? "_" : f.y} ${f.path}`;
+}
+
+function formatGitStatus(s: GitStatus): string {
+  if (!s.isRepo) {
+    return `Not a git repo${s.reason ? ` (${s.reason})` : ""}.`;
+  }
+  const parts = [
+    `Branch: ${s.branch ?? "?"}${s.upstream ? ` (upstream ${s.upstream})` : ""}`,
+    `Ahead/behind: +${s.ahead}/-${s.behind}`,
+    ...s.files.slice(0, 60).map(formatGitFile),
+  ];
+  if (s.files.length > 60) {
+    parts.push(`… and ${s.files.length - 60} more files`);
+  }
+  return parts.join("\n");
+}
+
+function formatExecResult(r: {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  truncated: boolean;
+}): string {
+  const head = r.timedOut
+    ? "Result: TIMED OUT (killed at the timeout)"
+    : `Exit code: ${r.code ?? "null"}${r.truncated ? " (output truncated at 2MB)" : ""}`;
+  const out = r.stdout ? `stdout:\n${clip(r.stdout, 4000)}` : "stdout: (empty)";
+  const err = r.stderr ? `stderr:\n${clip(r.stderr, 3000)}` : "stderr: (empty)";
+  return `${head}\n${out}\n${err}`;
+}
 
 // check id → display label, derived from the verificationChecks catalog so
 // the activity feed and the scope card can never drift apart. Keyed as
@@ -757,6 +863,15 @@ export function useIssueTracker() {
   // stateless per message, so without this the model could never see what
   // the browser showed on the previous turn.
   const browserResultRef = useRef<string[]>([]);
+  // Rolling memory of the last NON-browser tool results (issue/project
+  // writes AND the workspace_* file/git/exec tools). Same stateless-call
+  // problem as browserResultRef: the "✓ Done" chat line the user sees is
+  // a `system` message, and runModelTurn's history only replays
+  // user/assistant turns — so without this the continuation turn can't
+  // see what its own tool just returned and re-runs it (observed live
+  // with workspace_list_files). Kept small — these payloads (file
+  // reads, exec output) can be large.
+  const toolResultMemoryRef = useRef<string[]>([]);
   // Consecutive AUTO-continuations fired after allowed browser_* tools.
   // Each Allow → tool → next-model-turn cycle increments it; a fresh user
   // message resets it. The walkthrough is meant to run until the user
@@ -2060,6 +2175,10 @@ export function useIssueTracker() {
     const userPart = currentUser?.id ?? "anon";
     const next = `issue-tracker:${userPart}:${cryptoUuid()}`;
     setSessionId(next);
+    // Tool-result memory belongs to the abandoned conversation — a fresh
+    // session must not inherit "workspace_list_files → …" entries from a
+    // task whose history the model can no longer see.
+    toolResultMemoryRef.current = [];
     // Seed the new session with the greeting immediately so the panel
     // doesn't flash empty during the history fetch for an unused session.
     setChat(mockInitialChat);
@@ -2162,6 +2281,10 @@ export function useIssueTracker() {
         // UI — see issueTrackerBindings.ts for why we don't read
         // `target.credentialId`.
         boundTargetsBySecretId,
+        // Live /panel workspace snapshot (workspaceId, root, open
+        // editor tabs) — stamped module-globally by WorkspacePage.
+        // Null when the user has no workspace folder open.
+        workspace: getWorkspaceChatState(),
       });
       // Give the model the last browser tool results — the AI call is
       // stateless per message, so this memory is the only way it can
@@ -2170,6 +2293,18 @@ export function useIssueTracker() {
       // workflow cycle needs for the next browser_click, so they are
       // kept generously.
       const browserMemory = browserResultRef.current.join("\n");
+      // Same for the non-browser tools (issue/project writes, the whole
+      // workspace_* surface) — the continuation turn reads this to see
+      // what its last action actually returned instead of re-running it.
+      const toolMemory = toolResultMemoryRef.current.join("\n");
+      const memoryBlock = [
+        browserMemory
+          ? `[Recent Playwright browser tool results]\n${browserMemory}`
+          : "",
+        toolMemory ? `[Recent tool results]\n${toolMemory}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       // Plus the last few conversation turns (user questions + assistant
       // answers) so a multi-step browser session survives the stateless
       // call: "open X" → "click the login button" → "what did it show?".
@@ -2181,8 +2316,8 @@ export function useIssueTracker() {
           content: m.content.slice(0, 500),
         }));
       const reply = await issueTrackerApi.sendChatMessage(
-        browserMemory
-          ? `${promptForModel}\n\n[Recent Playwright browser tool results]\n${browserMemory}`
+        memoryBlock
+          ? `${promptForModel}\n\n${memoryBlock}`
           : promptForModel,
         {
           context,
@@ -3229,6 +3364,500 @@ export function useIssueTracker() {
             }`;
           }
         }
+        // ── Workspace (/panel) tools ───────────────────────────────
+        // All resolve the live workspace (id + root) from the module
+        // bridge — no workspace open → refuse with a clear hint. Every
+        // path is workspace-relative and guarded against traversal and
+        // .env/credential access before it reaches the backend.
+        case "workspace_list_files": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const sub = typeof tool.input.path === "string" ? tool.input.path : "";
+          if (sub) {
+            const bad = guardWorkspacePath(sub);
+            if (bad) return bad;
+          }
+          try {
+            const tree = await devServerApi.listTree({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              maxDepth:
+                typeof tool.input.maxDepth === "number"
+                  ? Math.min(8, Math.max(1, Math.round(tool.input.maxDepth)))
+                  : 2,
+            });
+            return `Workspace tree (root: ${ws.root}):\n${formatWorkspaceTree(tree).join("\n") || "(empty)"}`;
+          } catch (err) {
+            return `Couldn't list the tree — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_read_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            const content = await devServerApi.readUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+            });
+            if (content === null) {
+              return `Skipped — "${path}" does not exist in the workspace. Use workspace_list_files to find the right path.`;
+            }
+            return `Content of ${path}:\n${clip(content, 8000)}`;
+          } catch (err) {
+            return `Couldn't read the file — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_write_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const content = tool.input.content as string | undefined;
+          if (typeof content !== "string") {
+            return "Skipped — missing content.";
+          }
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          if (content.length > 1_000_000) {
+            return "Skipped — content exceeds the 1MB server cap. Split the file or reduce it.";
+          }
+          try {
+            await devServerApi.writeUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+              content,
+            });
+            return `Wrote ${path} (${content.length} chars).`;
+          } catch (err) {
+            return `Couldn't write the file — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_create_folder": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            await devServerApi.mkdirUserPath({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+            });
+            return `Created folder ${path}.`;
+          } catch (err) {
+            return `Couldn't create the folder — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_delete_path": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            await devServerApi.deleteUserPath({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+            });
+            return `Deleted ${path}.`;
+          } catch (err) {
+            return `Couldn't delete — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_rename_path": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const oldPath = tool.input.oldPath as string | undefined;
+          const newPath = tool.input.newPath as string | undefined;
+          const badOld = oldPath
+            ? guardWorkspacePath(oldPath)
+            : "Skipped — missing oldPath.";
+          if (badOld) return badOld;
+          const badNew = newPath
+            ? guardWorkspacePath(newPath)
+            : "Skipped — missing newPath.";
+          if (badNew) return badNew;
+          try {
+            await devServerApi.renameUserPath({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              oldPath: oldPath!,
+              newPath: newPath!,
+            });
+            return `Renamed ${oldPath} → ${newPath}.`;
+          } catch (err) {
+            return `Couldn't rename — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_search": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const query = tool.input.query as string | undefined;
+          if (!query) return "Skipped — missing query.";
+          try {
+            const res = await devServerApi.search({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              query,
+              caseSensitive: tool.input.caseSensitive === true,
+              wholeWord: tool.input.wholeWord === true,
+              regex: tool.input.regex === true,
+              includeGlobs: Array.isArray(tool.input.includeGlobs)
+                ? (tool.input.includeGlobs as string[])
+                : undefined,
+              excludeGlobs: Array.isArray(tool.input.excludeGlobs)
+                ? (tool.input.excludeGlobs as string[])
+                : undefined,
+              maxResults:
+                typeof tool.input.maxResults === "number"
+                  ? Math.min(5000, Math.round(tool.input.maxResults))
+                  : undefined,
+            });
+            if (res.results.length === 0) return "No matches.";
+            const lines = res.results
+              .slice(0, 40)
+              .map(
+                (r) =>
+                  `${r.path}:${r.line}:${r.column}: ${r.preview.trim()}`,
+              );
+            const more =
+              res.results.length > 40
+                ? `\n… and ${res.results.length - 40} more matches`
+                : "";
+            return `${res.count} match(es)${res.truncated ? " (truncated — refine the query)" : ""}:\n${lines.join("\n")}${more}`;
+          } catch (err) {
+            return `Search failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_exec_command": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const command = tool.input.command as string | undefined;
+          const bad = guardWorkspaceCommand(command ?? "");
+          if (bad) return bad;
+          try {
+            const result = await devServerApi.execUserCommand({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              command: command!,
+              timeoutMs:
+                typeof tool.input.timeoutMs === "number"
+                  ? Math.min(
+                      300_000,
+                      Math.max(1_000, Math.round(tool.input.timeoutMs)),
+                    )
+                  : undefined,
+            });
+            return `Command \`${command}\` in ${ws.root}\n${formatExecResult(result)}`;
+          } catch (err) {
+            return `Command failed to run — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_npm_scripts": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            // Read package.json directly (NOT inspectPackage — that
+            // summary doesn't carry scripts). A missing/malformed
+            // package.json is the normal "not a Node project" state.
+            const raw = await devServerApi.readUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: "package.json",
+            });
+            if (raw === null) {
+              return "No package.json found at the workspace root — this folder isn't a Node project.";
+            }
+            let pkg: {
+              name?: string;
+              version?: string;
+              scripts?: Record<string, string>;
+              dependencies?: Record<string, string>;
+              devDependencies?: Record<string, string>;
+            };
+            try {
+              pkg = JSON.parse(raw);
+            } catch {
+              return "package.json exists but is malformed JSON — the user should fix it first.";
+            }
+            const fmt = (deps: Record<string, string> | undefined) => {
+              const entries = Object.entries(deps ?? {});
+              if (!entries.length) return "  (none)";
+              return entries
+                .slice(0, 40)
+                .map(([k, v]) => `  ${k}@${v}`)
+                .join("\n");
+            };
+            return [
+              `package: ${pkg.name ?? "?"}@${pkg.version ?? "?"}`,
+              "scripts (run with workspace_exec_command, `npm run <name>`):",
+              fmt(pkg.scripts),
+              "dependencies:",
+              fmt(pkg.dependencies),
+              "devDependencies:",
+              fmt(pkg.devDependencies),
+            ].join("\n");
+          } catch (err) {
+            return `Couldn't read package.json — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_open_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          const openFile = getWorkspaceOpenFile();
+          if (!openFile) {
+            return "Skipped — the workspace editor isn't mounted right now.";
+          }
+          openFile(path!);
+          return `Opened ${path} in the editor.`;
+        }
+        case "workspace_git_status": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            const status = await devServerApi.gitStatus({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+            });
+            return formatGitStatus(status);
+          } catch (err) {
+            return `git status failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_branches": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            const branches = await devServerApi.gitBranches({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+            });
+            return branches
+              .map((b) => `${b.current ? "→ " : "  "}${b.name}`)
+              .join("\n");
+          } catch (err) {
+            return `git branches failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_diff": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            const diff = await devServerApi.gitDiff({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+              staged: tool.input.staged === true,
+            });
+            return diff
+              ? `Diff of ${path}:\n${clip(diff, 8000)}`
+              : "(no diff — untracked or unchanged)";
+          } catch (err) {
+            return `git diff failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_stage":
+        case "workspace_git_unstage": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const paths = Array.isArray(tool.input.paths)
+            ? (tool.input.paths as string[])
+            : [];
+          for (const p of paths) {
+            const bad = guardWorkspacePath(p);
+            if (bad) return `${bad} (path: ${p})`;
+          }
+          const staging = tool.name === "workspace_git_stage";
+          if (!staging && paths.length === 0) {
+            return "Skipped — name at least one file to unstage.";
+          }
+          try {
+            if (staging) {
+              await devServerApi.gitStage({
+                workspaceId: ws.workspaceId,
+                root: ws.root,
+                paths,
+              });
+              return paths.length
+                ? `Staged: ${paths.join(", ")}`
+                : "Staged all changes (git add -A).";
+            }
+            await devServerApi.gitUnstage({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              paths,
+            });
+            return `Unstaged: ${paths.join(", ")}`;
+          } catch (err) {
+            return `git ${staging ? "stage" : "unstage"} failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_discard": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const paths = Array.isArray(tool.input.paths)
+            ? (tool.input.paths as string[])
+            : [];
+          if (paths.length === 0) {
+            return "Skipped — name the files whose changes should be discarded (never discard everything blindly).";
+          }
+          for (const p of paths) {
+            const bad = guardWorkspacePath(p);
+            if (bad) return `${bad} (path: ${p})`;
+          }
+          try {
+            await devServerApi.gitDiscard({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              paths,
+            });
+            return `Discarded uncommitted changes in: ${paths.join(", ")}`;
+          } catch (err) {
+            return `git discard failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_commit": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const message = tool.input.message as string | undefined;
+          if (!message || !message.trim()) {
+            return "Skipped — missing commit message.";
+          }
+          try {
+            const summary = await devServerApi.gitCommit({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              message,
+            });
+            return summary
+              ? `Committed — ${summary}`
+              : `Committed: "${message}"`;
+          } catch (err) {
+            return `git commit failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_push":
+        case "workspace_git_pull": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            const output =
+              tool.name === "workspace_git_push"
+                ? await devServerApi.gitPush({
+                    workspaceId: ws.workspaceId,
+                    root: ws.root,
+                  })
+                : await devServerApi.gitPull({
+                    workspaceId: ws.workspaceId,
+                    root: ws.root,
+                  });
+            return `${
+              tool.name === "workspace_git_push" ? "Push" : "Pull"
+            } output:\n${clip(output || "(done, no output)", 3000)}`;
+          } catch (err) {
+            return `${
+              tool.name === "workspace_git_push" ? "git push" : "git pull"
+            } failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_checkout": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const branch = tool.input.branch as string | undefined;
+          if (!branch) return "Skipped — missing branch.";
+          try {
+            await devServerApi.gitCheckout({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              branch,
+            });
+            return `Switched to branch ${branch}.`;
+          } catch (err) {
+            return `git checkout failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
         default: {
           // Browser tools from the official Playwright MCP catalog. Names
           // are whatever @playwright/mcp ships (browser_navigate,
@@ -3390,6 +4019,17 @@ export function useIssueTracker() {
           );
           try {
             const summary = await executeTool(tool);
+            // Remember the result for the NEXT model turn — the stateless
+            // AI call otherwise can't see what its own tool returned (the
+            // "✓ Done" line is a system message, which the history
+            // builder skips). Browser tools are excluded: executeTool
+            // already feeds them into browserResultRef.
+            if (!tool.name.startsWith("browser_")) {
+              toolResultMemoryRef.current = [
+                ...toolResultMemoryRef.current.slice(-3),
+                `${tool.name} → ${summary.slice(0, 4000)}`,
+              ];
+            }
             // Surface the result back into the chat so the user has a
             // confirmation in-thread, and persist it for the session
             // history.
