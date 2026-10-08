@@ -30,3 +30,26 @@ export interface GitBranch {
   name: string;
   current: boolean;
 }
+
+// ── Editor git integration (gutter decorations + inline blame) ──────
+
+/** One changed region vs HEAD, for the editor's gutter bars. */
+export interface GitDiffHunk {
+  kind: "added" | "modified" | "deleted";
+  /** 1-based first NEW-file line the marker covers. */
+  line: number;
+  /** New-file lines covered; for `deleted`, how many lines vanished. */
+  count: number;
+}
+
+/** One row of `git blame --porcelain`, per working-file line. */
+export interface GitBlameLine {
+  /** 1-based line in the current working file. */
+  line: number;
+  /** Abbreviated commit hash (8 chars). */
+  hash: string;
+  author: string;
+  /** Author-time as epoch seconds. */
+  time: number;
+  summary: string;
+}

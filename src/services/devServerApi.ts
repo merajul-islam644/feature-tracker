@@ -26,7 +26,7 @@ import type {
   WatchEvent,
   WatchEventKind,
 } from "@/types/dev-server";
-import type { GitBranch, GitStatus } from "@/types/git";
+import type { GitBlameLine, GitBranch, GitDiffHunk, GitStatus } from "@/types/git";
 
 // Feature flag removed — the dev-server sandbox is always on. The
 // previous `VITE_USE_DEV_SERVER` build-time flag was silently false
@@ -1115,6 +1115,43 @@ export const devServerApi = {
     }
     const data = (await res.json()) as { diff: string };
     return data.diff;
+  },
+
+  /** Changed-line hunks vs HEAD for the editor gutter bars. Untracked
+   *  (or unborn-HEAD) files come back as one whole-file `added` hunk. */
+  async gitFileHunks(opts: {
+    workspaceId: string;
+    root: string;
+    path: string;
+  }): Promise<GitDiffHunk[]> {
+    const q = new URLSearchParams({ root: opts.root, path: opts.path });
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/git/file-hunks?${q.toString()}`,
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `git file-hunks failed (${res.status})`);
+    }
+    const data = (await res.json()) as { hunks: GitDiffHunk[] };
+    return data.hunks;
+  },
+
+  /** Per-line blame rows, or null when the file isn't in a repo. */
+  async gitBlame(opts: {
+    workspaceId: string;
+    root: string;
+    path: string;
+  }): Promise<GitBlameLine[] | null> {
+    const q = new URLSearchParams({ root: opts.root, path: opts.path });
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/git/blame?${q.toString()}`,
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `git blame failed (${res.status})`);
+    }
+    const data = (await res.json()) as { blame: GitBlameLine[] | null };
+    return data.blame;
   },
 
   async gitBranches(opts: {

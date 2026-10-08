@@ -23,6 +23,7 @@ import {
   CircleDot,
   FileText,
   Folder,
+  GitCommitHorizontal,
   Loader2,
 } from "lucide-react";
 import {
@@ -45,6 +46,10 @@ interface WorkspaceStatusBarProps {
   folderCount: number;
   problemsCount: number;
   onShowProblems: () => void;
+  /** Inline blame readout on the cursor line (editor git
+   *  integration) — toggled from this bar, persisted upstream. */
+  blameEnabled: boolean;
+  onToggleBlame: () => void;
 }
 
 export function WorkspaceStatusBar({
@@ -56,6 +61,8 @@ export function WorkspaceStatusBar({
   folderCount,
   problemsCount,
   onShowProblems,
+  blameEnabled,
+  onToggleBlame,
 }: WorkspaceStatusBarProps) {
   return (
     <div
@@ -86,6 +93,21 @@ export function WorkspaceStatusBar({
         <SavedBadge saveState={saveState} lastSavedAt={lastSavedAt} />
         <Sep />
         <ProblemsPopover count={problemsCount} onShowProblems={onShowProblems} />
+        <Sep />
+        <button
+          type="button"
+          onClick={onToggleBlame}
+          aria-pressed={blameEnabled}
+          aria-label={blameEnabled ? "Disable inline blame" : "Enable inline blame"}
+          title={blameEnabled ? "Inline blame: on (click to hide)" : "Inline blame: off (click to show)"}
+          className={`inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-muted ${
+            blameEnabled ? "text-foreground/80" : "text-muted-foreground/70"
+          }`}
+          data-testid="blame-toggle"
+        >
+          <GitCommitHorizontal className="h-3 w-3" aria-hidden="true" />
+          <span>blame</span>
+        </button>
         {cursor && (
           <>
             <Sep />
