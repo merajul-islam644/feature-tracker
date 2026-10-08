@@ -55,6 +55,8 @@ import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { ExplorerSidebar } from "./ExplorerSidebar";
 import { EditorTabs } from "./EditorTabs";
 import { EditorArea } from "./EditorArea";
+import { ProblemsPanel } from "./ProblemsPanel";
+import { GitPanel } from "./GitPanel";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { WorkspaceBreadcrumb } from "./WorkspaceBreadcrumb";
 import { TerminalPanel } from "./TerminalPanel";
@@ -101,6 +103,10 @@ import {
 // barely registers; long enough to coalesce a stream of keystrokes
 // into a single PUT.
 const AUTOSAVE_DEBOUNCE_MS = 500;
+// How long to wait after the last keystroke before mirroring the
+// editor content into the language server (Phase 1 diagnostics).
+// Slightly above autosave so the disk copy usually lands first.
+const LSP_SYNC_DEBOUNCE_MS = 700;
 // Window after a successful save during which the "Saved {n}s ago"
 // badge stays visible before it auto-hides.
 const SAVED_BADGE_VISIBLE_MS = 1_500;
@@ -264,6 +270,7 @@ export function WorkspacePage() {
     setWorkspaceRoot,
     closeFolder,
     problems,
+    lspDiagnostics,
     subscribeToWatcher,
     watcherOnline,
   } = useDevServer();
@@ -279,6 +286,33 @@ export function WorkspacePage() {
   // project+env swaps the tab set instead of bleeding one folder's
   // paths into another.
   const folderPath = workspaceRoot?.path ?? null;
+
+  // ─── Language-server doc sync (Phase 1) ────────────────────────
+  // tsserver only publishes diagnostics for documents it knows about,
+  // so every file the editor opens or changes is mirrored through the
+  // LSP bridge. The vehicle is a throwaway `textDocument/hover` — the
+  // backend syncs the doc first (didOpen on first sight, didChange
+  // after) and the hover result is discarded; it doubles as a
+  // liveness ack. Fire-and-forget by design: a failed sync degrades
+  // to "no diagnostics", never an error toast.
+  const lspSyncTimersRef = useRef<
+    Map<string, ReturnType<typeof setTimeout>>
+  >(new Map());
+  const syncLspDoc = useCallback(
+    (path: string, content: string) => {
+      if (!workspace?.id || !workspaceRoot?.path) return;
+      void devServerApi
+        .lspRequest({
+          workspaceId: workspace.id,
+          root: workspaceRoot.path,
+          method: "textDocument/hover",
+          params: { path, position: { line: 0, character: 0 } },
+          doc: { path, content },
+        })
+        .catch(() => undefined);
+    },
+    [workspace?.id, workspaceRoot?.path],
+  );
 
   // Load tabs from localStorage when (workspace identity + folder)
   // combo changes. On a fresh load this restores the open files + the
@@ -335,6 +369,9 @@ export function WorkspacePage() {
               next.set(path, content ?? "");
               return next;
             });
+            // Restored tabs were never "opened" this page load — sync
+            // them so diagnostics come back after a refresh too.
+            syncLspDoc(path, content ?? "");
           } catch (err) {
             // Stale tabs (file deleted on disk between visits) just
             // toast and skip — the tab stays open but the editor
@@ -350,6 +387,7 @@ export function WorkspacePage() {
     workspace?.envSlug,
     folderPath,
     readUserFile,
+    syncLspDoc,
   ]);
 
   // Persist on every change while a folder is open. Mirrors the
@@ -437,6 +475,29 @@ export function WorkspacePage() {
   // the request, removes it from `pending`, and clears the timer
   // bookkeeping so a re-edit during the write schedules a fresh
   // debounce for the next save.
+  // ─── Git panel feed (Source Control) ────────────────────────────
+  // The activity-bar badge + panel list track working-tree state.
+  // Disk changes reach us two ways: the watcher SSE (external writes,
+  // git operations) and this component's own autosaves — the watcher
+  // deliberately drops autosave echoes, so `flushSave` bumps the
+  // refresh itself. Both funnel into `scheduleGitRefresh`, coalesced
+  // to at most one status fetch per second.
+  const [gitChangedCount, setGitChangedCount] = useState(0);
+  const [gitRefreshTick, setGitRefreshTick] = useState(0);
+  const gitRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleGitRefresh = useCallback(() => {
+    if (gitRefreshTimerRef.current) return;
+    gitRefreshTimerRef.current = setTimeout(() => {
+      gitRefreshTimerRef.current = null;
+      setGitRefreshTick((t) => t + 1);
+    }, 1_000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (gitRefreshTimerRef.current) clearTimeout(gitRefreshTimerRef.current);
+    },
+    [],
+  );
   const flushSave = useCallback(
     async (path: string) => {
       const timerId = debounceTimersRef.current.get(path);
@@ -464,6 +525,9 @@ export function WorkspacePage() {
         // successful PUT.
         setSavedAt(Date.now());
         setHideSavedAt(Date.now() + SAVED_BADGE_VISIBLE_MS);
+        // The autosave echo never reaches the watcher (echo filter),
+        // so tell the git panel the working tree just moved.
+        scheduleGitRefresh();
       } catch (err) {
         toast.error(
           `Autosave failed for ${path}: ${err instanceof Error ? err.message : String(err)}`,
@@ -490,7 +554,7 @@ export function WorkspacePage() {
         }
       }
     },
-    [writeUserFile],
+    [writeUserFile, scheduleGitRefresh],
   );
 
   // Cancel any pending autosave for a path. Called when the file is
@@ -680,7 +744,13 @@ export function WorkspacePage() {
         setOpenPaths((prev) => [...prev, path]);
       }
       // Cache hit — no fetch.
-      if (tabContentRef.current.has(path)) return;
+      if (tabContentRef.current.has(path)) {
+        // Still mirror into the language server: the LSP session may
+        // be younger than this tab (server restart, workspace
+        // recycle) and its openDocs map won't know the file.
+        syncLspDoc(path, tabContentRef.current.get(path) ?? "");
+        return;
+      }
       try {
         const content = await readUserFile(path);
         setTabContent((prev) => {
@@ -688,11 +758,12 @@ export function WorkspacePage() {
           next.set(path, content ?? "");
           return next;
         });
+        syncLspDoc(path, content ?? "");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
       }
     },
-    [readUserFile],
+    [readUserFile, syncLspDoc],
   );
 
   const closeTab = useCallback((path: string) => {
@@ -815,7 +886,13 @@ export function WorkspacePage() {
   }, []);
   const installedExtensions = useInstalledExtensions();
   const activityBarItems = useMemo<ActivityBarItem[]>(() => {
-    const items: ActivityBarItem[] = [...BUILTIN_ITEMS];
+    // Built-ins first; the Source Control entry carries the live
+    // changed-file count as its badge (VS Code parity).
+    const items: ActivityBarItem[] = BUILTIN_ITEMS.map((it) =>
+      it.id === "git" && gitChangedCount > 0
+        ? { ...it, badge: gitChangedCount }
+        : it,
+    );
     for (const ext of installedExtensions) {
       if (!ext.enabled) continue;
       const panels = ext.manifest.contributes?.panels ?? [];
@@ -828,7 +905,20 @@ export function WorkspacePage() {
       }
     }
     return items;
-  }, [installedExtensions]);
+  }, [installedExtensions, gitChangedCount]);
+
+  // LSP error+warning total (Phase 1) — merged into the status bar's
+  // problems count. The backend `problems` list and the language
+  // server's diagnostics are independent feeds, so the badge shows
+  // their union; the Problems panel itself renders only the LSP side.
+  const lspProblemCount = useMemo(
+    () =>
+      Object.values(lspDiagnostics).reduce(
+        (n, list) => n + list.filter((d) => d.severity <= 2).length,
+        0,
+      ),
+    [lspDiagnostics],
+  );
 
   // Listen for navigation requests fired by the extension iframe via
   // postMessage (`ext:navigate` → custom event). v1 only switches the
@@ -877,6 +967,12 @@ export function WorkspacePage() {
     (value: string) => {
       const path = activePathRef.current;
       if (!path) return;
+      // Programmatic doc replacements (reload-from-disk, discard)
+      // arrive here as ordinary onChange calls. If the payload equals
+      // what we already hold, there is nothing to save — skipping
+      // keeps a reload from scheduling a pointless autosave of the
+      // content it just loaded.
+      if (tabContentRef.current.get(path) === value) return;
       setTabContent((prev) => {
         const next = new Map(prev);
         next.set(path, value);
@@ -896,8 +992,16 @@ export function WorkspacePage() {
         void flushSave(path);
       }, AUTOSAVE_DEBOUNCE_MS);
       debounceTimersRef.current.set(path, timerId);
+      // Same debounce shape for the language-server mirror — the
+      // last keystroke's `value` wins when the timer finally fires.
+      const pendingLsp = lspSyncTimersRef.current.get(path);
+      if (pendingLsp !== undefined) clearTimeout(pendingLsp);
+      lspSyncTimersRef.current.set(
+        path,
+        setTimeout(() => syncLspDoc(path, value), LSP_SYNC_DEBOUNCE_MS),
+      );
     },
-    [flushSave],
+    [flushSave, syncLspDoc],
   );
 
   // ─── EditorView-dependent actions ───────────────────────────────
@@ -1444,6 +1548,9 @@ export function WorkspacePage() {
   useEffect(() => {
     if (!workspaceRoot) return;
     const unsub = subscribeToWatcher((event) => {
+      // Any disk activity can move the git working tree — feed the
+      // Source Control badge (coalesced inside scheduleGitRefresh).
+      scheduleGitRefresh();
       if (event.kind !== "change") return;
       const path = event.path;
       // Only prompt if the user has the file open in a tab. Closed
@@ -1458,7 +1565,7 @@ export function WorkspacePage() {
       setExternalChange((cur) => cur ?? { path });
     });
     return unsub;
-  }, [workspaceRoot, subscribeToWatcher]);
+  }, [workspaceRoot, subscribeToWatcher, scheduleGitRefresh]);
 
   // ─── External-change handlers ─────────────────────────────────
   // "Reload" — overwrite the editor doc with the disk version.
@@ -1718,6 +1825,11 @@ export function WorkspacePage() {
             onRefresh={() => void refreshTree()}
             rootFolderName={workspaceRoot?.name ?? null}
             treeLoading={Boolean(workspaceRoot && !tree)}
+            onOpenProblem={openSearchResult}
+            workspaceId={workspace?.id ?? null}
+            workspaceRootPath={workspaceRoot?.path ?? null}
+            onGitStatusCount={setGitChangedCount}
+            gitRefreshSignal={gitRefreshTick}
           />
           <section
             ref={ideContainerRef}
@@ -1761,6 +1873,7 @@ export function WorkspacePage() {
                 activePath={activePath}
                 content={activePath ? tabContent.get(activePath) ?? "" : ""}
                 hasFolder={hasFolder}
+                diagnostics={activePath ? lspDiagnostics[activePath] ?? [] : []}
                 onChange={handleEditorChange}
                 onCreateEditor={handleEditorView}
                 onCursorChange={handleCursorChange}
@@ -2015,6 +2128,11 @@ export function WorkspacePage() {
               onRefresh={() => void refreshTree()}
               rootFolderName={workspaceRoot?.name ?? null}
               treeLoading={Boolean(workspaceRoot && !tree)}
+              onOpenProblem={openSearchResult}
+              workspaceId={workspace?.id ?? null}
+              workspaceRootPath={workspaceRoot?.path ?? null}
+              onGitStatusCount={setGitChangedCount}
+              gitRefreshSignal={gitRefreshTick}
             />
 
             <section className="flex min-w-0 flex-1 flex-col">
@@ -2053,6 +2171,7 @@ export function WorkspacePage() {
                   activePath={activePath}
                   content={activePath ? tabContent.get(activePath) ?? "" : ""}
                   hasFolder={hasFolder}
+                  diagnostics={activePath ? lspDiagnostics[activePath] ?? [] : []}
                   onChange={handleEditorChange}
                   onCreateEditor={handleEditorView}
                   onCursorChange={handleCursorChange}
@@ -2094,15 +2213,8 @@ export function WorkspacePage() {
         lastSavedAt={savedAt > 0 ? savedAt : null}
         fileCount={treeCounts.files}
         folderCount={treeCounts.dirs}
-        problemsCount={problems.length}
-        onShowProblems={() =>
-          toast.info(
-            t(
-              "issueTracker.workspace.openDevServer",
-              "Open the Dev Server panel to view problems.",
-            ),
-          )
-        }
+        problemsCount={problems.length + lspProblemCount}
+        onShowProblems={() => setSidebarTab("problems")}
       />
 
       {/* Hidden filename indicator so screen readers can announce the
@@ -2202,6 +2314,17 @@ interface WorkspaceSidebarProps {
   onRefresh: () => void;
   rootFolderName: string | null;
   treeLoading: boolean;
+  /** Click-to-source for a Problems row (1-indexed line/column). */
+  onOpenProblem: (path: string, line: number, column: number) => void;
+  /** Source Control panel identity — null until the workspace
+   *  scaffold is ready, in which case the git tab renders nothing. */
+  workspaceId: string | null;
+  workspaceRootPath: string | null;
+  /** Lifts the changed-file count for the activity-bar badge. */
+  onGitStatusCount: (count: number) => void;
+  /** Bumped (throttled) whenever the file watcher or an autosave
+   *  moves the working tree. */
+  gitRefreshSignal: number;
 }
 
 function WorkspaceSidebar(props: WorkspaceSidebarProps) {
@@ -2245,6 +2368,11 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     onRefresh,
     rootFolderName,
     treeLoading,
+    onOpenProblem,
+    workspaceId,
+    workspaceRootPath,
+    onGitStatusCount,
+    gitRefreshSignal,
   } = props;
 
   // Resolve the active panel content. If the tab references an
@@ -2386,6 +2514,18 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             onRefresh={onRefresh}
             rootFolderName={rootFolderName}
             treeLoading={treeLoading}
+          />
+        )}
+        {effectiveTab === "problems" && (
+          <ProblemsPanel onOpen={onOpenProblem} />
+        )}
+        {effectiveTab === "git" && workspaceId && workspaceRootPath && (
+          <GitPanel
+            workspaceId={workspaceId}
+            root={workspaceRootPath}
+            onOpenFile={onOpenFile}
+            onStatusCountChange={onGitStatusCount}
+            refreshSignal={gitRefreshSignal}
           />
         )}
         {effectiveTab === "extensions" && <ExtensionsManagerPanel />}
