@@ -90,6 +90,7 @@ import { chatTools, browserToolSummary } from "@/lib/chatTools";
 import {
   getWorkspaceChatState,
   getWorkspaceOpenFile,
+  getWorkspaceSetRoot,
 } from "@/lib/workspaceChatContext";
 import { devServerApi } from "@/services/devServerApi";
 import type { FileNode } from "@/types/dev-server";
@@ -3657,6 +3658,24 @@ export function useIssueTracker() {
           }
           openFile(path!);
           return `Opened ${path} in the editor.`;
+        }
+        case "workspace_open_folder": {
+          // Deliberately does NOT require an open folder — switching to
+          // one from a bare /panel page is its whole point. The setter
+          // validates the path server-side and refuses phantom folders.
+          const setter = getWorkspaceSetRoot();
+          if (!setter) {
+            return "Skipped — the workspace page (/panel) isn't open. Ask the user to open it from the sidebar first, then retry with the absolute folder path.";
+          }
+          const path = tool.input.path as string | undefined;
+          if (!path || !path.trim()) {
+            return "Skipped — missing path. Ask the user for the absolute folder path (e.g. D:\\projects\\my-app).";
+          }
+          const message = await setter(path.trim());
+          if (!message.startsWith("Opened")) {
+            return `${message} — the folder must already exist on disk. Ask the user to create it (or correct the path) and retry.`;
+          }
+          return `${message}. The workspace root is now ${path.trim()} — list it with workspace_list_files before touching files.`;
         }
         case "workspace_git_status": {
           const ws = getWorkspaceChatState();

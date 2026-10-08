@@ -36,6 +36,13 @@ interface WorkspaceChatRegistration extends WorkspaceChatData {
   openFile: (path: string) => void;
 }
 
+// Kept OUTSIDE `current` on purpose: the data registration only exists
+// while a folder is open, but switching the root must work precisely
+// when NO folder is open yet (the chat's `workspace_open_folder` tool
+// is the way to bootstrap from a bare /panel page). Lives as long as
+// the workspace page itself is mounted.
+let rootSetter: ((path: string) => Promise<string>) | null = null;
+
 let current: WorkspaceChatRegistration | null = null;
 
 /**
@@ -50,10 +57,22 @@ export function setWorkspaceChatState(
 }
 
 /**
+ * Stamp (or clear) the live switch-folder callback. Called by
+ * WorkspacePage whenever the dev-server workspace id exists — folder
+ * open or not. `null` on unmount.
+ */
+export function setWorkspaceRootSetter(
+  fn: ((path: string) => Promise<string>) | null,
+): void {
+  rootSetter = fn;
+}
+
+/**
  * Per-turn snapshot for the CURRENT STATE block. `null` when no
  * workspace page is mounted (or the user hasn't picked a folder yet) —
- * the chat's workspace tools then refuse with a clear hint instead of
- * guessing an id.
+ * the chat's file/git tools then refuse with a clear hint instead of
+ * guessing an id. (`workspace_open_folder` still works in that state —
+ * see `getWorkspaceSetRoot`.)
  */
 export function getWorkspaceChatState(): WorkspaceChatData | null {
   if (!current) return null;
@@ -69,4 +88,16 @@ export function getWorkspaceOpenFile():
   | ((path: string) => void)
   | null {
   return current?.openFile ?? null;
+}
+
+/**
+ * The live switch-folder callback, for the `workspace_open_folder`
+ * tool. Resolves to a human-readable outcome (`Opened …` / `Refused — …`).
+ * Null when no workspace page is mounted — the tool then asks the user
+ * to open /panel first.
+ */
+export function getWorkspaceSetRoot():
+  | ((path: string) => Promise<string>)
+  | null {
+  return rootSetter;
 }

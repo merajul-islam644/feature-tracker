@@ -132,6 +132,7 @@ import {
   appendDevServerLog,
   devServerId,
   eventsAfter as devServerEventsAfter,
+  folderExists,
   getDevServer,
   inspectPackage,
   pickFolder,
@@ -1092,7 +1093,11 @@ app.post("/dev-server/pick-folder", async (_req, reply) => {
 
 // Reads `package.json` at the given path. Returns `null` (with 200)
 // when the file is missing or malformed so the UI can render
-// "no package.json found" without treating it as an error.
+// "no package.json found" without treating it as an error. The
+// `exists` flag disambiguates that null: `exists: false` means the
+// folder itself is gone (client must not store the path as a
+// workspace root), `exists: true` + `package: null` means the folder
+// is real but has no package.json.
 app.post("/dev-server/inspect-package", async (req, reply) => {
   const body = z
     .object({
@@ -1102,8 +1107,9 @@ app.post("/dev-server/inspect-package", async (req, reply) => {
   if (!body.success) {
     return reply.code(400).send({ error: body.error.flatten() });
   }
-  const summary = await inspectPackage(body.data.path);
-  return reply.send({ package: summary });
+  const exists = await folderExists(body.data.path);
+  const summary = exists ? await inspectPackage(body.data.path) : null;
+  return reply.send({ package: summary, exists });
 });
 
 app.get<{ Params: { workspaceId: string; port: string } }>(

@@ -159,7 +159,9 @@ interface DevServerContextValue {
    * with `inspectPackage` so a stale / deleted folder doesn't leak
    * into the UI.
    */
-  setWorkspaceRoot: (path: string) => Promise<void>;
+  setWorkspaceRoot: (
+    path: string,
+  ) => Promise<{ ok: boolean; message: string }>;
   /** Forget the picked folder. Clears localStorage + state. */
   closeFolder: () => void;
 
@@ -632,32 +634,50 @@ export function DevServerProvider({
   );
 
   const setWorkspaceRoot = useCallback(
-    async (path: string) => {
+    // Returns the outcome so non-UI callers (the chat agent's
+    // workspace_open_folder tool) can report success/failure — the
+    // toasts stay for the human.
+    async (path: string): Promise<{ ok: boolean; message: string }> => {
       if (!userId || !projectId || !envSlug) {
         // Auth/env triple hasn't hydrated — typing a path while the
         // IAM session is broken would otherwise silently swallow the
         // click. Surface the failure so the user knows to refresh.
-        toast.error(
-          "Authentication not ready — please refresh the page and try again.",
-        );
-        return;
+        const message =
+          "Authentication not ready — please refresh the page and try again.";
+        toast.error(message);
+        return { ok: false, message };
       }
       const trimmed = path.trim();
-      if (!trimmed) return;
+      if (!trimmed) return { ok: false, message: "Empty path." };
       try {
-        const pkg = await devServerApi.inspectPackage(trimmed);
-        if (!pkg) {
+        const res = await devServerApi.inspectPackage(trimmed);
+        if (!res.exists) {
+          // The folder isn't on disk. Never store it — a phantom root
+          // would sit in localStorage forever (the mount re-validation
+          // used to be unable to clear these) and leak into every
+          // workspace tool call as a guaranteed failure.
+          const message = `Folder not found: ${trimmed}`;
+          toast.error(message);
+          return { ok: false, message };
+        }
+        if (!res.package) {
           // Folder exists but no package.json — still set the root,
           // just with a null packageJson. The UI shows "no package.json
           // found" and hides the workspace dependencies subsection.
           applyWorkspaceRoot(trimmed, null);
-          toast.success(`Opened ${trimmed.split(/[\\/]/).pop() ?? trimmed} — no package.json found`);
-          return;
+          const name = trimmed.split(/[\\/]/).pop() ?? trimmed;
+          const message = `Opened ${name} — no package.json found`;
+          toast.success(message);
+          return { ok: true, message };
         }
-        applyWorkspaceRoot(trimmed, pkg);
-        toast.success(`Opened ${pkg.name}${pkg.version ? ` v${pkg.version}` : ""}`);
+        applyWorkspaceRoot(trimmed, res.package);
+        const message = `Opened ${res.package.name}${res.package.version ? ` v${res.package.version}` : ""}`;
+        toast.success(message);
+        return { ok: true, message };
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(message);
+        return { ok: false, message };
       }
     },
     [userId, projectId, envSlug, applyWorkspaceRoot],
@@ -671,15 +691,22 @@ export function DevServerProvider({
         // path; we ask the backend to read package.json. This keeps
         // the parse path uniform (the server is the only thing
         // touching fs).
-        const pkg = await devServerApi.inspectPackage(result.path);
-        if (!pkg) {
+        const res = await devServerApi.inspectPackage(result.path);
+        if (!res.exists) {
+          // The picker shouldn't hand back phantom paths, but a
+          // network drive that dropped between pick and inspect
+          // would land here — refuse rather than store a dead root.
+          toast.error(`Folder not found: ${result.path}`);
+          return;
+        }
+        if (!res.package) {
           applyWorkspaceRoot(result.path, null);
           const name = result.path.split(/[\\/]/).pop() ?? result.path;
           toast.success(`Opened ${name} — no package.json found`);
           return;
         }
-        applyWorkspaceRoot(result.path, pkg);
-        toast.success(`Opened ${pkg.name}${pkg.version ? ` v${pkg.version}` : ""}`);
+        applyWorkspaceRoot(result.path, res.package);
+        toast.success(`Opened ${res.package.name}${res.package.version ? ` v${res.package.version}` : ""}`);
       } else if (result.reason === "no_gui" || result.reason === "spawn_failed") {
         toast.error("Native folder dialog unavailable. Use the text input fallback.");
       }
@@ -933,32 +960,33 @@ export function DevServerProvider({
   }, [workspaceRoot?.path, workspace?.id]);
 
   // Re-validate the persisted folder on mount — the user may have
-  // deleted the folder since the last session. The synchronous load
+  // deleted the folder since the last session (or a buggy older build
+  // stored a placeholder path that never existed). The synchronous load
   // already populated `workspaceRoot`; this pass calls `inspectPackage`
-  // and clears the row if the path is gone (returns null AND was
-  // previously non-null). Distinguishing the two cases matters so a
-  // brand-new "no package.json" folder doesn't get wiped on mount.
+  // and uses its `exists` flag to clear phantom rows — which the old
+  // null-only contract couldn't distinguish from a legitimate
+  // "no package.json" folder, so such rows used to sit forever.
   useEffect(() => {
     if (!workspaceRoot) return;
     if (!userId || !projectId || !envSlug) return;
     let cancelled = false;
     (async () => {
       try {
-        const pkg = await devServerApi.inspectPackage(workspaceRoot.path);
+        const res = await devServerApi.inspectPackage(workspaceRoot.path);
         if (cancelled) return;
-        // Path no longer exists — `inspectPackage` returns null AND
-        // a `fsp.stat` failure means the dir is gone. Clear + toast.
-        if (!pkg && workspaceRoot.packageJson === null) {
-          // Already null packageJson (we knew it was missing) — re-check
-          // by re-statting through a throwaway. Simplest: clear the row
-          // only if the directory also doesn't exist. Since the server
-          // is the one with fs access, we just trust the inspectPackage
-          // contract: null on missing dir OR missing package.json.
-          // To distinguish, attempt a second call via the underlying
-          // helper isn't available — instead, leave the row alone
-          // unless the user explicitly retries.
+        if (!res.exists) {
+          // Folder is gone (or never existed) — drop the stored root
+          // entirely so every workspace surface (Explorer, tools, chat
+          // CURRENT STATE) reflects reality.
+          saveWorkspaceRoot(userId, projectId, envSlug, null);
+          setWorkspaceRootState(null);
+          setTree(null);
+          toast.error(
+            `Folder no longer exists — closed ${workspaceRoot.name}`,
+          );
           return;
         }
+        const pkg = res.package;
         if (pkg && (!workspaceRoot.packageJson ||
             workspaceRoot.packageJson.name !== pkg.name ||
             workspaceRoot.packageJson.version !== pkg.version)) {
