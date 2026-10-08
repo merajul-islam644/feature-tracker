@@ -93,6 +93,59 @@ export type LspDiagnosticEvent =
   | { kind: "snapshot"; files: Record<string, LspDiagnostic[]>; ts: number }
   | { kind: "publish"; path: string; diagnostics: LspDiagnostic[]; ts: number };
 
+// ─── LSP Phase 2 feature payloads ───────────────────────────────────
+// All paths are root-relative (forward slashes) — the backend rewrites
+// the protocol's file:// URIs before the panel ever sees them.
+
+export interface LspPosition {
+  line: number;
+  character: number;
+}
+
+export interface LspRange {
+  start: LspPosition;
+  end: LspPosition;
+}
+
+/** A definition/reference hit: which file, which span. */
+export interface LspLocation {
+  path: string;
+  range: LspRange;
+}
+
+/** Hover payload — `contents` is whatever MarkupContent/string shape
+ *  the server produced; the editor renders it as preformatted text. */
+export interface LspHover {
+  contents: unknown;
+  range?: LspRange | null;
+}
+
+/** Hierarchical document symbol (tls with hierarchicalDocumentSymbol-
+ * Support). `location` is present only if the server negotiated down
+ * to the flat SymbolInformation shape. */
+export interface LspDocumentSymbol {
+  name: string;
+  detail?: string;
+  /** LSP SymbolKind enum (5=Class, 6=Method, 12=Function, …). */
+  kind: number;
+  range: LspRange;
+  selectionRange: LspRange;
+  children?: LspDocumentSymbol[];
+  location?: LspLocation;
+  containerName?: string;
+}
+
+/** One edit inside a rename WorkspaceEdit (protocol TextEdit). */
+export interface LspTextEdit {
+  range: LspRange;
+  newText: string;
+}
+
+/** Normalized rename result — keyed by root-relative path. */
+export interface LspWorkspaceEdit {
+  changes: Record<string, LspTextEdit[]>;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //  Workspace root — the local folder the user picked via the
 //  "Open Folder" flow. Anchors the dev server's `cwd` and seeds the

@@ -22,12 +22,14 @@
 // not the document length — long files scroll within the editor
 // area instead of pushing the page.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EditorView,
+  hoverTooltip,
+  keymap,
   type EditorView as EditorViewType,
 } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { EditorState, type Extension } from "@codemirror/state";
 import {
   completeFromList,
   type Completion,
@@ -39,9 +41,14 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
 import CodeMirror from "@uiw/react-codemirror";
-import { FileCode2 } from "lucide-react";
+import { FileCode2, X } from "lucide-react";
 import { Kbd } from "@/components/ui/kbd";
-import type { LspDiagnostic } from "@/types/dev-server";
+import type {
+  LspDiagnostic,
+  LspHover,
+  LspLocation,
+} from "@/types/dev-server";
+import { basename } from "./treeHelpers";
 
 interface EditorAreaProps {
   activePath: string | null;
@@ -70,6 +77,27 @@ interface EditorAreaProps {
    * directly. Debounced upstream by CodeMirror's update cycle.
    */
   onCursorChange?: (line: number, col: number) => void;
+  // ── Phase 2 LSP features ────────────────────────────────────────
+  /** Hover lookup. Null → no tooltip; the editor renders the payload's
+   *  `contents` as preformatted text pinned to the server's range. */
+  onHover?: (pos: number) => Promise<LspHover | null>;
+  /** Go-to-definition (Ctrl/Cmd+Click, F12, command palette). The
+   *  parent navigates and toasts when nothing is found. */
+  onDefinition?: (pos: number) => void;
+  /** Find references (Shift+F12). Resolves to the hit list that the
+   *  peek panel renders; null = lookup failed (toasted upstream). */
+  onFindReferences?: (pos: number) => Promise<LspLocation[] | null>;
+  /** Rename symbol (F2). The parent applies the WorkspaceEdit across
+   *  open tabs and closed files; null = refused (toasted upstream). */
+  onRename?: (
+    pos: number,
+    newName: string,
+  ) => Promise<{ files: number; edits: number } | null>;
+  /** Bump from 0 → opens the rename input at the cursor (the command
+   *  palette's "Rename Symbol" has no cursor position of its own). */
+  renameSignal?: number;
+  /** Open a path at a 1-indexed line/column — how peek rows navigate. */
+  onNavigate?: (path: string, line: number, column: number) => void;
 }
 
 // Maps a file path to a CodeMirror language name. Mirrors
@@ -269,6 +297,26 @@ function listCompletionSource(list: Completion[]): CompletionSource | null {
   return completeFromList(enriched);
 }
 
+// Flattens an LSP hover payload into tooltip text. `contents` is
+// string | MarkedString | MarkedString[] | MarkupContent depending on
+// the server — every branch resolves to its plain text and the pieces
+// join with a blank line. Markdown chrome (**bold**, ```fences```)
+// is left in place: hover signatures read fine as preformatted text.
+function hoverContentText(contents: unknown): string {
+  if (typeof contents === "string") return contents;
+  if (Array.isArray(contents)) {
+    return contents
+      .map((c) => hoverContentText(c))
+      .filter((t) => t.length > 0)
+      .join("\n\n");
+  }
+  if (contents && typeof contents === "object") {
+    const value = (contents as { value?: unknown }).value;
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
 export function EditorArea({
   activePath,
   content,
@@ -278,6 +326,12 @@ export function EditorArea({
   onChange,
   onCreateEditor,
   onCursorChange,
+  onHover,
+  onDefinition,
+  onFindReferences,
+  onRename,
+  renameSignal,
+  onNavigate,
 }: EditorAreaProps) {
   // Build the updateListener extension once per `onCursorChange`
   // reference. The callback itself is captured at extension-create
@@ -406,6 +460,203 @@ export function EditorArea({
     ];
   }, [diagnostics]);
 
+  // ─── Phase 2 LSP: view ref + hover / definition / references ───
+  // Internal view ref — the rename input and references peek need
+  // cursor positions without a parent callback round-trip.
+  const viewRef = useRef<EditorViewType | null>(null);
+  const handleView = useCallback(
+    (view: EditorViewType) => {
+      viewRef.current = view;
+      onCreateEditor?.(view);
+    },
+    [onCreateEditor],
+  );
+
+  // Hover tooltip. The lookup rides the same doc-sync the diagnostics
+  // use, so hovering an unsaved buffer keeps tsserver current. One
+  // round-trip per hover-start (not per mousemove) — tsserver hover
+  // is fast enough not to need a cache.
+  const hoverExtension = useMemo(() => {
+    if (!onHover) return [];
+    return [
+      hoverTooltip(
+        async (view, pos) => {
+          try {
+            const result = await onHover(pos);
+            if (!result || !result.contents) return null;
+            const text = hoverContentText(result.contents);
+            if (!text) return null;
+            const dom = document.createElement("div");
+            dom.className = "cm-lsp-hover";
+            dom.textContent = text;
+            // Pin to the server's range (falls back to the exact
+            // cursor position if the range is outside the doc —
+            // stale hover after a big edit).
+            let start = pos;
+            let end = pos;
+            const r = result.range;
+            if (r) {
+              try {
+                const doc = view.state.doc;
+                const s = doc.line(
+                  Math.min(Math.max(r.start.line + 1, 1), doc.lines),
+                );
+                start = s.from + Math.min(Math.max(r.start.character, 0), s.length);
+                const e = doc.line(
+                  Math.min(Math.max(r.end.line + 1, 1), doc.lines),
+                );
+                end = e.from + Math.min(
+                  Math.max(r.end.character, r.start.character + 1),
+                  e.length,
+                );
+              } catch {
+                /* keep cursor pos */
+              }
+            }
+            return { pos: start, end, create: () => ({ dom }), above: true };
+          } catch {
+            return null;
+          }
+        },
+        { hoverTime: 450 },
+      ),
+    ];
+  }, [onHover]);
+
+  // Rename input state. F2 (or the palette's renameSignal bump) opens
+  // it pre-filled with the word under the cursor; Enter submits,
+  // Escape cancels.
+  const [renameBox, setRenameBox] = useState<{
+    pos: number;
+    value: string;
+    busy: boolean;
+  } | null>(null);
+  const openRenameAt = useCallback(
+    (pos: number) => {
+      const view = viewRef.current;
+      if (!view || !onRename) return;
+      const word =
+        view.state.wordAt(pos) ?? view.state.wordAt(Math.max(0, pos - 1));
+      const text = word ? view.state.sliceDoc(word.from, word.to) : "";
+      setRenameBox({ pos, value: text, busy: false });
+    },
+    [onRename],
+  );
+  useEffect(() => {
+    if (!renameSignal) return;
+    const view = viewRef.current;
+    if (view) openRenameAt(view.state.selection.main.head);
+  }, [renameSignal, openRenameAt]);
+  const submitRename = useCallback(async () => {
+    const box = renameBox;
+    if (!box || !onRename || box.busy) return;
+    const name = box.value.trim();
+    if (!name) {
+      setRenameBox(null);
+      return;
+    }
+    setRenameBox((b) => (b ? { ...b, busy: true } : b));
+    try {
+      await onRename(box.pos, name);
+    } finally {
+      setRenameBox(null);
+    }
+  }, [renameBox, onRename]);
+
+  // References peek state. The peek dies with the file — a stale list
+  // pointing at the previous doc's lines is worse than no list.
+  const [peek, setPeek] = useState<{
+    word: string;
+    items: LspLocation[];
+  } | null>(null);
+  useEffect(() => {
+    setPeek(null);
+  }, [activePath]);
+  const runFindReferences = useCallback(
+    async (pos: number) => {
+      if (!onFindReferences) return;
+      const view = viewRef.current;
+      const word = view?.state.wordAt(pos);
+      const wordText =
+        word && view ? view.state.sliceDoc(word.from, word.to) : "symbol";
+      try {
+        const items = await onFindReferences(pos);
+        setPeek({ word: wordText, items: items ?? [] });
+      } catch {
+        // Upstream already toasts failures; keep the editor quiet.
+      }
+    },
+    [onFindReferences],
+  );
+
+  // Keymap + Ctrl/Cmd+Click bindings for the nav features. Each key
+  // returns `true` to keep basicSetup's defaults (none of which bind
+  // these keys) from reacting.
+  const lspNavExtensions = useMemo(() => {
+    const exts: Extension[] = [];
+    if (onDefinition) {
+      exts.push(
+        keymap.of([
+          {
+            key: "F12",
+            run: (view) => {
+              onDefinition(view.state.selection.main.head);
+              return true;
+            },
+          },
+        ]),
+      );
+      // Ctrl/Cmd+Click — VS Code's go-to-definition gesture. Returns
+      // true so the editor doesn't ALSO move the cursor to the click
+      // point underneath the navigation.
+      exts.push(
+        EditorView.domEventHandlers({
+          mousedown(event, view) {
+            if (!(event.ctrlKey || event.metaKey) || event.button !== 0) {
+              return false;
+            }
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            if (pos == null) return false;
+            event.preventDefault();
+            onDefinition(pos);
+            return true;
+          },
+        }),
+      );
+    }
+    if (onFindReferences) {
+      exts.push(
+        keymap.of([
+          {
+            key: "Shift-F12",
+            run: (view) => {
+              void runFindReferences(view.state.selection.main.head);
+              return true;
+            },
+          },
+        ]),
+      );
+    }
+    if (onRename) {
+      exts.push(
+        keymap.of([
+          {
+            key: "F2",
+            run: (view) => {
+              openRenameAt(view.state.selection.main.head);
+              return true;
+            },
+          },
+        ]),
+      );
+    }
+    return exts;
+  }, [onDefinition, onFindReferences, onRename, openRenameAt, runFindReferences]);
+
+  // Line texts of the active file — lets peek rows show the source
+  // line they point at without re-reading the file.
+  const activeLines = useMemo(() => content.split("\n"), [content]);
+
   // No folder → parent owns the empty state.
   if (!hasFolder) return null;
 
@@ -436,6 +687,8 @@ export function EditorArea({
   if (langSupport) extensions.push(langSupport);
   extensions.push(completionExtension);
   for (const l of lintExtension) extensions.push(l);
+  for (const h of hoverExtension) extensions.push(h);
+  extensions.push(...lspNavExtensions);
   return (
     // The wrapper is the editor's flex slot (`flex-1` for height,
     // `overflow-hidden` so a too-tall canvas never escapes the column).
@@ -450,8 +703,9 @@ export function EditorArea({
     // user saw only the first screen of lines. Setting
     // `style={{ height: "100%" }}` on the host makes `.cm-theme`
     // inherit the wrapper's bounded flex height, which lets the
-    // inner `.cm-scroller` actually scroll.
-    <div className="scrollbar-hide min-h-0 flex-1 overflow-hidden bg-card">
+    // inner `.cm-scroller` actually scroll. `relative` hosts the
+    // rename + references overlays.
+    <div className="scrollbar-hide relative min-h-0 flex-1 overflow-hidden bg-card">
       <CodeMirror
         value={content}
         theme={oneDark}
@@ -474,8 +728,115 @@ export function EditorArea({
         height="100%"
         style={{ height: "100%" }}
         extensions={extensions}
-        onCreateEditor={onCreateEditor}
+        onCreateEditor={handleView}
       />
+
+      {/* Rename symbol input (F2) — parked top-center like VS Code's. */}
+      {renameBox && (
+        <div
+          className="absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-lg border bg-popover px-3 py-2 shadow-xl"
+          data-testid="rename-box"
+        >
+          <label
+            htmlFor="workspace-rename-input"
+            className="mb-1 block text-[11px] font-medium text-muted-foreground"
+          >
+            Rename symbol
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              id="workspace-rename-input"
+              autoFocus
+              value={renameBox.value}
+              disabled={renameBox.busy}
+              onChange={(e) =>
+                setRenameBox((b) => (b ? { ...b, value: e.target.value } : b))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitRename();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setRenameBox(null);
+                }
+              }}
+              data-testid="rename-input"
+              spellCheck={false}
+              autoComplete="off"
+              className="h-7 w-64 rounded-md border bg-background px-2 font-mono text-xs outline-none focus:ring-1 focus:ring-ring disabled:opacity-60"
+            />
+            <span className="text-[10px] text-muted-foreground">
+              {renameBox.busy ? "renaming…" : "↵ rename · esc cancel"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Find-references peek — bottom sheet over the editor, VS Code
+          "peek" style. Rows navigate via the parent's open-at helper. */}
+      {peek && (
+        <div
+          className="absolute bottom-3 left-3 right-3 z-20 flex max-h-56 flex-col overflow-hidden rounded-lg border bg-popover shadow-xl"
+          data-testid="references-peek"
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-border bg-muted/40 px-3 py-1.5">
+            <span className="text-[11px] font-semibold text-foreground">
+              {peek.items.length}{" "}
+              {peek.items.length === 1 ? "reference" : "references"} to{" "}
+              <span className="font-mono">{peek.word}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setPeek(null)}
+              aria-label="Close references"
+              className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+          <ul className="min-h-0 flex-1 overflow-y-auto py-1 text-xs">
+            {peek.items.length === 0 && (
+              <li className="px-3 py-2 text-muted-foreground">
+                No references found.
+              </li>
+            )}
+            {peek.items.map((item, i) => {
+              const key = `${item.path}:${item.range.start.line}:${item.range.start.character}:${i}`;
+              const lineText =
+                item.path === activePath
+                  ? activeLines[item.range.start.line]?.trim()
+                  : null;
+              return (
+                <li key={key}>
+                  <button
+                    type="button"
+                    data-testid="references-peek-item"
+                    onClick={() => {
+                      setPeek(null);
+                      onNavigate?.(
+                        item.path,
+                        item.range.start.line + 1,
+                        item.range.start.character + 1,
+                      );
+                    }}
+                    className="flex w-full items-baseline gap-2 px-3 py-1 text-left hover:bg-muted/60"
+                  >
+                    <span className="shrink-0 font-mono text-muted-foreground">
+                      {basename(item.path)}:{item.range.start.line + 1}
+                    </span>
+                    {lineText != null && (
+                      <span className="truncate font-mono text-foreground/80">
+                        {lineText}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
