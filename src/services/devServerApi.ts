@@ -18,6 +18,7 @@ import type {
   DevServerStatus,
   DevServerWorkspace,
   FileNode,
+  LspDiagnosticEvent,
   PackageJsonSummary,
   SearchResponse,
   SearchResult,
@@ -25,6 +26,7 @@ import type {
   WatchEvent,
   WatchEventKind,
 } from "@/types/dev-server";
+import type { GitBranch, GitStatus } from "@/types/git";
 
 // Feature flag removed — the dev-server sandbox is always on. The
 // previous `VITE_USE_DEV_SERVER` build-time flag was silently false
@@ -943,6 +945,292 @@ export const devServerApi = {
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       es?.close();
     };
+  },
+
+  // ───────────────────────────────────────────────────────────────
+  //  LSP bridge (Phase 1: TypeScript)
+  // ───────────────────────────────────────────────────────────────
+
+  /**
+   * One JSON-RPC request to the workspace's language server. `doc`
+   * syncs the server's view of a file first (didOpen/didChange with
+   * the editor's live content, or disk content when omitted) so
+   * hover/diagnostics reflect unsaved edits. `path` inside `params`
+   * is a root-relative path — the server rewrites it to the
+   * `textDocument.uri` the protocol wants.
+   */
+  async lspRequest(opts: {
+    workspaceId: string;
+    root: string;
+    method: string;
+    params?: unknown;
+    doc?: { path: string; content?: string };
+  }): Promise<unknown> {
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/lsp/request`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          root: opts.root,
+          method: opts.method,
+          params: opts.params,
+          doc: opts.doc,
+        }),
+      },
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `lsp request failed (${res.status})`);
+    }
+    const data = (await res.json()) as { result: unknown };
+    return data.result;
+  },
+
+  /** Recycle the workspace's language server process (e.g. after a
+   *  tsconfig change). */
+  async stopLsp(opts: { workspaceId: string }): Promise<void> {
+    await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/lsp/stop`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    ).catch(() => undefined);
+  },
+
+  /**
+   * SSE feed of LSP diagnostics — same reconnect/cursor skeleton as
+   * `subscribeWatcher`, with one difference: the first event on a
+   * fresh connection is a `snapshot` of every file's current
+   * diagnostics, so a fresh subscriber paints immediately.
+   */
+  subscribeLspDiagnostics(opts: {
+    workspaceId: string;
+    root: string;
+    onEvent: (event: LspDiagnosticEvent) => void;
+    onError?: (err: Error) => void;
+    onGiveUp?: (err: Error) => void;
+  }): () => void {
+    const base = `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/lsp/diagnostics?root=${encodeURIComponent(opts.root)}`;
+    let es: EventSource | null = null;
+    let reconnectTimer: number | undefined;
+    let disposed = false;
+    let openedOnce = false;
+    let cursor = 0;
+    const MAX_FAILURES = 3;
+    let consecutiveFailures = 0;
+    let backoffMs = 1_000;
+
+    const connect = () => {
+      if (disposed) return;
+      es = new EventSource(cursor > 0 ? `${base}&since=${cursor}` : base);
+      es.onopen = () => {
+        openedOnce = true;
+        consecutiveFailures = 0;
+        backoffMs = 1_000;
+      };
+      es.onmessage = (msg) => {
+        try {
+          const event = JSON.parse(msg.data) as LspDiagnosticEvent;
+          if (event && (event.kind === "snapshot" || event.kind === "publish")) {
+            cursor += 1;
+            opts.onEvent(event);
+          }
+        } catch (err) {
+          opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        if (disposed) return;
+        if (!openedOnce && cursor === 0) {
+          // First-attempt failure → the language server binary is
+          // missing or the route doesn't exist on this backend.
+          opts.onGiveUp?.(new Error("language server unavailable"));
+          return;
+        }
+        opts.onError?.(new Error("language server stream error"));
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= MAX_FAILURES) {
+          opts.onGiveUp?.(new Error("language server gave up after retries"));
+          return;
+        }
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = undefined;
+          connect();
+        }, backoffMs);
+        backoffMs = Math.min(Math.max(backoffMs, 1_000) * 2, 2_000);
+      };
+    };
+    connect();
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      es?.close();
+    };
+  },
+
+  // ───────────────────────────────────────────────────────────────
+  //  Git bridge — the Source Control panel. Mutations throw with
+  //  git's own stderr as the message (the server forwards it), so
+  //  panel toasts read exactly what a terminal would have printed.
+  // ───────────────────────────────────────────────────────────────
+
+  /** Porcelain status. Never throws for "not a repo" — that arrives
+   *  as `isRepo: false` + `reason`, an ordinary panel state. */
+  async gitStatus(opts: { workspaceId: string; root: string }): Promise<GitStatus> {
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/git/status?root=${encodeURIComponent(opts.root)}`,
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `git status failed (${res.status})`);
+    }
+    return (await res.json()) as GitStatus;
+  },
+
+  /** Unified diff text for one file. Empty string for untracked files
+   *  (no baseline to diff against). */
+  async gitDiff(opts: {
+    workspaceId: string;
+    root: string;
+    path: string;
+    staged: boolean;
+  }): Promise<string> {
+    const q = new URLSearchParams({
+      root: opts.root,
+      path: opts.path,
+      staged: opts.staged ? "1" : "0",
+    });
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/git/diff?${q.toString()}`,
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `git diff failed (${res.status})`);
+    }
+    const data = (await res.json()) as { diff: string };
+    return data.diff;
+  },
+
+  async gitBranches(opts: {
+    workspaceId: string;
+    root: string;
+  }): Promise<GitBranch[]> {
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/git/branches?root=${encodeURIComponent(opts.root)}`,
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `git branches failed (${res.status})`);
+    }
+    const data = (await res.json()) as { branches: GitBranch[] };
+    return data.branches;
+  },
+
+  async gitStage(opts: {
+    workspaceId: string;
+    root: string;
+    paths: string[];
+  }): Promise<void> {
+    await devServerApi.gitMutation(opts.workspaceId, "stage", {
+      root: opts.root,
+      paths: opts.paths,
+    });
+  },
+
+  async gitUnstage(opts: {
+    workspaceId: string;
+    root: string;
+    paths: string[];
+  }): Promise<void> {
+    await devServerApi.gitMutation(opts.workspaceId, "unstage", {
+      root: opts.root,
+      paths: opts.paths,
+    });
+  },
+
+  async gitDiscard(opts: {
+    workspaceId: string;
+    root: string;
+    paths: string[];
+  }): Promise<void> {
+    await devServerApi.gitMutation(opts.workspaceId, "discard", {
+      root: opts.root,
+      paths: opts.paths,
+    });
+  },
+
+  /** Commit the staged index. Resolves with git's summary line for
+   *  the success toast. */
+  async gitCommit(opts: {
+    workspaceId: string;
+    root: string;
+    message: string;
+  }): Promise<string> {
+    const data = (await devServerApi.gitMutation(opts.workspaceId, "commit", {
+      root: opts.root,
+      message: opts.message,
+    })) as { summary?: string };
+    return data.summary ?? "";
+  },
+
+  async gitPush(opts: {
+    workspaceId: string;
+    root: string;
+  }): Promise<string> {
+    const data = (await devServerApi.gitMutation(opts.workspaceId, "push", {
+      root: opts.root,
+    })) as { output?: string };
+    return data.output ?? "";
+  },
+
+  async gitPull(opts: {
+    workspaceId: string;
+    root: string;
+  }): Promise<string> {
+    const data = (await devServerApi.gitMutation(opts.workspaceId, "pull", {
+      root: opts.root,
+    })) as { output?: string };
+    return data.output ?? "";
+  },
+
+  async gitCheckout(opts: {
+    workspaceId: string;
+    root: string;
+    branch: string;
+  }): Promise<void> {
+    await devServerApi.gitMutation(opts.workspaceId, "checkout", {
+      root: opts.root,
+      branch: opts.branch,
+    });
+  },
+
+  /** Shared POST plumbing for the git mutations — identical shape:
+   *  `{ root, …op fields }` body, `{ ok: true, … }` response, git's
+   *  stderr in `error` on failure. */
+  async gitMutation(
+    workspaceId: string,
+    op: "stage" | "unstage" | "discard" | "commit" | "push" | "pull" | "checkout",
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(workspaceId)}/git/${op}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `git ${op} failed (${res.status})`);
+    }
+    return (await res.json().catch(() => ({}))) as unknown;
   },
 };
 

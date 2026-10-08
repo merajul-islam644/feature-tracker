@@ -539,15 +539,18 @@ function devServerProxy(env: Record<string, string>): Plugin {
           notConfigured(res);
           return;
         }
-        // SSE pump for `/events` and `/watch` — preserves the streaming
-        // response so the terminal/dev-server panel and the file
-        // watcher get their frames without buffering. Without this
-        // branch, the JSON-forward fallback below would `await
-        // upstream.text()` and never complete on a long-lived SSE.
+        // SSE pump for `/events`, `/watch` and `/diagnostics` —
+        // preserves the streaming response so the terminal/dev-server
+        // panel, the file watcher and the LSP Problems feed get their
+        // frames without buffering. Without this branch, the
+        // JSON-forward fallback below would `await upstream.text()`
+        // and never complete on a long-lived SSE.
+        const ssePath = (req.url ?? "").split("?")[0];
         if (
           req.method === "GET" &&
-          ((req.url ?? "").split("?")[0].endsWith("/events") ||
-            (req.url ?? "").split("?")[0].endsWith("/watch"))
+          (ssePath.endsWith("/events") ||
+            ssePath.endsWith("/watch") ||
+            ssePath.endsWith("/diagnostics"))
         ) {
           try {
             const upstream = await fetch(

@@ -77,6 +77,13 @@
 //                                          add/change/unlink events
 //                                          for the picked folder
 //
+//   *      /dev-server/:wsId/git/*        → git working-tree bridge for
+//                                          the Source Control panel
+//                                          (status/diff/branches + stage,
+//                                          unstage, discard, commit,
+//                                          push, pull, checkout — see
+//                                          ./git.ts for the safety model)
+//
 //   GET    /_agent/status                → bridge status for the SPA
 //                                          banner (always available; reports
 //                                          { enabled, connected, … })
@@ -152,6 +159,26 @@ import {
   watchFolder,
   type WatchEvent,
 } from "./fileIndex.js";
+import {
+  ensureLspSession,
+  killSession,
+  lspRequest,
+  lspSnapshotEvent,
+  shutdownAllLspSessions,
+  waitForLspEvents,
+} from "./lsp.js";
+import {
+  gitBranches,
+  gitCheckout,
+  gitCommit,
+  gitDiff,
+  gitDiscard,
+  gitPull,
+  gitPush,
+  gitStage,
+  gitStatus,
+  gitUnstage,
+} from "./git.js";
 import type { StartVerificationRequest } from "./types.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8787);
@@ -1431,6 +1458,327 @@ app.get<{
   setImmediate(pump);
 });
 
+// ─────────────────────────────────────────────────────────────────────
+//  LSP bridge (Phase 1: TypeScript)
+//
+//  Three endpoints over the same `/dev-server/*` HTTP surface as the
+//  file/watch routes, so the agent bridge forwards them unchanged in
+//  prod (unlike the terminal, whose WS is local-only):
+//
+//    POST /dev-server/:wsId/lsp/request      one JSON-RPC request → response
+//    GET  /dev-server/:wsId/lsp/diagnostics  SSE feed of publishDiagnostics
+//    POST /dev-server/:wsId/lsp/stop         recycle the server process
+// ─────────────────────────────────────────────────────────────────────
+
+const LspRequestBody = z.object({
+  root: z.string().min(1).max(4096),
+  method: z.string().min(1).max(128),
+  params: z.unknown().optional(),
+  doc: z
+    .object({
+      path: z.string().min(0).max(2048),
+      content: z.string().max(1_000_000).optional(),
+    })
+    .optional(),
+});
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/lsp/request",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = LspRequestBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      const result = await lspRequest(
+        ws.data.workspaceId,
+        parsed.data.root,
+        parsed.data.method,
+        parsed.data.params,
+        parsed.data.doc,
+      );
+      return reply.send({ result });
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/lsp/stop",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    await killSession(ws.data.workspaceId, "stopped by panel");
+    return reply.send({ ok: true });
+  },
+);
+
+// GET /dev-server/:workspaceId/lsp/diagnostics?root=…&since=N
+//
+// SSE of LspEvent JSON. The FIRST event a subscriber gets (as part
+// of the replay at since=0) is a snapshot of every file's current
+// diagnostics; subsequent events are per-file publishes. Reconnecting
+// clients pass their last cursor and replay what they missed — the
+// same contract as the watcher stream above. `root` is required so
+// the session can be (re)started on first subscribe.
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string; since?: string };
+}>("/dev-server/:workspaceId/lsp/diagnostics", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const root = (req.query.root ?? "").trim();
+  if (!root) return reply.code(400).send({ error: "missing root" });
+  let since = Math.max(0, Number(req.query.since ?? 0) | 0);
+
+  // Start (or reattach to) the session — same idempotency as every
+  // other lsp route. If the binary is missing this 500s once and the
+  // frontend backs off.
+  try {
+    await ensureLspSession(ws.data.workspaceId, root);
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+
+  reply.raw.setHeader("content-type", "text/event-stream");
+  reply.raw.setHeader("cache-control", "no-cache");
+  reply.raw.setHeader("connection", "keep-alive");
+  reply.raw.setHeader("x-accel-buffering", "no");
+  reply.raw.flushHeaders?.();
+
+  // First write: snapshot (only for fresh subscribers; reconnecting
+  // clients with since>0 already know the state up to their cursor).
+  if (since === 0) {
+    const snap = lspSnapshotEvent(ws.data.workspaceId);
+    if (snap) reply.raw.write(`data: ${JSON.stringify(snap)}\n\n`);
+  }
+
+  let closed = false;
+  const onClose = () => {
+    if (closed) return;
+    closed = true;
+    try { reply.raw.end(); } catch { /* */ }
+  };
+  req.raw.on("close", onClose);
+  req.raw.on("error", onClose);
+
+  // Same pump pacing as the watcher stream: waitFor blocks ≤1.5s and
+  // doubles as the heartbeat window.
+  const pump = async () => {
+    try {
+      const evs = await waitForLspEvents(ws.data.workspaceId, since, 1_500);
+      if (closed) return;
+      if (evs.length > 0) {
+        for (const ev of evs) {
+          reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+        }
+        since += evs.length;
+      } else {
+        reply.raw.write(`: ping\n\n`);
+      }
+      setImmediate(pump);
+    } catch (err) {
+      try { reply.raw.end(); } catch { /* */ }
+    }
+  };
+  setImmediate(pump);
+});
+
+// ─────────────────────────────────────────────────────────────────────
+//  Git bridge (Source Control panel)
+//
+//  Read + mutate the user's picked folder as a git working tree. Every
+//  handler shells out through ./git.ts (argv spawn, no shell; paths
+//  validated by safeResolveUserFolder; interactive credential prompts
+//  disabled so nothing hangs). Errors carry git's own stderr — the
+//  panel toasts it verbatim.
+//
+//    GET  /dev-server/:wsId/git/status?root=   porcelain parse
+//    GET  /dev-server/:wsId/git/diff?root=&path=&staged=
+//    GET  /dev-server/:wsId/git/branches?root=
+//    POST /dev-server/:wsId/git/stage          { root, paths[] }
+//    POST /dev-server/:wsId/git/unstage        { root, paths[] }
+//    POST /dev-server/:wsId/git/discard        { root, paths[] }  (UI confirms)
+//    POST /dev-server/:wsId/git/commit         { root, message }
+//    POST /dev-server/:wsId/git/push           { root }
+//    POST /dev-server/:wsId/git/pull           { root }
+//    POST /dev-server/:wsId/git/checkout       { root, branch }
+// ─────────────────────────────────────────────────────────────────────
+
+const GitRootQuery = z.object({ root: z.string().min(1).max(4096) });
+const GitPathsBody = RootPathField.extend({
+  paths: z.array(z.string().min(1).max(2048)).min(1).max(500),
+});
+const GitCommitBody = RootPathField.extend({
+  message: z.string().min(1).max(4_000),
+});
+const GitCheckoutBody = RootPathField.extend({
+  branch: z.string().min(1).max(260),
+});
+
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string };
+}>("/dev-server/:workspaceId/git/status", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const q = GitRootQuery.safeParse(req.query);
+  if (!q.success) return reply.code(400).send({ error: q.error.flatten() });
+  try {
+    return reply.send(await gitStatus(q.data.root));
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string; path?: string; staged?: string };
+}>("/dev-server/:workspaceId/git/diff", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const q = GitRootQuery.extend({
+    path: z.string().min(1).max(2048),
+    staged: z.enum(["0", "1"]).default("0"),
+  }).safeParse(req.query);
+  if (!q.success) return reply.code(400).send({ error: q.error.flatten() });
+  try {
+    const diff = await gitDiff(q.data.root, q.data.path, q.data.staged === "1");
+    return reply.send({ diff });
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+app.get<{
+  Params: { workspaceId: string };
+  Querystring: { root?: string };
+}>("/dev-server/:workspaceId/git/branches", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const q = GitRootQuery.safeParse(req.query);
+  if (!q.success) return reply.code(400).send({ error: q.error.flatten() });
+  try {
+    return reply.send({ branches: await gitBranches(q.data.root) });
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/stage",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = GitPathsBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      await gitStage(parsed.data.root, parsed.data.paths);
+      return reply.send({ ok: true });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/unstage",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = GitPathsBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      await gitUnstage(parsed.data.root, parsed.data.paths);
+      return reply.send({ ok: true });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/discard",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = GitPathsBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      await gitDiscard(parsed.data.root, parsed.data.paths);
+      return reply.send({ ok: true });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/commit",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = GitCommitBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      const summary = await gitCommit(parsed.data.root, parsed.data.message);
+      return reply.send({ ok: true, summary });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/push",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = RootPathField.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      const output = await gitPush(parsed.data.root);
+      return reply.send({ ok: true, output });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/pull",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = RootPathField.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      const output = await gitPull(parsed.data.root);
+      return reply.send({ ok: true, output });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
+app.post<{ Params: { workspaceId: string } }>(
+  "/dev-server/:workspaceId/git/checkout",
+  async (req, reply) => {
+    const ws = WorkspaceIdParam.safeParse(req.params);
+    if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+    const parsed = GitCheckoutBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    try {
+      await gitCheckout(parsed.data.root, parsed.data.branch);
+      return reply.send({ ok: true });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  },
+);
+
 // Reverse-proxy to the running dev server. Reads request body if any,
 // forwards headers (stripping `host` so the upstream sees the dev
 // server's expected host), and copies response headers + body back to
@@ -1509,6 +1857,7 @@ const shutdown = (signal: string) => {
   shutdownAllDevServers();
   void shutdownAllWatchers();
   shutdownAllPersistentShells();
+  void shutdownAllLspSessions();
   process.exit(0);
 };
 process.on("SIGINT", () => shutdown("SIGINT"));

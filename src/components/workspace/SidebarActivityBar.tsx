@@ -10,6 +10,8 @@
 import {
   Box,
   FolderTree,
+  GitBranch,
+  ListFilter,
   Puzzle,
   Search,
   type LucideIcon,
@@ -26,15 +28,25 @@ export interface ActivityBarItem {
   id: string;
   label: string;
   icon: LucideIcon;
+  /** Optional count bubble (VS Code's Source Control badge) — shown
+   *  bottom-right of the icon when > 0. */
+  badge?: number;
 }
 
-/** Built-in items we always show. Order = top-to-bottom in the rail.
+/** Built-in items we always show. Order = top-to-bottom in the rail
+ *  (mirrors VS Code: Explorer, Search, Source Control, then our own
+ *  Problems + Extensions).
  *  Extensions contribute additional items between `extensions` and the
  *  end, but the activity bar is agnostic to that — see
  *  `useActivityBarItems` in WorkspacePage for the merge. */
 export const BUILTIN_ITEMS: ActivityBarItem[] = [
   { id: "explorer", label: "Explorer", icon: FolderTree },
   { id: "search", label: "Search", icon: Search },
+  { id: "git", label: "Source Control", icon: GitBranch },
+  // Phase 1 LSP: diagnostics list. Lives in the sidebar (not the
+  // bottom dock like VS Code) because the dock is terminal space —
+  // see ProblemsPanel.tsx.
+  { id: "problems", label: "Problems", icon: ListFilter },
   { id: "extensions", label: "Extensions", icon: Puzzle },
 ];
 
@@ -93,7 +105,7 @@ export function SidebarActivityBar({
                   data-testid={`activity-bar-${item.id}`}
                   onClick={() => onSelect(item.id)}
                   className={cn(
-                    "flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors",
+                    "relative flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors",
                     "hover:bg-muted hover:text-foreground",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     isActive &&
@@ -101,6 +113,14 @@ export function SidebarActivityBar({
                   )}
                 >
                   <Icon className="h-4 w-4" aria-hidden />
+                  {typeof item.badge === "number" && item.badge > 0 && (
+                    <span
+                      className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-none text-primary-foreground"
+                      data-testid={`activity-bar-badge-${item.id}`}
+                    >
+                      {item.badge > 99 ? "99+" : item.badge}
+                    </span>
+                  )}
                 </button>
               </TooltipTrigger>
               <TooltipContent side="right" sideOffset={6}>
