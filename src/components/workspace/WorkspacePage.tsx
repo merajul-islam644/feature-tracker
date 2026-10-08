@@ -58,6 +58,7 @@ import { EditorArea } from "./EditorArea";
 import { ProblemsPanel } from "./ProblemsPanel";
 import { OutlinePanel } from "./OutlinePanel";
 import { GitPanel } from "./GitPanel";
+import { NpmScriptsPanel } from "./NpmScriptsPanel";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { WorkspaceBreadcrumb } from "./WorkspaceBreadcrumb";
 import { TerminalPanel } from "./TerminalPanel";
@@ -920,6 +921,28 @@ export function WorkspacePage() {
   // Show" command — the collapse state itself lives inside
   // TerminalPanel, so the parent can only nudge it).
   const [terminalExpandSignal, setTerminalExpandSignal] = useState(0);
+
+  // One-shot "run this command in the active terminal" signal (npm
+  // Scripts panel). Same bump pattern as the expand signal above —
+  // TerminalPanel keys off `seq` so a re-render never re-sends.
+  const [terminalRunSignal, setTerminalRunSignal] = useState<{
+    seq: number;
+    command: string;
+  } | null>(null);
+  const terminalRunSeqRef = useRef(0);
+  const runInActiveTerminal = useCallback((command: string) => {
+    terminalRunSeqRef.current += 1;
+    setTerminalRunSignal({
+      seq: terminalRunSeqRef.current,
+      command,
+    });
+  }, []);
+  const runNpmScript = useCallback(
+    (name: string) => {
+      runInActiveTerminal(`npm run ${name}`);
+    },
+    [runInActiveTerminal],
+  );
 
   // Bump-to-open signal for the editor's rename input (the command
   // palette's "Rename Symbol" — the input UI lives in EditorArea,
@@ -1827,6 +1850,12 @@ export function WorkspacePage() {
         run: () => setSidebarTab("outline"),
       },
       {
+        id: "sidebar.scripts",
+        group: "View",
+        label: "Show npm Scripts",
+        run: () => setSidebarTab("scripts"),
+      },
+      {
         id: "editor.definition",
         group: "Editor",
         label: "Go to Definition",
@@ -2356,6 +2385,7 @@ export function WorkspacePage() {
             workspaceRootPath={workspaceRoot?.path ?? null}
             onGitStatusCount={setGitChangedCount}
             gitRefreshSignal={gitRefreshTick}
+            onRunScript={runNpmScript}
           />
           <section
             ref={ideContainerRef}
@@ -2430,6 +2460,7 @@ export function WorkspacePage() {
               collapsed={terminalCollapsed}
               onCollapsedChange={handleTerminalCollapsedChange}
               expandSignal={terminalExpandSignal}
+              runCommandSignal={terminalRunSignal}
               containerRef={ideContainerRef}
             />
             {/* Palette works in fullscreen too — the shortcuts are
@@ -2680,6 +2711,7 @@ export function WorkspacePage() {
               workspaceRootPath={workspaceRoot?.path ?? null}
               onGitStatusCount={setGitChangedCount}
               gitRefreshSignal={gitRefreshTick}
+              onRunScript={runNpmScript}
             />
 
             <section className="flex min-w-0 flex-1 flex-col">
@@ -2756,6 +2788,7 @@ export function WorkspacePage() {
             collapsed={terminalCollapsed}
             onCollapsedChange={handleTerminalCollapsedChange}
             expandSignal={terminalExpandSignal}
+            runCommandSignal={terminalRunSignal}
             containerRef={ideContainerRef}
           />
         )}
@@ -2838,6 +2871,7 @@ export function WorkspacePage() {
 //   • `"problems"`    → <ProblemsPanel />
 //   • `"outline"`     → <OutlinePanel />
 //   • `"git"`         → <GitPanel />
+//   • `"scripts"`     → <NpmScriptsPanel />
 //   • `"extensions"`  → <ExtensionsManagerPanel />
 //   • `"ext:<extId>:<panelId>"` → <ExtensionIframeView />
 //
@@ -2902,6 +2936,9 @@ interface WorkspaceSidebarProps {
   /** Bumped (throttled) whenever the file watcher or an autosave
    *  moves the working tree. */
   gitRefreshSignal: number;
+  /** npm Scripts panel — run a root package.json script in the
+   *  active terminal. */
+  onRunScript: (name: string) => void;
 }
 
 function WorkspaceSidebar(props: WorkspaceSidebarProps) {
@@ -2952,6 +2989,7 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     workspaceRootPath,
     onGitStatusCount,
     gitRefreshSignal,
+    onRunScript,
   } = props;
 
   // Resolve the active panel content. If the tab references an
@@ -3114,6 +3152,13 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             refreshSignal={gitRefreshSignal}
           />
         )}
+        {effectiveTab === "scripts" && (
+          <NpmScriptsPanel
+            workspaceId={workspaceId}
+            root={workspaceRootPath}
+            onRunScript={onRunScript}
+          />
+        )}
         {effectiveTab === "extensions" && <ExtensionsManagerPanel />}
         {effectiveTab.startsWith("ext:") && (
           <ExtensionPanelContent
@@ -3154,6 +3199,9 @@ interface TerminalDockProps {
   onCollapsedChange: (collapsed: boolean) => void;
   /** Bump-to-expand signal from the parent (command palette). */
   expandSignal?: number;
+  /** One-shot terminal command write (npm Scripts panel) — forwarded
+   *  to the active TerminalPanel only. */
+  runCommandSignal?: { seq: number; command: string } | null;
   /** Bounded IDE container — source of the drag clamp. Structural
    *  ref type so it accepts either React 18 `MutableRefObject` or
    *  React 19 `RefObject` from the parent's `useRef` call. */
@@ -3175,6 +3223,7 @@ function TerminalDock({
   collapsed,
   onCollapsedChange,
   expandSignal,
+  runCommandSignal,
   containerRef,
 }: TerminalDockProps) {
   const [isResizing, setIsResizing] = useState(false);
@@ -3323,6 +3372,7 @@ function TerminalDock({
               onToggleMaximize={isActive ? onToggleMaximize : undefined}
               onCollapsedChange={onCollapsedChange}
               expandSignal={isActive ? expandSignal : undefined}
+              runCommandSignal={isActive ? runCommandSignal : undefined}
             />
           </div>
         );

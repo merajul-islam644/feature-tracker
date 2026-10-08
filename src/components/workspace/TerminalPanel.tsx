@@ -95,6 +95,12 @@ interface TerminalPanelProps {
    *  terminal"). The value itself is meaningless — each increment
    *  fires the expand effect below. */
   expandSignal?: number;
+  /** One-shot "run this command in the PTY" request (npm Scripts
+   *  panel → WorkspacePage). Each new `seq` expands the panel (if
+   *  folded) and writes `command + \r` into the shell — the PTY
+   *  echoes it like typed input. Only the active tab receives the
+   *  signal (same rule as `expandSignal`). */
+  runCommandSignal?: { seq: number; command: string } | null;
 }
 
 const DEFAULT_FG = "#e4e4e7";
@@ -194,6 +200,7 @@ export function TerminalPanel({
   resizing = false,
   onCollapsedChange,
   expandSignal,
+  runCommandSignal,
 }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -314,6 +321,56 @@ export function TerminalPanel({
   useEffect(() => {
     if (expandSignal) setCollapsed(false);
   }, [expandSignal]);
+
+  // npm Scripts "run" — one-shot command write into the PTY. The seq
+  // guard makes the effect idempotent against dep churn (a collapse
+  // toggle must not re-send the command). Expanding first means the
+  // user actually sees the output land.
+  const lastRunSeqRef = useRef(0);
+  useEffect(() => {
+    if (!runCommandSignal || runCommandSignal.seq === lastRunSeqRef.current) {
+      return;
+    }
+    lastRunSeqRef.current = runCommandSignal.seq;
+    const wasCollapsed = collapsed;
+    if (collapsed) {
+      setCollapsed(false);
+      onCollapsedChange?.(false);
+    }
+    const handle = handleRef.current;
+    const term = termRef.current;
+    if (!handle || !term) {
+      toastFn.error("Terminal isn't connected yet — try again in a moment.");
+      return;
+    }
+    const { command } = runCommandSignal;
+    const payload =
+      command.endsWith("\r") || command.endsWith("\n")
+        ? command
+        : `${command}\r`;
+    const send = () => {
+      // Re-read the refs: an unmount during the settle delay must not
+      // send into a dead handle.
+      const h = handleRef.current;
+      const t = termRef.current;
+      if (!h || !t) return;
+      h.send(payload);
+      t.focus();
+    };
+    if (wasCollapsed) {
+      // The PTY resize triggered by un-collapsing can swallow bytes
+      // sent mid-relayout (ConPTY drops pending input; observed as the
+      // first character of the command vanishing). Send after the
+      // relayout settles instead of in the same tick. The timer is
+      // intentionally NOT cleaned up on re-run: un-collapsing changes
+      // `collapsed`, which re-runs this effect, and a cleanup here
+      // would cancel the send before it ever fires — the seq guard
+      // above already keeps a second timer from being scheduled.
+      setTimeout(send, 150);
+      return;
+    }
+    send();
+  }, [runCommandSignal, collapsed, onCollapsedChange]);
 
   // Chevron click — flip collapse and mirror it up in the same tick
   // so the dock hides the resize sash while folded and the parent
