@@ -433,6 +433,16 @@ async function initializeSession(session: LspSession): Promise<void> {
           versionSupport: true,
           tagSupport: { valueSet: [1, 2] },
         },
+        // Phase 2 feature negotiation. Whatever we don't declare, tls
+        // won't offer — hover/definition/references come back as
+        // plain Locations (no linkSupport), documentSymbol as the
+        // hierarchical shape, rename with the prepare step enabled so
+        // the panel can probe before opening its input.
+        hover: { contentFormat: ["markdown", "plaintext"] },
+        definition: {},
+        references: {},
+        documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+        rename: { prepareSupport: true },
       },
       workspace: {
         configuration: true,
@@ -441,7 +451,14 @@ async function initializeSession(session: LspSession): Promise<void> {
     },
     initializationOptions: {
       hostInfo: "lattice-mcp-server",
-      preferences: {},
+      preferences: {
+        // tls defaults this to true, which makes a rename at an
+        // import/use site produce a local `foo as newName` alias and
+        // leave the declaration untouched — surprising for a VS
+        // Code-style F2. With it off, rename always targets the
+        // declaration and patches import specifiers plainly.
+        providePrefixAndSuffixTextForRename: false,
+      },
     },
   });
   notify(session, "initialized", {});
@@ -523,8 +540,131 @@ async function syncDoc(
 //  Public request entry — called from the POST route in index.ts
 // ─────────────────────────────────────────────────────────────────────
 
-const RESERVED_METHODS = new Set(["initialize", "initialized", "shutdown", "exit"]);
+// ─────────────────────────────────────────────────────────────────────
+//  Result normalization
+//
+//  LSP responses speak absolute file:// URIs; every other panel API
+//  (diagnostics, watcher, search) speaks root-relative forward-slash
+//  paths. Rewrite the URI-bearing feature responses here so the
+//  client never parses URLs (Windows file:///D:/… quirks included).
+// ─────────────────────────────────────────────────────────────────────
 
+interface LspRange {
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+}
+
+const ZERO_RANGE: LspRange = {
+  start: { line: 0, character: 0 },
+  end: { line: 0, character: 0 },
+};
+
+/** Location | LocationLink → { path, range }. For links the
+ *  selection range wins (it's what go-to-definition highlights). */
+function normalizeLocation(
+  root: string,
+  loc: unknown,
+): { path: string; range: LspRange } | null {
+  if (!loc || typeof loc !== "object") return null;
+  const l = loc as {
+    uri?: unknown;
+    range?: LspRange;
+    targetUri?: unknown;
+    targetRange?: LspRange;
+    targetSelectionRange?: LspRange;
+  };
+  if (typeof l.targetUri === "string") {
+    return {
+      path: uriToRelPath(root, l.targetUri),
+      range: l.targetSelectionRange ?? l.targetRange ?? ZERO_RANGE,
+    };
+  }
+  if (typeof l.uri === "string" && l.range) {
+    return { path: uriToRelPath(root, l.uri), range: l.range };
+  }
+  return null;
+}
+
+function normalizeLocations(root: string, result: unknown): unknown {
+  const list = Array.isArray(result) ? result : [result];
+  return list
+    .map((l) => normalizeLocation(root, l))
+    .filter((l): l is { path: string; range: LspRange } => l !== null);
+}
+
+interface RawTextEdit {
+  range: LspRange;
+  newText: string;
+}
+
+interface RawWorkspaceEdit {
+  changes?: Record<string, RawTextEdit[]>;
+  documentChanges?: Array<{
+    textDocument?: { uri?: string };
+    edits?: RawTextEdit[];
+  }>;
+}
+
+/** WorkspaceEdit → { changes: Record<relPath, TextEdit[]> }, merging
+ *  the keyed `changes` map and the ordered `documentChanges` form
+ *  (tls uses the former, but the spec allows both). */
+function normalizeWorkspaceEdit(
+  root: string,
+  edit: RawWorkspaceEdit,
+): { changes: Record<string, RawTextEdit[]> } {
+  const changes: Record<string, RawTextEdit[]> = {};
+  for (const [uri, edits] of Object.entries(edit.changes ?? {})) {
+    changes[uriToRelPath(root, uri)] = edits;
+  }
+  for (const dc of edit.documentChanges ?? []) {
+    if (!dc.textDocument?.uri) continue;
+    const rel = uriToRelPath(root, dc.textDocument.uri);
+    changes[rel] = [...(changes[rel] ?? []), ...(dc.edits ?? [])];
+  }
+  return { changes };
+}
+
+function normalizeLspResult(
+  root: string,
+  method: string,
+  result: unknown,
+): unknown {
+  if (result === null || result === undefined) return result;
+  switch (method) {
+    case "textDocument/definition":
+    case "textDocument/declaration":
+    case "textDocument/typeDefinition":
+    case "textDocument/implementation":
+      return normalizeLocations(root, result);
+    case "textDocument/references":
+      return Array.isArray(result) ? normalizeLocations(root, result) : [];
+    case "textDocument/rename":
+      return normalizeWorkspaceEdit(root, result as RawWorkspaceEdit);
+    case "textDocument/documentSymbol": {
+      // Hierarchical DocumentSymbol[] carries no URIs and passes
+      // through untouched; flat SymbolInformation[] entries do carry
+      // location.uri — rewrite just that field.
+      if (!Array.isArray(result)) return result;
+      return result.map((sym) => {
+        const s = sym as { location?: { uri?: string; range?: LspRange } };
+        if (s.location?.uri) {
+          return {
+            ...s,
+            location: {
+              path: uriToRelPath(root, s.location.uri),
+              range: s.location.range ?? ZERO_RANGE,
+            },
+          };
+        }
+        return sym;
+      });
+    }
+    default:
+      return result;
+  }
+}
+
+const RESERVED_METHODS = new Set(["initialize", "initialized", "shutdown", "exit"]);
 export async function lspRequest(
   workspaceId: string,
   root: string,
@@ -554,7 +694,114 @@ export async function lspRequest(
       };
     }
   }
-  return request(session, method, params);
+
+  // Rename redirection: tsserver renames only the LOCAL import binding
+  // when the request position sits on an import specifier or one of
+  // its uses — the declaration (and every other importer) is left
+  // untouched, which silently under-renames. Resolve the definition
+  // first; when it lives in another file, didOpen that file (tls only
+  // renames documents it has open) and re-target both the uri and the
+  // position at the declaration. A same-file definition is a plain
+  // local rename, which tsserver already handles completely.
+  if (method === "textDocument/rename") {
+    const p = params as { textDocument?: { uri?: string }; position?: { line: number; character: number } };
+    if (p.textDocument?.uri && p.position) {
+      try {
+        const origUri = p.textDocument.uri;
+        const origRel = uriToRelPath(root, origUri);
+        const start = { line: p.position.line, character: p.position.character };
+        const target = { uri: origUri, line: start.line, character: start.character };
+        // vscode-languageserver re-encodes URIs its own way (lowercase
+        // drive letter, %3A for the colon), so raw uri strings never
+        // compare equal to what we sent. Compare root-relative paths.
+        const relOf = (u: string): string | null => uriToRelPath(root, u);
+        const targetRel = (): string | null => relOf(target.uri) ?? origRel;
+
+        // One definition chain: a use of an imported symbol resolves
+        // first to its import specifier, which resolves again to the
+        // declaration. Stops when a position defines itself.
+        const chainOnce = async (): Promise<void> => {
+          for (let hop = 0; hop < 4; hop++) {
+            const defs = (await request(session, "textDocument/definition", {
+              textDocument: { uri: target.uri },
+              position: { line: target.line, character: target.character },
+            })) as
+              | { uri?: string; range?: LspRange; targetUri?: string; targetRange?: LspRange; targetSelectionRange?: LspRange }
+              | Array<Record<string, unknown>>
+              | null;
+            const first = Array.isArray(defs) ? defs[0] : defs;
+            const uri = first
+              ? ((first as { targetUri?: string }).targetUri ?? (first as { uri?: string }).uri)
+              : undefined;
+            const range = first
+              ? ((first as { targetSelectionRange?: LspRange }).targetSelectionRange ??
+                (first as { targetRange?: LspRange }).targetRange ??
+                (first as { range?: LspRange }).range)
+              : undefined;
+            if (!uri || !range) return;
+            const rel = relOf(uri);
+            if (!rel) return;
+            if (rel === targetRel() && range.start.line === target.line && range.start.character === target.character) {
+              return; // settled — this position is the declaration
+            }
+            target.uri = uri;
+            target.line = range.start.line;
+            target.character = range.start.character;
+            if (rel !== origRel) return; // crossed files — done
+          }
+        };
+
+        await chainOnce();
+
+        // Cold project: until tsserver finishes loading, a definition
+        // on an import specifier resolves to itself. If the chain
+        // landed on an `import …` line, the symbol is provably an
+        // import — give the project a few rounds to warm up and
+        // re-resolve. A genuine same-file declaration never sits on an
+        // import line, so local renames skip the wait entirely.
+        const landedOnImportLine = async (): Promise<boolean> => {
+          const rel = targetRel();
+          if (!rel || rel !== origRel) return false;
+          try {
+            const abs = safeResolveUserFolder(root, rel);
+            if (!abs) return false;
+            const fs = await import("node:fs/promises");
+            const text = await fs.readFile(abs, "utf8");
+            const lineText = text.split("\n")[target.line] ?? "";
+            return /^\s*import\b/.test(lineText);
+          } catch {
+            return false;
+          }
+        };
+        for (let round = 0; round < 5 && (await landedOnImportLine()); round++) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await chainOnce();
+        }
+
+        const finalRel = targetRel();
+        if (finalRel && finalRel !== origRel) {
+          // tls's rename handler only processes documents it has open
+          // (toOpenDocument). didOpen the declaration file from disk
+          // via syncDoc so its openDocs bookkeeping stays consistent.
+          const defUri = relToUri(root, finalRel);
+          if (defUri) {
+            await syncDoc(session, { path: finalRel });
+            params = {
+              ...(params as Record<string, unknown>),
+              textDocument: { uri: defUri },
+              position: { line: target.line, character: target.character },
+            };
+          }
+        }
+      } catch {
+        // Definition failed — proceed with the original position; the
+        // rename itself will surface whatever error applies.
+      }
+    }
+  }
+
+  const result = await request(session, method, params);
+  return normalizeLspResult(root, method, result);
 }
 
 // ─────────────────────────────────────────────────────────────────────

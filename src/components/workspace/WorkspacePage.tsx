@@ -56,6 +56,7 @@ import { ExplorerSidebar } from "./ExplorerSidebar";
 import { EditorTabs } from "./EditorTabs";
 import { EditorArea } from "./EditorArea";
 import { ProblemsPanel } from "./ProblemsPanel";
+import { OutlinePanel } from "./OutlinePanel";
 import { GitPanel } from "./GitPanel";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { WorkspaceBreadcrumb } from "./WorkspaceBreadcrumb";
@@ -95,6 +96,10 @@ import { devServerApi } from "@/services/devServerApi";
 import type {
   TerminalInstance,
   FileNode,
+  LspHover,
+  LspLocation,
+  LspTextEdit,
+  LspWorkspaceEdit,
 } from "@/types/dev-server";
 import {
   loadWorkspaceTabs,
@@ -136,6 +141,36 @@ function detectFileEol(content: string): FileEol {
  *  existing CRLFs pass through unchanged. */
 function applyFileEol(content: string, eol: FileEol): string {
   return eol === "\r\n" ? content.replace(/\r?\n/g, "\r\n") : content;
+}
+
+/** Apply LSP TextEdits to a plain string (line/char → offset via a
+ *  running line-index pass, then splice bottom-up so earlier offsets
+ *  survive later insertions). Positions clamp to the document instead
+ *  of throwing — a stale edit range degrades, never crashes. */
+function applyTextEdits(
+  content: string,
+  edits: LspTextEdit[],
+): string {
+  const lines = content.split("\n");
+  const offset = (line0: number, char: number): number => {
+    const li = Math.min(Math.max(line0, 0), lines.length - 1);
+    let pos = 0;
+    for (let i = 0; i < li; i++) pos += lines[i].length + 1;
+    return pos + Math.min(Math.max(char, 0), lines[li].length);
+  };
+  const marks = edits
+    .map((e) => ({
+      from: offset(e.range.start.line, e.range.start.character),
+      to: offset(e.range.end.line, e.range.end.character),
+      insert: e.newText,
+    }))
+    .sort((a, b) => b.from - a.from);
+  let out = content;
+  for (const m of marks) {
+    if (m.to < m.from) continue;
+    out = out.slice(0, m.from) + m.insert + out.slice(m.to);
+  }
+  return out;
 }
 
 // ─── Terminal-instance persistence (mirrors `notepad/storage.ts`
@@ -886,6 +921,11 @@ export function WorkspacePage() {
   // TerminalPanel, so the parent can only nudge it).
   const [terminalExpandSignal, setTerminalExpandSignal] = useState(0);
 
+  // Bump-to-open signal for the editor's rename input (the command
+  // palette's "Rename Symbol" — the input UI lives in EditorArea,
+  // next to the F2 keymap that opens it).
+  const [renameSignal, setRenameSignal] = useState(0);
+
   // Flat file list for quick-open. The tree is already loaded for
   // the Explorer; flattening is O(n) over the same ≤5,000 entries.
   const flatFilePaths = useMemo(() => {
@@ -1022,6 +1062,239 @@ export function WorkspacePage() {
       }, 50);
     },
     [openFile],
+  );
+
+  // ─── LSP Phase 2 — hover / definition / references / rename ────
+  // All four ride the same generic lspRequest endpoint the doc sync
+  // uses; the backend rewrites file:// URIs to root-relative paths so
+  // these callbacks work in plain paths end to end. `doc` carries the
+  // live editor buffer for the active file (unsaved keystrokes count);
+  // closed files are read from disk server-side.
+
+  // Shared preflight — every feature needs the workspace, root, the
+  // live editor view and an active path. Returns null (and skips)
+  // otherwise; hover stays silent, actions toast.
+  const lspFeatureCtx = useCallback(() => {
+    if (!workspace?.id || !folderPath) return null;
+    const view = editorViewRef.current;
+    const path = activePathRef.current;
+    if (!view || !path) return null;
+    return { workspaceId: workspace.id, root: folderPath, path, view };
+  }, [workspace?.id, folderPath]);
+
+  const handleHover = useCallback(
+    async (pos: number): Promise<LspHover | null> => {
+      const ctx = lspFeatureCtx();
+      if (!ctx) return null;
+      const line = ctx.view.state.doc.lineAt(pos);
+      try {
+        return (await devServerApi.lspRequest({
+          workspaceId: ctx.workspaceId,
+          root: ctx.root,
+          method: "textDocument/hover",
+          params: {
+            path: ctx.path,
+            position: {
+              line: line.number - 1,
+              character: pos - line.from,
+            },
+          },
+          doc: { path: ctx.path, content: ctx.view.state.doc.toString() },
+        })) as LspHover | null;
+      } catch {
+        // Hover failures are invisible by design — a flaky language
+        // server shouldn't toast on every mouse-park.
+        return null;
+      }
+    },
+    [lspFeatureCtx],
+  );
+
+  const handleDefinition = useCallback(
+    async (pos: number) => {
+      const ctx = lspFeatureCtx();
+      if (!ctx) return;
+      const line = ctx.view.state.doc.lineAt(pos);
+      try {
+        const result = (await devServerApi.lspRequest({
+          workspaceId: ctx.workspaceId,
+          root: ctx.root,
+          method: "textDocument/definition",
+          params: {
+            path: ctx.path,
+            position: {
+              line: line.number - 1,
+              character: pos - line.from,
+            },
+          },
+          doc: { path: ctx.path, content: ctx.view.state.doc.toString() },
+        })) as LspLocation[] | null;
+        const first = Array.isArray(result) ? result[0] : null;
+        if (!first) {
+          toast.info("No definition found");
+          return;
+        }
+        void openSearchResult(
+          first.path,
+          first.range.start.line + 1,
+          first.range.start.character + 1,
+        );
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [lspFeatureCtx, openSearchResult],
+  );
+
+  const handleFindReferences = useCallback(
+    async (pos: number): Promise<LspLocation[] | null> => {
+      const ctx = lspFeatureCtx();
+      if (!ctx) return null;
+      const line = ctx.view.state.doc.lineAt(pos);
+      try {
+        const result = (await devServerApi.lspRequest({
+          workspaceId: ctx.workspaceId,
+          root: ctx.root,
+          method: "textDocument/references",
+          params: {
+            path: ctx.path,
+            position: {
+              line: line.number - 1,
+              character: pos - line.from,
+            },
+            context: { includeDeclaration: true },
+          },
+          doc: { path: ctx.path, content: ctx.view.state.doc.toString() },
+        })) as LspLocation[] | null;
+        return Array.isArray(result) ? result : [];
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+        return null;
+      }
+    },
+    [lspFeatureCtx],
+  );
+
+  const handleRename = useCallback(
+    async (
+      pos: number,
+      newName: string,
+    ): Promise<{ files: number; edits: number } | null> => {
+      const ctx = lspFeatureCtx();
+      if (!ctx) return null;
+      const line = ctx.view.state.doc.lineAt(pos);
+      try {
+        const result = (await devServerApi.lspRequest({
+          workspaceId: ctx.workspaceId,
+          root: ctx.root,
+          method: "textDocument/rename",
+          params: {
+            path: ctx.path,
+            position: {
+              line: line.number - 1,
+              character: pos - line.from,
+            },
+            newName,
+          },
+          doc: { path: ctx.path, content: ctx.view.state.doc.toString() },
+        })) as LspWorkspaceEdit | null;
+        const changes = result?.changes ?? {};
+        const paths = Object.keys(changes);
+        if (paths.length === 0) {
+          toast.info("Nothing to rename here");
+          return null;
+        }
+        let editCount = 0;
+        for (const p of paths) {
+          // Bottom-up per file so earlier offsets survive later
+          // insertions.
+          const edits = [...changes[p]].sort(
+            (a, b) =>
+              b.range.start.line - a.range.start.line ||
+              b.range.start.character - a.range.start.character,
+          );
+          if (edits.length === 0) continue;
+          if (p === ctx.path) {
+            // Active file — one transaction, so undo reverts the whole
+            // rename in this document and the normal onChange pipeline
+            // (autosave + LSP mirror) takes over from there.
+            const doc = ctx.view.state.doc;
+            const cmChanges: { from: number; to: number; insert: string }[] =
+              [];
+            for (const e of edits) {
+              editCount++;
+              const startLine = doc.line(
+                Math.min(Math.max(e.range.start.line + 1, 1), doc.lines),
+              );
+              const from =
+                startLine.from +
+                Math.min(Math.max(e.range.start.character, 0), startLine.length);
+              const endLine = doc.line(
+                Math.min(Math.max(e.range.end.line + 1, 1), doc.lines),
+              );
+              const to =
+                endLine.from +
+                Math.min(
+                  Math.max(e.range.end.character, e.range.start.character),
+                  endLine.length,
+                );
+              cmChanges.push({ from, to, insert: e.newText });
+            }
+            ctx.view.dispatch({ changes: cmChanges });
+          } else if (tabContentRef.current.has(p)) {
+            // Open in a background tab — patch the tab buffer and let
+            // the autosave loop persist it.
+            const content = tabContentRef.current.get(p) ?? "";
+            const next = applyTextEdits(content, edits);
+            editCount += edits.length;
+            setTabContent((prev) => {
+              const n = new Map(prev);
+              n.set(p, next);
+              return n;
+            });
+            setPendingPaths((prev) => {
+              const n = new Set(prev);
+              n.add(p);
+              return n;
+            });
+            const existing = debounceTimersRef.current.get(p);
+            if (existing !== undefined) clearTimeout(existing);
+            debounceTimersRef.current.set(
+              p,
+              setTimeout(() => void flushSave(p), AUTOSAVE_DEBOUNCE_MS),
+            );
+            void syncLspDoc(p, next);
+          } else {
+            // Closed file — read from disk, patch, write back. EOL is
+            // preserved via the same capture table the autosave uses.
+            const content = await readUserFile(p);
+            const next = applyTextEdits(content ?? "", edits);
+            editCount += edits.length;
+            await writeUserFile(
+              p,
+              applyFileEol(next, fileEolRef.current.get(p) ?? "\n"),
+            );
+            void syncLspDoc(p, next);
+          }
+        }
+        toast.success(
+          `Renamed to "${newName}" in ${paths.length} file${paths.length === 1 ? "" : "s"}`,
+        );
+        return { files: paths.length, edits: editCount };
+      } catch (err) {
+        // Not-renameable positions arrive as LSP errors ("You cannot
+        // rename this element") — surface them verbatim.
+        toast.error(err instanceof Error ? err.message : String(err));
+        return null;
+      }
+    },
+    [
+      lspFeatureCtx,
+      flushSave,
+      syncLspDoc,
+      readUserFile,
+      writeUserFile,
+    ],
   );
 
   // ─── Editor change handler — schedules an autosave ────────────
@@ -1548,6 +1821,39 @@ export function WorkspacePage() {
         run: () => setSidebarTab("extensions"),
       },
       {
+        id: "sidebar.outline",
+        group: "View",
+        label: "Show Outline",
+        run: () => setSidebarTab("outline"),
+      },
+      {
+        id: "editor.definition",
+        group: "Editor",
+        label: "Go to Definition",
+        hint: "F12",
+        run: () => {
+          const view = editorViewRef.current;
+          if (view) void handleDefinition(view.state.selection.main.head);
+        },
+      },
+      {
+        id: "editor.references",
+        group: "Editor",
+        label: "Find References",
+        hint: "Shift+F12",
+        run: () => {
+          const view = editorViewRef.current;
+          if (view) void handleFindReferences(view.state.selection.main.head);
+        },
+      },
+      {
+        id: "editor.rename",
+        group: "Editor",
+        label: "Rename Symbol",
+        hint: "F2",
+        run: () => setRenameSignal((s) => s + 1),
+      },
+      {
         id: "terminal.show",
         group: "Terminal",
         label: "Show terminal",
@@ -1573,6 +1879,9 @@ export function WorkspacePage() {
     onCloseFolder,
     toggleEditorFullscreen,
     toggleTerminalMaximized,
+    handleDefinition,
+    handleFindReferences,
+    setRenameSignal,
   ]);
 
   const startTypePath = useCallback(() => {
@@ -1988,6 +2297,8 @@ export function WorkspacePage() {
             tree={tree ?? null}
             expandedFolders={expandedFolders}
             activePath={activePath}
+            outlineContent={activePath ? tabContent.get(activePath) ?? "" : ""}
+            onNavigate={openSearchResult}
             renamingPath={renamingPath}
             renameError={renameError}
             creatingSubfolderPath={creatingSubfolderPath}
@@ -2070,6 +2381,12 @@ export function WorkspacePage() {
                 onChange={handleEditorChange}
                 onCreateEditor={handleEditorView}
                 onCursorChange={handleCursorChange}
+                onHover={handleHover}
+                onDefinition={handleDefinition}
+                onFindReferences={handleFindReferences}
+                onRename={handleRename}
+                onNavigate={openSearchResult}
+                renameSignal={renameSignal}
               />
             </div>
             {/* Terminal stays mounted across fullscreen entry / exit so
@@ -2301,6 +2618,8 @@ export function WorkspacePage() {
               onSidebarWidthChange={setSidebarWidth}
               activityBarItems={activityBarItems}
               installedExtensions={installedExtensions}
+              outlineContent={activePath ? tabContent.get(activePath) ?? "" : ""}
+              onNavigate={openSearchResult}
               tree={tree ?? null}
               expandedFolders={expandedFolders}
               activePath={activePath}
@@ -2381,6 +2700,12 @@ export function WorkspacePage() {
                   onChange={handleEditorChange}
                   onCreateEditor={handleEditorView}
                   onCursorChange={handleCursorChange}
+                  onHover={handleHover}
+                  onDefinition={handleDefinition}
+                  onFindReferences={handleFindReferences}
+                  onRename={handleRename}
+                  onNavigate={openSearchResult}
+                  renameSignal={renameSignal}
                 />
               ) : (
                 <WorkspaceEmptyState
@@ -2485,6 +2810,9 @@ export function WorkspacePage() {
 //
 // `sidebarTab` ids:
 //   • `"explorer"`    → <ExplorerSidebar />
+//   • `"problems"`    → <ProblemsPanel />
+//   • `"outline"`     → <OutlinePanel />
+//   • `"git"`         → <GitPanel />
 //   • `"extensions"`  → <ExtensionsManagerPanel />
 //   • `"ext:<extId>:<panelId>"` → <ExtensionIframeView />
 //
@@ -2502,6 +2830,10 @@ interface WorkspaceSidebarProps {
   installedExtensions: import("@/lib/extensions/types").InstalledExtension[];
   // All the props <ExplorerSidebar> needs (lifted from WorkspacePage).
   tree: ReturnType<typeof useDevServer>["tree"];
+  /** Active file's editor content — the Outline panel's doc payload. */
+  outlineContent: string;
+  /** Open a path at a 1-indexed line/column (Outline rows). */
+  onNavigate: (path: string, line: number, column: number) => void;
   expandedFolders: Set<string>;
   activePath: string | null;
   renamingPath: string | null;
@@ -2556,6 +2888,8 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     activityBarItems,
     installedExtensions,
     tree,
+    outlineContent,
+    onNavigate,
     expandedFolders,
     activePath,
     renamingPath,
@@ -2738,6 +3072,13 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         )}
         {effectiveTab === "problems" && (
           <ProblemsPanel onOpen={onOpenProblem} />
+        )}
+        {effectiveTab === "outline" && (
+          <OutlinePanel
+            activePath={activePath}
+            content={outlineContent}
+            onOpen={onNavigate}
+          />
         )}
         {effectiveTab === "git" && workspaceId && workspaceRootPath && (
           <GitPanel

@@ -462,3 +462,24 @@
     height: 0;
   }
 }
+
+/* LSP hover tooltip content (EditorArea hoverTooltip) — CodeMirror's
+   oneDark theme styles the .cm-tooltip shell; the content div needs
+   its own surface, mono font and wrapping since hover payloads are
+   preformatted signatures + docs. The editor is permanently oneDark,
+   so the zinc palette here is deliberate (not a theme token). */
+.cm-lsp-hover {
+  max-width: 560px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: #18181b;
+  color: #e4e4e7;
+  border: 1px solid #3f3f46;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

@@ -12,6 +12,7 @@ import {
   FolderTree,
   GitBranch,
   ListFilter,
+  ListTree,
   Puzzle,
   Search,
   type LucideIcon,
@@ -47,6 +48,8 @@ export const BUILTIN_ITEMS: ActivityBarItem[] = [
   // bottom dock like VS Code) because the dock is terminal space —
   // see ProblemsPanel.tsx.
   { id: "problems", label: "Problems", icon: ListFilter },
+  // Phase 2 LSP: document symbols for the active file (OutlinePanel).
+  { id: "outline", label: "Outline", icon: ListTree },
   { id: "extensions", label: "Extensions", icon: Puzzle },
 ];
 
