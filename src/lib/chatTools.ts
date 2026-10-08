@@ -727,6 +727,22 @@ export const chatTools: AnthropicTool[] = [
     },
   },
   {
+    name: "workspace_open_folder",
+    description:
+      "Open a folder on disk as the ACTIVE workspace root — the equivalent of the user clicking Open Folder and typing a path. Use when the user gives you an absolute path to work in (e.g. 'use D:\\repos\\my-app') or asks you to switch projects. The folder must ALREADY EXIST on the machine — refuses with 'Folder not found' otherwise; ask the user to create it first. Switching replaces the current folder (tabs clear, tree re-lists); works even when no folder is open yet. After it succeeds, re-list the new root with workspace_list_files before touching files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Absolute folder path, e.g. D:\\projects\\my-app (Windows) or /home/user/my-app.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "workspace_git_status",
     description:
       "Read the git status of the workspace repo — current branch, staged/unstaged/untracked files. Use before any git action to see what would be committed, and after edits to confirm what changed.",
@@ -913,6 +929,7 @@ export const toolLabel: Record<AnthropicTool["name"], string> = {
   workspace_exec_command: "run a shell command in the workspace",
   workspace_npm_scripts: "read the workspace package.json scripts",
   workspace_open_file: "open a file in the editor",
+  workspace_open_folder: "open a folder as the workspace root",
   workspace_git_status: "read the workspace git status",
   workspace_git_branches: "list the workspace git branches",
   workspace_git_diff: "show a workspace file's git diff",
@@ -1060,6 +1077,8 @@ export const toolActionSummary: Record<
   workspace_npm_scripts: () => "Read the workspace package.json.",
   workspace_open_file: (input) =>
     `Opened ${input.path as string} in the editor.`,
+  workspace_open_folder: (input) =>
+    `Opening workspace folder ${input.path as string}.`,
   workspace_git_status: () => "Read the git status.",
   workspace_git_branches: () => "Listed the git branches.",
   workspace_git_diff: (input) =>

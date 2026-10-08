@@ -124,8 +124,8 @@ export interface IssueTrackerContextSnapshot {
   };
   // Live /panel workspace snapshot, when the user has the VS Code-style
   // workspace page open (any page route — it's stamped module-globally).
-  // `null` = no workspace folder is open, and every workspace_* tool will
-  // refuse until the user picks a folder there.
+  // `null` = no workspace folder is open; the file/git/exec tools refuse
+  // in that state, but `workspace_open_folder` (root switch) still works.
   workspace: WorkspaceChatData | null;
 }
 

@@ -51,7 +51,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/blocks/i18n";
 import { useDevServer } from "@/contexts/DevServerContext";
-import { setWorkspaceChatState } from "@/lib/workspaceChatContext";
+import {
+  setWorkspaceChatState,
+  setWorkspaceRootSetter,
+} from "@/lib/workspaceChatContext";
 import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
 import { ExplorerSidebar } from "./ExplorerSidebar";
 import { EditorTabs } from "./EditorTabs";
@@ -758,11 +761,23 @@ export function WorkspacePage() {
 
   // Esc exits fullscreen — small QoL match for the visual cue (the
   // exit button is the same lucide `ZoomOut` icon, but the keyboard
-  // shortcut is what power users reach for).
+  // shortcut is what power users reach for). While the AI chat panel
+  // floats above the overlay, Esc belongs to the top layer first:
+  // both handlers sit on `window`, so without this check one press
+  // would close the chat AND collapse the editor underneath it.
+  // Same DOM-query idiom ChatLauncher uses to spot layers above it.
   useEffect(() => {
     if (!editorFullscreen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setEditorFullscreen(false);
+      if (e.key !== "Escape") return;
+      if (
+        document.querySelector(
+          '[role="dialog"][aria-label="AI Assistant chat"]',
+        )
+      ) {
+        return;
+      }
+      setEditorFullscreen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -866,6 +881,25 @@ export function WorkspacePage() {
     });
     return () => setWorkspaceChatState(null);
   }, [workspace?.id, folderPath, openPaths, activePath, openFile]);
+
+  // Root-switch callback for the chat's `workspace_open_folder` tool.
+  // Separate from the data bridge above: it must live whenever the
+  // dev-server workspace exists, INCLUDING when no folder is open —
+  // that's exactly the state where the user asks the chat to open one.
+  useEffect(() => {
+    if (!workspace?.id) {
+      setWorkspaceRootSetter(null);
+      return;
+    }
+    setWorkspaceRootSetter(async (path: string) => {
+      // `setWorkspaceRoot` validates the folder server-side (refuses
+      // nonexistent paths), persists to localStorage and toasts; the
+      // returned message doubles as the tool result.
+      const r = await setWorkspaceRoot(path);
+      return r.ok ? r.message : `Refused — ${r.message}`;
+    });
+    return () => setWorkspaceRootSetter(null);
+  }, [workspace?.id, setWorkspaceRoot]);
 
   const closeTab = useCallback((path: string) => {
     // Flush any pending autosave before discarding the cached content.
@@ -2265,6 +2299,12 @@ export function WorkspacePage() {
   // Used by the zoom button next to "Open folder" and dismissible via
   // the same button, the explicit exit button, or the Esc key.
   //
+  // The overlay sits BELOW the app-wide AI Assistant launcher (z-40)
+  // so the chatbot stays reachable in zoom mode — an earlier z-[60]
+  // covered it, leaving no way to open the assistant without leaving
+  // fullscreen. Sheets and dialogs (z-50) also stack above, which is
+  // what Radix portals expect; only the Lattice chrome is buried.
+  //
   // Rendered via `createPortal` to `document.body` so its
   // `position: fixed` is anchored to the viewport, not to whatever
   // stacked-context the React route happens to live in. Without the
@@ -2280,9 +2320,11 @@ export function WorkspacePage() {
   if (editorFullscreen && hasFolder) {
     const overlay = (
       <div
-        // `fixed inset-0` covers the whole viewport, z-[60] to sit
-        // above the Lattice page chrome (sidebar + top app bar) and
-        // the AI Assistant launcher (z-40). `bg-card` matches the
+        // `fixed inset-0` covers the whole viewport, z-[35] to sit
+        // above the Lattice page chrome (Navigation sidebar z-10 +
+        // top app bar z-30) while staying BELOW the AI Assistant
+        // launcher + chat panel (z-40) and sheets/dialogs (z-50) —
+        // see the block comment above. `bg-card` matches the
         // IDE frame so the jump into fullscreen isn't a colour
         // flash. Deliberately NOT `w-screen h-screen`: `100vw/100vh`
         // include the classic (layout-reserving) scrollbar, so on a
@@ -2291,7 +2333,7 @@ export function WorkspacePage() {
         // horizontal scrollbar. Percentages on a fixed element
         // resolve against the viewport minus scrollbars — same
         // belt-and-braces as `inset-0`, without the overflow.
-        className="fixed inset-0 z-[60] flex h-full w-full flex-col overflow-hidden bg-card"
+        className="fixed inset-0 z-[35] flex h-full w-full flex-col overflow-hidden bg-card"
         role="dialog"
         aria-modal="true"
         aria-label="Fullscreen editor"

@@ -350,13 +350,17 @@ export const devServerApi = {
   },
 
   /**
-   * Reads the `package.json` at the given path. Returns `null` when
-   * the file is missing or malformed — that's a normal state for a
-   * folder the user just picked (e.g. `~/Downloads`), not an error.
-   * The UI shows "no package.json found" and hides the workspace
-   * dependencies subsection.
+   * Reads the `package.json` at the given path. `package` is `null`
+   * when the file is missing or malformed — that's a normal state for
+   * a folder the user just picked (e.g. `~/Downloads`), not an error;
+   * the UI shows "no package.json found" and hides the workspace
+   * dependencies subsection. The `exists` flag disambiguates the null:
+   * `false` means the folder itself isn't on disk (callers must NOT
+   * store it as a workspace root), `true` means the folder is real.
    */
-  async inspectPackage(path: string): Promise<PackageJsonSummary | null> {
+  async inspectPackage(
+    path: string,
+  ): Promise<{ exists: boolean; package: PackageJsonSummary | null }> {
     const res = await fetch("/api/dev-server/inspect-package", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -366,8 +370,17 @@ export const devServerApi = {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(data.error ?? `inspect failed (${res.status})`);
     }
-    const data = (await res.json()) as { package: PackageJsonSummary | null };
-    return data.package;
+    const data = (await res.json()) as {
+      package: PackageJsonSummary | null;
+      exists?: boolean;
+    };
+    // Older servers (pre-exists flag) omit `exists` — fall back to
+    // "package present ⇒ folder exists", which is always true but
+    // keeps a null-package result ambiguous rather than wrong.
+    return {
+      exists: data.exists ?? data.package !== null,
+      package: data.package,
+    };
   },
 
   // ───────────────────────────────────────────────────────────────

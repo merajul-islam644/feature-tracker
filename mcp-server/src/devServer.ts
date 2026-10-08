@@ -712,3 +712,14 @@ async function readPackageJson(folder: string): Promise<PackageJsonSummary | nul
 // Public aliases used by `index.ts` routes.
 export const pickFolder = pickNativeFolder;
 export const inspectPackage = readPackageJson;
+
+// `readPackageJson` returns null both for "folder missing" and "folder
+// exists but no package.json" — the /dev-server/inspect-package route
+// pairs it with this check so the client can tell the two apart (a
+// stored workspace root that no longer exists must be cleared, while a
+// valid folder without a package.json is legitimately openable).
+export async function folderExists(folder: string): Promise<boolean> {
+  if (folder.includes("..") || folder.includes("\0")) return false;
+  const stat = await fsp.stat(folder).catch(() => null);
+  return !!stat?.isDirectory();
+}

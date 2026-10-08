@@ -25,7 +25,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createRequire } from "node:module";
 import { basename, relative, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { safeResolveUserFolder } from "./devServer.js";
+import { safeResolveUserFolder, folderExists } from "./devServer.js";
 
 // ─────────────────────────────────────────────────────────────────────
 //  Session registry
@@ -178,6 +178,14 @@ export async function ensureLspSession(
   // the flag.
   const args = [serverJs, "--stdio"];
 
+  // A nonexistent root makes the spawn itself fail (Windows reports
+  // ENOENT on the executable when cwd is gone), and an unhandled
+  // spawn error used to escape as an uncaughtException and kill the
+  // whole mcp-server. Validate first, and belt-and-braces the error
+  // handler below.
+  if (!(await folderExists(root))) {
+    throw new Error(`Workspace folder does not exist: ${root}`);
+  }
   const child = spawn(process.execPath, args, {
     cwd: root,
     stdio: "pipe",
@@ -215,6 +223,21 @@ export async function ensureLspSession(
     for (const p of session.pending.values()) {
       clearTimeout(p.timer);
       p.reject(new Error("language server exited"));
+    }
+    session.pending.clear();
+    sessions.delete(id);
+  });
+  // Spawn-level failures (missing cwd, missing node) arrive here, NOT
+  // on "exit" — without this handler Node turns them into
+  // uncaughtException and the whole server dies (observed live with a
+  // phantom workspace root as cwd).
+  child.on("error", (err) => {
+    if (session.dead) return;
+    session.dead = true;
+    console.warn(`[lsp] tsserver spawn failed: ${err.message}`);
+    for (const p of session.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error(`language server unavailable: ${err.message}`));
     }
     session.pending.clear();
     sessions.delete(id);
