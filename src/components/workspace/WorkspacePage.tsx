@@ -86,12 +86,16 @@ import {
   dirname,
 } from "./treeHelpers";
 import { languageLabel } from "./languageLabel";
+import { CommandPalette, type CommandDef } from "./CommandPalette";
 import { toast } from "sonner";
 import { redo, undo } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { cn } from "@/lib/utils";
 import { devServerApi } from "@/services/devServerApi";
-import type { TerminalInstance } from "@/types/dev-server";
+import type {
+  TerminalInstance,
+  FileNode,
+} from "@/types/dev-server";
 import {
   loadWorkspaceTabs,
   saveWorkspaceTabs,
@@ -873,6 +877,29 @@ export function WorkspacePage() {
   // `onOpenResult` opens the file in the editor + jumps the cursor.
   const [searchOpen, setSearchOpen] = useState(false);
 
+  // ─── Command palette (Ctrl/Cmd+P files · Ctrl/Cmd+Shift+P cmds) ──
+  // `null` = closed. The shortcuts live in the page-level keydown
+  // effect below (next to Ctrl+Shift+F / Ctrl+W / Ctrl+S).
+  const [palette, setPalette] = useState<"files" | "commands" | null>(null);
+  // Bump-to-expand signal for the active terminal panel ("Terminal:
+  // Show" command — the collapse state itself lives inside
+  // TerminalPanel, so the parent can only nudge it).
+  const [terminalExpandSignal, setTerminalExpandSignal] = useState(0);
+
+  // Flat file list for quick-open. The tree is already loaded for
+  // the Explorer; flattening is O(n) over the same ≤5,000 entries.
+  const flatFilePaths = useMemo(() => {
+    const out: string[] = [];
+    const walk = (nodes: FileNode[]) => {
+      for (const n of nodes) {
+        if (n.kind === "file") out.push(n.path);
+        else if (n.children) walk(n.children);
+      }
+    };
+    walk(tree ?? []);
+    return out;
+  }, [tree]);
+
   // ─── Sidebar activity bar tab ──────────────────────────────────
   // Drives which sidebar panel renders to the left of the editor:
   // built-in tabs ("explorer", "extensions") + per enabled
@@ -1435,6 +1462,119 @@ export function WorkspacePage() {
     setPathInputOpen(false);
   }, [closeFolder, flushSave]);
 
+  // Palette command list. Placed after every handler it closes over
+  // (handleDiscard, onCloseFolder, …) so the useMemo deps read the
+  // initialized bindings instead of mid-render TDZ consts. Group
+  // prefixes read like VS Code's categories; keep ids stable for
+  // tests.
+  const paletteCommands = useMemo<CommandDef[]>(() => {
+    const cmds: CommandDef[] = [
+      {
+        id: "file.save",
+        group: "File",
+        label: "Save now",
+        hint: "Ctrl+S",
+        run: () => {
+          const path = activePathRef.current;
+          if (path && pendingPathsRef.current.has(path)) void flushSave(path);
+        },
+      },
+      {
+        id: "file.closeTab",
+        group: "File",
+        label: "Close tab",
+        hint: "Ctrl+W",
+        run: () => {
+          const path = activePathRef.current;
+          if (path) closeTabWithConfirm(path);
+        },
+      },
+      {
+        id: "file.discard",
+        group: "File",
+        label: "Discard changes (revert to disk)",
+        run: () => void handleDiscard(),
+      },
+      {
+        id: "folder.close",
+        group: "File",
+        label: "Close folder",
+        run: onCloseFolder,
+      },
+      {
+        id: "view.search",
+        group: "View",
+        label: "Search in project",
+        hint: "Ctrl+Shift+F",
+        run: () => setSearchOpen(true),
+      },
+      {
+        id: "view.fullscreen",
+        group: "View",
+        label: "Toggle editor fullscreen",
+        run: toggleEditorFullscreen,
+      },
+      {
+        id: "sidebar.explorer",
+        group: "View",
+        label: "Show Explorer",
+        run: () => setSidebarTab("explorer"),
+      },
+      {
+        id: "sidebar.search",
+        group: "View",
+        label: "Show Search",
+        run: () => {
+          setSidebarTab("search");
+          setSearchOpen(false);
+        },
+      },
+      {
+        id: "sidebar.git",
+        group: "View",
+        label: "Show Source Control",
+        run: () => setSidebarTab("git"),
+      },
+      {
+        id: "sidebar.problems",
+        group: "View",
+        label: "Show Problems",
+        run: () => setSidebarTab("problems"),
+      },
+      {
+        id: "sidebar.extensions",
+        group: "View",
+        label: "Show Extensions",
+        run: () => setSidebarTab("extensions"),
+      },
+      {
+        id: "terminal.show",
+        group: "Terminal",
+        label: "Show terminal",
+        run: () => setTerminalExpandSignal((s) => s + 1),
+      },
+      {
+        id: "terminal.maximize",
+        group: "Terminal",
+        label: "Toggle terminal maximize",
+        run: toggleTerminalMaximized,
+      },
+      {
+        id: "git.refresh",
+        group: "Git",
+        label: "Refresh source control status",
+        run: () => setGitRefreshTick((t) => t + 1),
+      },
+    ];
+    return cmds;
+  }, [
+    closeTabWithConfirm,
+    handleDiscard,
+    onCloseFolder,
+    toggleEditorFullscreen,
+    toggleTerminalMaximized,
+  ]);
+
   const startTypePath = useCallback(() => {
     setPathDraft(workspaceRoot?.path ?? "");
     setPathInputOpen(true);
@@ -1663,6 +1803,22 @@ export function WorkspacePage() {
     function onKey(event: KeyboardEvent) {
       if (!event.metaKey && !event.ctrlKey) return;
       const key = event.key.toLowerCase();
+      // Cmd/Ctrl + Shift + P → command palette. Registered before the
+      // plain-key checks so the Shift variant never falls through to
+      // the Ctrl+S handler (Shift+P would lowercase to "p" ≠ "s", but
+      // keeping the guarded pair together reads clearer).
+      if (key === "p" && event.shiftKey) {
+        event.preventDefault();
+        setPalette("commands");
+        return;
+      }
+      // Cmd/Ctrl + P → quick-open files (also the palette's entry to
+      // command mode via the ">" prefix).
+      if (key === "p") {
+        event.preventDefault();
+        setPalette("files");
+        return;
+      }
       // Cmd/Ctrl + Shift + F → open the project search panel.
       if (key === "f" && event.shiftKey) {
         if (!workspaceRoot) return;
@@ -1934,8 +2090,21 @@ export function WorkspacePage() {
               onToggleMaximize={toggleTerminalMaximized}
               collapsed={terminalCollapsed}
               onCollapsedChange={handleTerminalCollapsedChange}
+              expandSignal={terminalExpandSignal}
               containerRef={ideContainerRef}
             />
+            {/* Palette works in fullscreen too — the shortcuts are
+                window-level, so the overlay must be reachable from
+                this branch as well. */}
+            {palette !== null && (
+              <CommandPalette
+                mode={palette}
+                files={flatFilePaths}
+                commands={paletteCommands}
+                onOpenFile={(path) => void openFile(path)}
+                onClose={() => setPalette(null)}
+              />
+            )}
           </section>
         </div>
       </div>
@@ -2238,6 +2407,7 @@ export function WorkspacePage() {
             onToggleMaximize={toggleTerminalMaximized}
             collapsed={terminalCollapsed}
             onCollapsedChange={handleTerminalCollapsedChange}
+            expandSignal={terminalExpandSignal}
             containerRef={ideContainerRef}
           />
         )}
@@ -2289,6 +2459,19 @@ export function WorkspacePage() {
         onReload={() => void handleReloadFromDisk()}
         onKeepMine={handleKeepMine}
       />
+
+      {/* Command palette — quick-open (Ctrl/Cmd+P) and commands
+          (Ctrl/Cmd+Shift+P). The fullscreen branch above renders its
+          own copy; both share the same state. */}
+      {palette !== null && (
+        <CommandPalette
+          mode={palette}
+          files={flatFilePaths}
+          commands={paletteCommands}
+          onOpenFile={(path) => void openFile(path)}
+          onClose={() => setPalette(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2603,6 +2786,8 @@ interface TerminalDockProps {
   /** Mirror of the active panel's collapsed state — hides the sash. */
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
+  /** Bump-to-expand signal from the parent (command palette). */
+  expandSignal?: number;
   /** Bounded IDE container — source of the drag clamp. Structural
    *  ref type so it accepts either React 18 `MutableRefObject` or
    *  React 19 `RefObject` from the parent's `useRef` call. */
@@ -2623,6 +2808,7 @@ function TerminalDock({
   onToggleMaximize,
   collapsed,
   onCollapsedChange,
+  expandSignal,
   containerRef,
 }: TerminalDockProps) {
   const [isResizing, setIsResizing] = useState(false);
@@ -2770,6 +2956,7 @@ function TerminalDock({
               resizing={isResizing}
               onToggleMaximize={isActive ? onToggleMaximize : undefined}
               onCollapsedChange={onCollapsedChange}
+              expandSignal={isActive ? expandSignal : undefined}
             />
           </div>
         );
