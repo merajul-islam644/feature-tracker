@@ -13,6 +13,7 @@ import {
   GitBranch,
   ListFilter,
   ListTree,
+  Package,
   Puzzle,
   Search,
   type LucideIcon,
@@ -50,6 +51,9 @@ export const BUILTIN_ITEMS: ActivityBarItem[] = [
   { id: "problems", label: "Problems", icon: ListFilter },
   // Phase 2 LSP: document symbols for the active file (OutlinePanel).
   { id: "outline", label: "Outline", icon: ListTree },
+  // Item 8: root package.json scripts, one click runs in the terminal
+  // (NpmScriptsPanel).
+  { id: "scripts", label: "npm Scripts", icon: Package },
   { id: "extensions", label: "Extensions", icon: Puzzle },
 ];
 
