@@ -48,6 +48,8 @@ import {
   type CompletionSource,
 } from "@codemirror/autocomplete";
 import { linter, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
+// Type-only — no runtime cycle (TestingPanel never imports this file).
+import type { TestMark } from "./TestingPanel";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
@@ -116,6 +118,11 @@ interface EditorAreaProps {
   /** Inline blame readout on the cursor line. Gutter change-bars are
    *  always on; blame is toggled from the status bar (persisted). */
   blameEnabled?: boolean;
+  // ── Testing integration ─────────────────────────────────────────
+  /** Per-file pass/fail marks from the Testing panel's structured
+   *  runs, keyed by rel path. The active file's marks render in the
+   *  test gutter (right of the git bars' line-number column). */
+  testMarks?: Record<string, TestMark[]>;
 }
 
 // Maps a file path to a CodeMirror language name. Mirrors
@@ -416,6 +423,76 @@ const gitGutterExtension = gutter({
   initialSpacer: () => BAR_SPACER,
 });
 
+// ── Testing gutter (Testing panel v2) ───────────────────────────────
+// Per-line ✓/✗ from the Testing panel's structured runs. Same
+// contract as the git bars: the field below is the single source of
+// truth and MUST be pushed into `extensions` — the gutter only reads
+// it via `markers` (registration lesson baked in above).
+
+/** Apply a fresh mark list (1-based lines, from the Testing panel). */
+const applyTestMarks = StateEffect.define<TestMark[]>();
+
+class TestMarkMarker extends GutterMarker {
+  constructor(private kind: "passed" | "failed") {
+    super();
+  }
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = `cm-test-mark cm-test-mark-${this.kind}`;
+    el.textContent = this.kind === "passed" ? "✓" : "✗";
+    el.title = this.kind === "passed" ? "test passed" : "test failed";
+    return el;
+  }
+}
+const TEST_PASSED = new TestMarkMarker("passed");
+const TEST_FAILED = new TestMarkMarker("failed");
+/** Keeps the gutter from collapsing to zero-width before any run. */
+const TEST_SPACER = new (class extends GutterMarker {
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = "cm-test-mark cm-test-mark-spacer";
+    return el;
+  }
+})();
+
+const testMarkField = StateField.define<RangeSet<GutterMarker>>({
+  create: () => RangeSet.empty,
+  update(value, tr) {
+    const effect = tr.effects.find((e) => e.is(applyTestMarks));
+    if (effect) {
+      const doc = tr.state.doc;
+      const ranges: Range<GutterMarker>[] = [];
+      // Reporter order isn't line order — sort before the same-line
+      // dedupe (RangeSet rejects two side-0 ranges at one position).
+      const sorted = [...effect.value].sort((a, b) => a.line - b.line);
+      for (const m of sorted) {
+        const lineObj = doc.line(Math.min(Math.max(m.line, 1), doc.lines));
+        if (
+          ranges.length > 0 &&
+          ranges[ranges.length - 1].from === lineObj.from
+        ) {
+          continue;
+        }
+        ranges.push({
+          from: lineObj.from,
+          to: lineObj.from,
+          value: m.status === "passed" ? TEST_PASSED : TEST_FAILED,
+        });
+      }
+      return RangeSet.of(ranges, true);
+    }
+    // Edits shift marks like they shift git bars.
+    if (tr.docChanged) return value.map(tr.changes);
+    return value;
+  },
+});
+
+const testGutterExtension = gutter({
+  class: "cm-testgutter",
+  markers: (view) => view.state.field(testMarkField, false) ?? RangeSet.empty,
+  initialSpacer: () => TEST_SPACER,
+});
+
 /** Apply a fresh blame map (1-based line → row). */
 const applyBlameData = StateEffect.define<Map<number, GitBlameLine>>();
 
@@ -527,6 +604,7 @@ export function EditorArea({
   renameSignal,
   onNavigate,
   blameEnabled = true,
+  testMarks,
 }: EditorAreaProps) {
   // Build the updateListener extension once per `onCursorChange`
   // reference. The callback itself is captured at extension-create
@@ -946,6 +1024,17 @@ export function EditorArea({
     });
   }, [blameMap, blameEnabled, editorReady]);
 
+  // Testing marks for the active file — same editorReady gate as the
+  // hunks/blame above (a run can finish before the view exists).
+  // `content` re-fires the dispatch after the doc arrives/changes:
+  // a run that finished before the file was opened still lands, and
+  // each dispatch is idempotent (same marks re-applied).
+  useEffect(() => {
+    if (!editorReady) return;
+    const marks = activePath ? (testMarks?.[activePath] ?? []) : [];
+    viewRef.current?.dispatch({ effects: applyTestMarks.of(marks) });
+  }, [testMarks, activePath, editorReady, content]);
+
   // No folder → parent owns the empty state.
   if (!hasFolder) return null;
 
@@ -986,6 +1075,9 @@ export function EditorArea({
   extensions.push(diffField);
   extensions.push(gitGutterExtension);
   extensions.push(blameField);
+  // Testing v2 — same registration rule as diffField above.
+  extensions.push(testMarkField);
+  extensions.push(testGutterExtension);
   return (
     // The wrapper is the editor's flex slot (`flex-1` for height,
     // `overflow-hidden` so a too-tall canvas never escapes the column).
