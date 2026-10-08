@@ -71,6 +71,29 @@ export interface Problem {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  LSP diagnostics (Phase 1: TypeScript). Mirrors the server shape in
+//  `mcp-server/src/lsp.ts` — one entry per publishDiagnostics push,
+//  paths relative to the workspace root (forward slashes).
+// ─────────────────────────────────────────────────────────────────────
+
+export interface LspDiagnostic {
+  path: string;
+  range: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
+  message: string;
+  /** LSP severity: 1=Error 2=Warning 3=Information 4=Hint. */
+  severity: number;
+  code?: string | number;
+  source?: string;
+}
+
+export type LspDiagnosticEvent =
+  | { kind: "snapshot"; files: Record<string, LspDiagnostic[]>; ts: number }
+  | { kind: "publish"; path: string; diagnostics: LspDiagnostic[]; ts: number };
+
+// ─────────────────────────────────────────────────────────────────────
 //  Workspace root — the local folder the user picked via the
 //  "Open Folder" flow. Anchors the dev server's `cwd` and seeds the
 //  Configure drawer's "Workspace dependencies" subsection.
