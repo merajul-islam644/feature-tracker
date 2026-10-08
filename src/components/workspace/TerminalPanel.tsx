@@ -91,6 +91,10 @@ interface TerminalPanelProps {
    *  sash and drops maximize when the panel folds). Fired on user
    *  toggle AND on the hydration read below. */
   onCollapsedChange?: (collapsed: boolean) => void;
+  /** Bump to expand the panel from outside (command palette "Show
+   *  terminal"). The value itself is meaningless — each increment
+   *  fires the expand effect below. */
+  expandSignal?: number;
 }
 
 const DEFAULT_FG = "#e4e4e7";
@@ -189,6 +193,7 @@ export function TerminalPanel({
   onToggleMaximize,
   resizing = false,
   onCollapsedChange,
+  expandSignal,
 }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -301,6 +306,14 @@ export function TerminalPanel({
     collapsed,
     collapsedHydratedKey,
   ]);
+
+  // External expand request (command palette "Show terminal"). Only
+  // reacts to increments — the mount-time `undefined`/0 is a no-op,
+  // and the persist effect above runs naturally because this goes
+  // through the same `setCollapsed` the chevron uses.
+  useEffect(() => {
+    if (expandSignal) setCollapsed(false);
+  }, [expandSignal]);
 
   // Chevron click — flip collapse and mirror it up in the same tick
   // so the dock hides the resize sash while folded and the parent
