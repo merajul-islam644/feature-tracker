@@ -59,6 +59,7 @@ import { ProblemsPanel } from "./ProblemsPanel";
 import { OutlinePanel } from "./OutlinePanel";
 import { GitPanel } from "./GitPanel";
 import { NpmScriptsPanel } from "./NpmScriptsPanel";
+import { TestingPanel } from "./TestingPanel";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { WorkspaceBreadcrumb } from "./WorkspaceBreadcrumb";
 import { TerminalPanel } from "./TerminalPanel";
@@ -1856,6 +1857,12 @@ export function WorkspacePage() {
         run: () => setSidebarTab("scripts"),
       },
       {
+        id: "sidebar.tests",
+        group: "View",
+        label: "Show Testing",
+        run: () => setSidebarTab("tests"),
+      },
+      {
         id: "editor.definition",
         group: "Editor",
         label: "Go to Definition",
@@ -2386,6 +2393,7 @@ export function WorkspacePage() {
             onGitStatusCount={setGitChangedCount}
             gitRefreshSignal={gitRefreshTick}
             onRunScript={runNpmScript}
+            onRunCommand={runInActiveTerminal}
           />
           <section
             ref={ideContainerRef}
@@ -2712,6 +2720,7 @@ export function WorkspacePage() {
               onGitStatusCount={setGitChangedCount}
               gitRefreshSignal={gitRefreshTick}
               onRunScript={runNpmScript}
+              onRunCommand={runInActiveTerminal}
             />
 
             <section className="flex min-w-0 flex-1 flex-col">
@@ -2872,6 +2881,7 @@ export function WorkspacePage() {
 //   • `"outline"`     → <OutlinePanel />
 //   • `"git"`         → <GitPanel />
 //   • `"scripts"`     → <NpmScriptsPanel />
+//   • `"tests"`       → <TestingPanel />
 //   • `"extensions"`  → <ExtensionsManagerPanel />
 //   • `"ext:<extId>:<panelId>"` → <ExtensionIframeView />
 //
@@ -2939,6 +2949,9 @@ interface WorkspaceSidebarProps {
   /** npm Scripts panel — run a root package.json script in the
    *  active terminal. */
   onRunScript: (name: string) => void;
+  /** Testing panel — run a composed test command (file or single
+   *  test) in the active terminal. */
+  onRunCommand: (command: string) => void;
 }
 
 function WorkspaceSidebar(props: WorkspaceSidebarProps) {
@@ -2990,6 +3003,7 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     onGitStatusCount,
     gitRefreshSignal,
     onRunScript,
+    onRunCommand,
   } = props;
 
   // Resolve the active panel content. If the tab references an
@@ -3157,6 +3171,13 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             workspaceId={workspaceId}
             root={workspaceRootPath}
             onRunScript={onRunScript}
+          />
+        )}
+        {effectiveTab === "tests" && (
+          <TestingPanel
+            workspaceId={workspaceId}
+            root={workspaceRootPath}
+            onRunCommand={onRunCommand}
           />
         )}
         {effectiveTab === "extensions" && <ExtensionsManagerPanel />}

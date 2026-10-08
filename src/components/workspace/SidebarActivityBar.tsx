@@ -9,6 +9,7 @@
 
 import {
   Box,
+  FlaskConical,
   FolderTree,
   GitBranch,
   ListFilter,
@@ -54,6 +55,9 @@ export const BUILTIN_ITEMS: ActivityBarItem[] = [
   // Item 8: root package.json scripts, one click runs in the terminal
   // (NpmScriptsPanel).
   { id: "scripts", label: "npm Scripts", icon: Package },
+  // Testing view (VS Code's flask): *.test.*/*.spec.* discovery +
+  // one-click run in the terminal (TestingPanel).
+  { id: "tests", label: "Testing", icon: FlaskConical },
   { id: "extensions", label: "Extensions", icon: Puzzle },
 ];
 
