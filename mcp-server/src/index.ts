@@ -69,6 +69,11 @@
 //                                          folder
 //   POST   /dev-server/:wsId/mkdir       → mkdir -p in the user-picked
 //                                          folder
+//   POST   /dev-server/:wsId/exec        → one-shot command run with
+//                                          cwd = the user-picked folder;
+//                                          exit code + capped stdout/
+//                                          stderr back (Testing panel's
+//                                          structured test runs)
 //   POST   /dev-server/:wsId/search      → recursive text/regex search
 //                                          over the picked folder
 //                                          (skips node_modules/.git
@@ -1339,6 +1344,76 @@ app.post<{ Params: { workspaceId: string } }>("/dev-server/:workspaceId/mkdir", 
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
   }
+});
+
+const ExecBody = z.object({
+  root: z.string().min(1).max(4096),
+  command: z.string().min(1).max(8192),
+  timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+});
+
+// POST /dev-server/:workspaceId/exec — run a one-shot command with
+// cwd = the user's picked folder and collect exit code + output. The
+// Testing panel's structured runs need this: the JSON reporter's
+// result document comes back on stdout, which the interactive PTY
+// can't hand to the caller. The command runs through a shell exactly
+// like typing it in that terminal — same trust level the workspace
+// already grants. Output is capped per stream; a run that outlives
+// `timeoutMs` (default 120s) is killed and reported `timedOut`. The
+// kill is best-effort on Windows (shell children can outlive it), so
+// we settle the request two seconds after the kill either way.
+app.post<{ Params: { workspaceId: string } }>("/dev-server/:workspaceId/exec", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const parsed = ExecBody.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+  const { root, command } = parsed.data;
+  const timeoutMs = parsed.data.timeoutMs ?? 120_000;
+  const safe = safeResolveUserFolder(root, ".");
+  if (!safe) return reply.code(403).send({ error: "bad root" });
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const child = spawn(command, { cwd: safe, shell: true, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let truncated = false;
+    let timedOut = false;
+    const CAP = 2_000_000; // per stream — enough for any sane reporter doc
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length + chunk.length > CAP) {
+        truncated = true;
+        return;
+      }
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (stderr.length + chunk.length > CAP) {
+        truncated = true;
+        return;
+      }
+      stderr += chunk.toString("utf8");
+    });
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(reply.send({ code, stdout, stderr, timedOut, truncated }));
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+      // If the shell refuses to die (orphaned cmd.exe children on
+      // Windows), settle anyway so the request can't hang forever.
+      setTimeout(() => finish(null), 2_000);
+    }, timeoutMs);
+    child.on("error", (err) => {
+      settled = true;
+      clearTimeout(timer);
+      resolve(reply.code(500).send({ error: err.message }));
+    });
+    child.on("close", (code) => finish(code));
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────

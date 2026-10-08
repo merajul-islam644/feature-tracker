@@ -60,6 +60,7 @@ import { OutlinePanel } from "./OutlinePanel";
 import { GitPanel } from "./GitPanel";
 import { NpmScriptsPanel } from "./NpmScriptsPanel";
 import { TestingPanel } from "./TestingPanel";
+import type { TestMark } from "./TestingPanel";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { WorkspaceBreadcrumb } from "./WorkspaceBreadcrumb";
 import { TerminalPanel } from "./TerminalPanel";
@@ -1978,6 +1979,20 @@ export function WorkspacePage() {
     });
   }, []);
 
+  // ─── Testing v2: gutter marks ─────────────────────────────────
+  // Structured runs publish per-file marks; keyed by rel path and
+  // merged one file at a time so a second file's run never wipes the
+  // first file's marks (marks live until that file re-runs).
+  const [testMarks, setTestMarks] = useState<Record<string, TestMark[]>>(
+    {},
+  );
+  const handleTestResults = useCallback(
+    (path: string, marks: TestMark[]) => {
+      setTestMarks((prev) => ({ ...prev, [path]: marks }));
+    },
+    [],
+  );
+
   // ─── Terminal tabs ────────────────────────────────────────────
   // Per-(workspaceId, cwd) list of independent terminals. Each
   // entry owns its own PTY on mcp-server (keyed by
@@ -2394,6 +2409,7 @@ export function WorkspacePage() {
             gitRefreshSignal={gitRefreshTick}
             onRunScript={runNpmScript}
             onRunCommand={runInActiveTerminal}
+            onTestResults={handleTestResults}
           />
           <section
             ref={ideContainerRef}
@@ -2447,6 +2463,7 @@ export function WorkspacePage() {
                 onRename={handleRename}
                 onNavigate={openSearchResult}
                 renameSignal={renameSignal}
+                testMarks={testMarks}
               />
             </div>
             {/* Terminal stays mounted across fullscreen entry / exit so
@@ -2721,6 +2738,7 @@ export function WorkspacePage() {
               gitRefreshSignal={gitRefreshTick}
               onRunScript={runNpmScript}
               onRunCommand={runInActiveTerminal}
+              onTestResults={handleTestResults}
             />
 
             <section className="flex min-w-0 flex-1 flex-col">
@@ -2770,6 +2788,7 @@ export function WorkspacePage() {
                   onNavigate={openSearchResult}
                   renameSignal={renameSignal}
                   blameEnabled={blameEnabled}
+                  testMarks={testMarks}
                 />
               ) : (
                 <WorkspaceEmptyState
@@ -2952,6 +2971,9 @@ interface WorkspaceSidebarProps {
   /** Testing panel — run a composed test command (file or single
    *  test) in the active terminal. */
   onRunCommand: (command: string) => void;
+  /** Testing panel v2 — publish structured-run marks so the editor
+   *  draws them in the test gutter. */
+  onTestResults: (path: string, marks: TestMark[]) => void;
 }
 
 function WorkspaceSidebar(props: WorkspaceSidebarProps) {
@@ -3004,6 +3026,7 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     gitRefreshSignal,
     onRunScript,
     onRunCommand,
+    onTestResults,
   } = props;
 
   // Resolve the active panel content. If the tab references an
@@ -3178,6 +3201,7 @@ function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             workspaceId={workspaceId}
             root={workspaceRootPath}
             onRunCommand={onRunCommand}
+            onTestResults={onTestResults}
           />
         )}
         {effectiveTab === "extensions" && <ExtensionsManagerPanel />}

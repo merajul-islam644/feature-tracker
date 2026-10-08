@@ -540,6 +540,51 @@ export const devServerApi = {
     }
   },
 
+  /**
+   * One-shot command run with cwd = the user's picked folder. The
+   * Testing panel's structured runs need the exit code + the JSON
+   * reporter's stdout document — things the interactive terminal
+   * can't hand back. The command string goes through a shell, same
+   * trust level as the PTY. Server caps each stream at 2MB and
+   * kills the child after `timeoutMs` (default 120s).
+   */
+  async execUserCommand(opts: {
+    workspaceId: string;
+    root: string;
+    command: string;
+    timeoutMs?: number;
+  }): Promise<{
+    code: number | null;
+    stdout: string;
+    stderr: string;
+    timedOut: boolean;
+    truncated: boolean;
+  }> {
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/exec`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          root: opts.root,
+          command: opts.command,
+          timeoutMs: opts.timeoutMs,
+        }),
+      },
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `exec failed (${res.status})`);
+    }
+    return (await res.json()) as {
+      code: number | null;
+      stdout: string;
+      stderr: string;
+      timedOut: boolean;
+      truncated: boolean;
+    };
+  },
+
   // Interactive shell bridge — opens a single WebSocket to
   // `wss://<host>/api/dev-terminal/shell?workspaceId=...&cwd=...&cols=...&rows=...`
   // which mcp-server proxies to a node-pty PTY. The handle exposes

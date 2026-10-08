@@ -521,3 +521,28 @@
   pointer-events: none;
   user-select: none;
 }
+
+/* Testing v2 gutter — pass/fail marks right of the git bars. Sits in
+ * its own gutter element so it can stay visible while the bars come
+ * and go with branch switches. */
+.cm-testgutter {
+  width: 14px;
+}
+.cm-test-mark {
+  width: 14px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  user-select: none;
+}
+.cm-test-mark-passed {
+  color: #4ade80;
+}
+.cm-test-mark-failed {
+  color: #f87171;
+  font-weight: 700;
+}
+.cm-test-mark-spacer {
+  color: transparent;
+}
