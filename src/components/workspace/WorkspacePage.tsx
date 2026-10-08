@@ -111,6 +111,29 @@ const LSP_SYNC_DEBOUNCE_MS = 700;
 // badge stays visible before it auto-hides.
 const SAVED_BADGE_VISIBLE_MS = 1_500;
 
+// ─── Line-ending preservation ─────────────────────────────────────
+// CodeMirror folds every line ending (\r\n, \r, \n) to "\n" inside
+// the buffer, so autosaving a CRLF file used to rewrite every line
+// as LF — git saw the whole file as changed after a one-word edit.
+// We capture the file's on-disk ending at each load point and
+// convert back in `flushSave`, keeping diffs line-accurate.
+type FileEol = "\r\n" | "\n";
+
+/** Detect the dominant on-disk ending. Anything containing CRLF is
+ *  treated as a CRLF file; lone-\r (classic Mac) counts as LF —
+ *  museum format, not worth preserving. */
+function detectFileEol(content: string): FileEol {
+  return content.includes("\r\n") ? "\r\n" : "\n";
+}
+
+/** Convert LF-only editor text back to the file's on-disk ending.
+ *  `\r?\n` (not bare `\n`) keeps this idempotent when the in-memory
+ *  cache still holds a CRLF string right after a discard/reload —
+ *  existing CRLFs pass through unchanged. */
+function applyFileEol(content: string, eol: FileEol): string {
+  return eol === "\r\n" ? content.replace(/\r?\n/g, "\r\n") : content;
+}
+
 // ─── Terminal-instance persistence (mirrors `notepad/storage.ts`
 // readJSON/writeJSON pattern — see that file's comments for why we
 // roll our own instead of a project-wide helper). One record per
@@ -355,6 +378,7 @@ export function WorkspacePage() {
     // a folder switch is the cheapest way to make sure stale cache
     // entries from a previous folder don't leak in.
     setTabContent(new Map());
+    fileEolRef.current.clear();
     // Pre-fetch every restored tab's content so the user sees the
     // file body the moment the editor mounts — without this, opening
     // the page after a refresh would leave every tab visually empty
@@ -364,6 +388,7 @@ export function WorkspacePage() {
         restoredPaths.map(async (path) => {
           try {
             const content = await readUserFile(path);
+            fileEolRef.current.set(path, detectFileEol(content ?? ""));
             setTabContent((prev) => {
               const next = new Map(prev);
               next.set(path, content ?? "");
@@ -454,6 +479,11 @@ export function WorkspacePage() {
   // the latest content/path without forcing the page to re-create
   // every callback on every render.
   const tabContentRef = useRef<Map<string, string>>(new Map());
+  // Per-open-file on-disk line ending, captured at every
+  // `readUserFile` load point (open, restored tab, discard, reload).
+  // `flushSave` converts the LF-only editor text back before writing
+  // so CRLF files keep their endings and git diffs stay small.
+  const fileEolRef = useRef<Map<string, FileEol>>(new Map());
   const openPathsRef = useRef<string[]>([]);
   const activePathRef = useRef<string | null>(null);
   const treeRef = useRef(tree);
@@ -519,7 +549,11 @@ export function WorkspacePage() {
       });
       try {
         const content = tabContentRef.current.get(path) ?? "";
-        await writeUserFile(path, content);
+        // Editor text is LF-only (CM6 folds endings); write back in
+        // the ending the file had on disk so CRLF repos don't see
+        // their whole file rewritten on every keystroke save.
+        const out = applyFileEol(content, fileEolRef.current.get(path) ?? "\n");
+        await writeUserFile(path, out);
         // Only stamp `savedAt` when the write succeeded. The status
         // bar's "Saved Xs ago" badge tracks the most recent
         // successful PUT.
@@ -753,6 +787,7 @@ export function WorkspacePage() {
       }
       try {
         const content = await readUserFile(path);
+        fileEolRef.current.set(path, detectFileEol(content ?? ""));
         setTabContent((prev) => {
           const next = new Map(prev);
           next.set(path, content ?? "");
@@ -1031,6 +1066,7 @@ export function WorkspacePage() {
       const fresh = await readUserFile(path);
       const view = editorViewRef.current;
       const next = fresh ?? "";
+      fileEolRef.current.set(path, detectFileEol(next));
       setTabContent((prev) => {
         const m = new Map(prev);
         m.set(path, next);
@@ -1577,6 +1613,7 @@ export function WorkspacePage() {
     try {
       const fresh = await readUserFile(path);
       const next = fresh ?? "";
+      fileEolRef.current.set(path, detectFileEol(next));
       setTabContent((prev) => {
         const m = new Map(prev);
         m.set(path, next);
