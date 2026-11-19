@@ -52,6 +52,14 @@ export interface DevServerRecord {
   id: string;          // composite "<workspaceId>:<port>"
   workspaceId: string;
   port: number;
+  // The port the server ACTUALLY bound. Vite silently bumps busy ports
+  // ("Port 5173 is in use, trying another one..." → serves on 5174),
+  // and the readiness poll used to keep watching the REQUESTED port —
+  // a healthy server was declared FAILED after 30s while it answered
+  // happily on the bumped port (observed live 2026-10-09). The stdout
+  // watcher parses the "Local: http://…:<port>/" line and records the
+  // real port here; readiness + status report against it.
+  actualPort?: number;
   child: ChildProcess | null;
   status: DevServerStatus;
   command: string;
@@ -300,6 +308,16 @@ export async function startDevServer(opts: {
   port: number;
   command: string;
   args: string[];
+  /** Absolute folder to run the command in — the user's picked
+   *  workspace root. Validated by the route layer with
+   *  `safeResolveUserFolder`. Absent (or unresolvable) → the per-
+   *  workspace sandbox dir, which has no package.json and only makes
+   *  sense for plumbing runs. The chat agent's `workspace_dev_server`
+   *  always passes the real root; observed live 2026-10-09: without
+   *  it, `npm run dev` ran in the SANDBOX dir (or, when the sandbox
+   *  resolved oddly, in whatever cwd npm picked) and bound the wrong
+   *  app entirely. */
+  root?: string;
 }): Promise<DevServerRecord> {
   const id = devServerId(opts.workspaceId, opts.port);
   const existing = devServers.get(id);
@@ -327,7 +345,7 @@ export async function startDevServer(opts: {
   };
   rec.command = opts.command;
   rec.args = opts.args;
-  rec.cwd = workspaceRoot(opts.workspaceId);
+  rec.cwd = opts.root ?? workspaceRoot(opts.workspaceId);
   rec.startedAt = new Date().toISOString();
   rec.readyAt = undefined;
   rec.lastExitCode = undefined;
@@ -400,6 +418,25 @@ export async function startDevServer(opts: {
         message: line,
         ts: Date.now(),
       });
+      // Port-bump detection: Vite (and friends) announce their real URL
+      // on stdout. If the server moved off the requested port, record
+      // the actual one so readiness polls the right place — otherwise a
+      // HEALTHY server is declared FAILED because the requested port
+      // (held by someone else) never answers (observed live 2026-10-09:
+      // vite bumped 5173→5174→5175 while the poll kept watching 5173).
+      const moved = line.match(/Local:\s+\S*https?:\/\/[^\s]*?:(\d{2,5})\//i)
+        ?? line.match(/https?:\/\/(?:127\.0\.0\.1|localhost):(\d{2,5})\//i);
+      const actualPort = moved ? Number(moved[1]) : null;
+      if (actualPort && actualPort !== opts.port && !rec.actualPort) {
+        rec.actualPort = actualPort;
+        appendDevServerLog(id, {
+          id,
+          kind: "devserver_log",
+          level: "stdout",
+          message: `[dev-server-manager] server bound to port ${actualPort}, not the requested ${opts.port} — readiness now polls ${actualPort}`,
+          ts: Date.now(),
+        });
+      }
     }
   });
   child.stderr.on("data", pushStderr);
@@ -413,8 +450,10 @@ export async function startDevServer(opts: {
   const readinessPoll = async () => {
     if (readinessResolved) return;
     if (rec.stopRequested) return;
+    // Poll the ACTUAL port when the server bumped (see actualPort doc).
+    const port = rec.actualPort ?? opts.port;
     try {
-      const res = await fetch(`http://127.0.0.1:${opts.port}/`, {
+      const res = await fetch(`http://127.0.0.1:${port}/`, {
         // 2s cap so the poller's per-stay track doesn't hang on a
         // half-open socket.
         signal: AbortSignal.timeout(2_000),
@@ -428,7 +467,7 @@ export async function startDevServer(opts: {
         appendDevServerLog(id, {
           id,
           kind: "devserver_ready",
-          port: opts.port,
+          port,
           ts: Date.now(),
         });
       }
@@ -440,7 +479,7 @@ export async function startDevServer(opts: {
         appendDevServerLog(id, {
           id,
           kind: "devserver_error",
-          message: `port ${opts.port} did not respond within 30s. stderr tail:\n${rec.stderrTail.slice(-20).join("\n")}`,
+          message: `port ${port}${port !== opts.port ? ` (server moved from requested ${opts.port})` : ""} did not respond within 30s. stderr tail:\n${rec.stderrTail.slice(-20).join("\n")}`,
           ts: Date.now(),
         });
       }

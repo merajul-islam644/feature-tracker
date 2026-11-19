@@ -377,10 +377,10 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
             cfg,
             {
               model: cfg.model,
-              // 4096 — agentic browser walkthroughs end with a long
-              // evidence report (findings tables + next-step narration),
-              // which overflowed the older 2048 cap mid-sentence.
-              max_tokens: 4096,
+              // 16384 — reasoning models (MiniMax-M3) spend thousands of
+              // tokens thinking before any content; 4096 truncated them
+              // mid-thought, returning content:null with stop max_tokens.
+              max_tokens: 16384,
               system: systemPrompt,
               messages: [...history, { role: "user", content: userText }],
               ...(tools ? { tools } : {}),

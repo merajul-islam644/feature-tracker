@@ -313,7 +313,19 @@ export function buildIssueTrackerContext(input: {
 export function renderContextForSystemPrompt(
   ctx: IssueTrackerContextSnapshot,
 ): string {
-  return "CURRENT STATE:\n" + JSON.stringify(ctx, null, 2);
+  // Static reminder in the header, repeated every turn: the model read
+  // its built app's IDENTITY out of these rows mid-build (observed live
+  // 2026-10-09 — scaffolded an unrelated project that happened to sit in
+  // the projects list). The prompt rule in chatSystemPrompt.ts explains
+  // it in full; this line rides the snapshot itself so the warning is
+  // adjacent to the data at the moment of reading, every single turn.
+  return (
+    "CURRENT STATE — the rows below are Lattice's own platform data " +
+    "(your verification projects, targets, secrets, issues). They describe " +
+    "THIS dashboard, never the app you may be building; an app you build is " +
+    "specified by the user's message only:\n" +
+    JSON.stringify(ctx, null, 2)
+  );
 }
 
 function trimUrl(url: string): string {

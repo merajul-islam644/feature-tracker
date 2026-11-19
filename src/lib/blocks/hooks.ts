@@ -23,6 +23,7 @@ import {
 } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { useActiveEnv } from "@/contexts/ActiveEnvContext";
+import { dequeueAll, enqueueOutbox, type OutboxEntry } from "../chatOutbox";
 import { blocksClient } from "./client";
 import {
   createdByFilter,
@@ -1114,6 +1115,15 @@ export async function fetchProjectContents(
 // Loads every persisted chat message for one session in CreatedDate order.
 // Greeting / seed messages are not in the store — the caller prepends them
 // when the result is empty.
+//
+// The read window keeps the NEWEST 1000 rows, not the oldest: a long agent
+// build persists hundreds of rows (every narration + tool result), and an
+// ascending read silently dropped the newest turns on restore — the panel
+// came back showing the ancient tail of the conversation and the agent's
+// context (built from this state) "woke up" believing an older project was
+// still the task, re-generating the wrong app end to end (observed live
+// 2026-10-09). Sorted descending server-side, reversed back to
+// chronological here for rendering.
 export function useChatHistory(
   sessionId: string,
   opts?: { enabled?: boolean },
@@ -1129,20 +1139,22 @@ export function useChatHistory(
       const raw = await chatMessagesCollection.list({
         filter: { ...createdByFilter(userId), sessionId },
         pageNo: 1,
-        pageSize: 500,
-        sort: { CreatedDate: 1 },
+        pageSize: 1000,
+        sort: { CreatedDate: -1 },
       });
-      return unwrapPaged<unknown>(raw).items.map((m) =>
-        toChatMessage(m as Parameters<typeof toChatMessage>[0]),
-      );
+      return unwrapPaged<unknown>(raw).items
+        .map((m) => toChatMessage(m as Parameters<typeof toChatMessage>[0]))
+        .reverse();
     },
   });
 }
 
 // List every chat session the user has stored messages under. We don't keep
 // a separate Session collection, so this pulls the user's persisted chat
-// rows (pageSize 200 is plenty — anyone running more than that is unusual)
-// and reduces them client-side into one summary per sessionId. Sessions with
+// rows (pageSize 1000 — one long agent build alone persists hundreds of
+// rows, and a 200-row window made older sessions vanish from History;
+// observed live 2026-10-09) and reduces them client-side into one summary
+// per sessionId. Sessions with
 // zero saved messages are intentionally absent — a brand-new session exists
 // in localStorage but never had a message persisted yet, so it shows up
 // only after the first user turn.
@@ -1160,7 +1172,7 @@ export function useChatSessions(opts?: {
       const raw = await chatMessagesCollection.list({
         filter: createdByFilter(userId),
         pageNo: 1,
-        pageSize: 200,
+        pageSize: 1000,
         // Newest first so the reduce passes through the most-recent message
         // for each sessionId — its `CreatedDate` is the session's
         // `lastActivity`. Sessions are sorted desc again below.
@@ -1327,6 +1339,50 @@ export function useRenameChatSession(): UseMutationResult<
   });
 }
 
+// --- Chat-message outbox drain ----------------------------------------------
+//
+// ../chatOutbox parks chat-message writes that exhausted their retries; this
+// drain re-attempts them until the cloud takes them. The timer starts once
+// per page load (the issue-tracker provider mounts this hook app-wide) and
+// every successful append piggybacks a flush, so a calm gateway drains the
+// queue within a couple of messages instead of waiting out the interval.
+
+let outboxDrainRunning = false;
+let outboxDrainTimer: ReturnType<typeof setInterval> | null = null;
+let outboxInitialDrainDone = false;
+
+async function drainChatOutbox(): Promise<void> {
+  if (outboxDrainRunning) return;
+  outboxDrainRunning = true;
+  try {
+    const pending = dequeueAll();
+    const failed: OutboxEntry[] = [];
+    for (const entry of pending) {
+      try {
+        await chatMessagesCollection.create({
+          sessionId: entry.sessionId,
+          role: entry.role,
+          content: entry.content,
+          actionsJson: entry.actionsJson,
+        });
+      } catch {
+        // Gateway still refusing — keep this entry for the next tick.
+        failed.push(entry);
+      }
+    }
+    for (const entry of failed) enqueueOutbox(entry);
+  } finally {
+    outboxDrainRunning = false;
+  }
+}
+
+function ensureOutboxDrain(): void {
+  if (outboxDrainTimer !== null) return;
+  outboxDrainTimer = setInterval(() => {
+    void drainChatOutbox();
+  }, 60_000);
+}
+
 export function useAppendChatMessage(): UseMutationResult<
   PersistedChatMessage,
   Error,
@@ -1340,7 +1396,23 @@ export function useAppendChatMessage(): UseMutationResult<
   const { currentUser } = useAuth();
   const qc = useQueryClient();
   const userId = currentUser?.id ?? "";
+  // First mount after a page load: retry anything queued by a previous
+  // session that crashed or was reloaded mid-outage.
+  if (!outboxInitialDrainDone) {
+    outboxInitialDrainDone = true;
+    ensureOutboxDrain();
+    void drainChatOutbox();
+  }
   return useMutation({
+    // Retry transient failures: callers fire-and-forget these writes
+    // (`.catch(() => {})`), so without retries a gateway hiccup silently
+    // ate the row — during one HTTP2-protocol-error storm on the data
+    // gateway, an entire agent session's history failed to persist and
+    // the conversation could not be restored after reload (observed live
+    // 2026-10-09). A rare duplicated row (attempt landed server-side but
+    // the response was lost) is cosmetic next to a lost conversation.
+    retry: 3,
+    retryDelay: 2000,
     mutationFn: async (input) => {
       const created = (await chatMessagesCollection.create({
         sessionId: input.sessionId,
@@ -1373,6 +1445,19 @@ export function useAppendChatMessage(): UseMutationResult<
         });
       return toChatMessage(item as Parameters<typeof toChatMessage>[0]);
     },
+    onError: (_err, vars) => {
+      // Retries exhausted — park the write in the local outbox so a later
+      // drain can still persist it. The fire-and-forget callers swallow
+      // this error, which is exactly how whole sessions used to vanish.
+      enqueueOutbox({
+        sessionId: vars.sessionId,
+        role: vars.role,
+        content: vars.content,
+        actionsJson: vars.actions ? JSON.stringify(vars.actions) : "",
+        ts: Date.now(),
+      });
+      ensureOutboxDrain();
+    },
     onSuccess: (_msg, vars) => {
       qc.invalidateQueries({
         queryKey: queryKeys.chatHistory(userId, vars.sessionId),
@@ -1381,6 +1466,9 @@ export function useAppendChatMessage(): UseMutationResult<
       // for the first time after this mutation, and an existing one's
       // title/lastActivity/messageCount may have changed.
       qc.invalidateQueries({ queryKey: queryKeys.chatSessions(userId) });
+      // Calm-weather flush: piggyback the drain on this success so queued
+      // entries land promptly instead of waiting out the 60s interval.
+      void drainChatOutbox();
     },
   });
 }

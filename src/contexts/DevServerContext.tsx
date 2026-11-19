@@ -512,6 +512,45 @@ export function DevServerProvider({
     setWorkspace(updated);
   }, [workspace, subscribePort]);
 
+  // The chat agent's `workspace_dev_server` tool starts servers through
+  // devServerApi directly (the chat store lives outside this provider),
+  // then fires this window event so the panel paints the row + live
+  // SSE tail without a remount. Idempotent — an existing row is kept
+  // (its subscriber is already attached).
+  useEffect(() => {
+    if (!workspace) return;
+    const onChatStarted = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          workspaceId: string;
+          port: number;
+          command: string;
+          args: string[];
+        }>
+      ).detail;
+      if (!detail || detail.workspaceId !== workspace.id) return;
+      setServers((prev) => {
+        if (prev.has(detail.port)) return prev;
+        const next = new Map(prev);
+        next.set(detail.port, {
+          id: `${workspace.id}:${detail.port}`,
+          workspaceId: workspace.id,
+          port: detail.port,
+          status: "starting",
+          command: detail.command,
+          args: detail.args,
+          cwd: workspace.id,
+          startedAt: new Date().toISOString(),
+        });
+        return next;
+      });
+      subscribePort(detail.port);
+    };
+    window.addEventListener("lattice:dev-server-started", onChatStarted);
+    return () =>
+      window.removeEventListener("lattice:dev-server-started", onChatStarted);
+  }, [workspace, subscribePort]);
+
   const stopDevServer = useCallback(async (port: number) => {
     if (!workspace) return;
     try {

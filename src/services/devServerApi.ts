@@ -87,7 +87,11 @@ export const devServerApi = {
     port: number;
     command: string;
     args: string[];
-  }): Promise<{ id: string; status: DevServerStatus; port: number }> {
+    /** Absolute folder to run in — the user's picked root. Required for
+     *  real project starts; without it the backend runs in the sandbox
+     *  dir (no package.json there). */
+    root?: string;
+  }): Promise<{ id: string; status: DevServerStatus; port: number; actualPort?: number | null }> {
     const res = await fetch("/api/dev-server/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -101,6 +105,7 @@ export const devServerApi = {
       id: string;
       status: DevServerStatus;
       port: number;
+      actualPort?: number | null;
     };
   },
 
@@ -477,6 +482,45 @@ export const devServerApi = {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(data.error ?? `write failed (${res.status})`);
     }
+  },
+
+  /**
+   * Targeted string-replacement edit in the user folder. The server
+   * refuses when oldStr is absent (404) or matches more than once
+   * without replaceAll (409) — both surface as thrown Errors carrying
+   * the server's hint so the chat agent can self-correct.
+   */
+  async editUserFile(opts: {
+    workspaceId: string;
+    root: string;
+    path: string;
+    oldStr: string;
+    newStr: string;
+    replaceAll?: boolean;
+  }): Promise<{ replacements: number; size: number }> {
+    const res = await fetch(
+      `/api/dev-server/${encodeURIComponent(opts.workspaceId)}/edit`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          root: opts.root,
+          path: opts.path,
+          oldStr: opts.oldStr,
+          newStr: opts.newStr,
+          ...(opts.replaceAll ? { replaceAll: true } : {}),
+        }),
+      },
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      replacements?: number;
+      size?: number;
+    };
+    if (!res.ok) {
+      throw new Error(data.error ?? `edit failed (${res.status})`);
+    }
+    return { replacements: data.replacements ?? 0, size: data.size ?? 0 };
   },
 
   /**

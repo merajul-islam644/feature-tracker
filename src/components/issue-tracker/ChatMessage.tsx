@@ -169,12 +169,19 @@ export function ChatMessage({
         {toolUse && toolUse.length > 0 && !hasPermissionActions && (
           <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1.5 text-[11px] text-muted-foreground">
             <Zap className="h-3 w-3" aria-hidden="true" />
-            <span className="sr-only">Browser step ran automatically:</span>
+            <span className="sr-only">Tool step ran automatically:</span>
             {toolUse.map((t, i) => (
               <span key={t.id} className="inline-flex items-center gap-1.5">
                 {i > 0 && <span aria-hidden="true">·</span>}
                 <span className="font-medium text-foreground">
-                  {browserToolLabel(t.name)}
+                  {/* Family-aware label: browserToolLabel prefixes
+                      "Playwright:" — right for browser_* walkthrough
+                      steps, wrong for workspace_* auto-runs (observed:
+                      a file write chip read "Playwright: workspace write
+                      file"). toolLabel covers everything else. */}
+                  {t.name.startsWith("browser_")
+                    ? browserToolLabel(t.name)
+                    : toolLabel[t.name] ?? t.name}
                 </span>
               </span>
             ))}
@@ -280,22 +287,45 @@ function ToolPermissionRow({
         )}
       </div>
       {perm && (
-        <Button
-          size="sm"
-          variant="default"
-          onClick={() => onAction?.(perm)}
-          disabled={perm.label === "Allowed"}
-          className="h-6 shrink-0 px-2 text-xs"
-        >
-          {perm.label === "Allowed" ? (
-            <>
-              <Check className="mr-1 h-3 w-3" aria-hidden="true" />
-              Allowed
-            </>
-          ) : (
-            "Allow"
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Deny lives beside Allow so a wrong proposal has an explicit
+              "no" — before this the only ways to refuse were ignoring
+              the card or letting it sit there forever. A denied card is
+              hard-retired by the hook (executedToolIdsRef), same as an
+              allowed one. */}
+          {perm.label === "Allow" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                onAction?.({ ...perm, kind: "deny_tool_permission" })
+              }
+              className="h-6 px-2 text-xs"
+            >
+              Deny
+            </Button>
           )}
-        </Button>
+          <Button
+            size="sm"
+            variant="default"
+            onClick={() => onAction?.(perm)}
+            disabled={perm.label !== "Allow"}
+            className="h-6 shrink-0 px-2 text-xs"
+          >
+            {perm.label === "Allowed" ? (
+              <>
+                <Check className="mr-1 h-3 w-3" aria-hidden="true" />
+                Allowed
+              </>
+            ) : perm.label === "Denied" ? (
+              "Denied"
+            ) : perm.label === "Expired" ? (
+              "Expired"
+            ) : (
+              "Allow"
+            )}
+          </Button>
+        </div>
       )}
     </li>
   );

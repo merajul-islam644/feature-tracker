@@ -553,7 +553,7 @@ export const chatTools: AnthropicTool[] = [
         path: {
           type: "string",
           description:
-            "Optional sub-folder to list, relative to the workspace root. Omit for the root.",
+            "Optional sub-folder to list, relative to the workspace root — the result is THAT folder's own tree (maxDepth levels inside it), not the root. Omit for the root.",
         },
         maxDepth: {
           type: "number",
@@ -566,7 +566,7 @@ export const chatTools: AnthropicTool[] = [
   {
     name: "workspace_read_file",
     description:
-      "Read a text file from the workspace. Use to inspect code, config, or output before editing it (ALWAYS read before you rewrite a whole file). The path is workspace-relative. Returns the UTF-8 content — long files are truncated with a notice. Refuses .env / credential files.",
+      "Read a text file from the workspace. Use to inspect code, config, or output before editing it (ALWAYS read before you modify a file — workspace_edit_file needs oldStr copied from a fresh read). The path is workspace-relative. Files up to 48,000 chars return whole; longer files page — pass offset (a char index) to continue from where the previous read stopped. Refuses .env / credential files.",
     input_schema: {
       type: "object",
       properties: {
@@ -574,6 +574,11 @@ export const chatTools: AnthropicTool[] = [
           type: "string",
           description:
             "File path relative to the workspace root, e.g. \"src/main.ts\".",
+        },
+        offset: {
+          type: "number",
+          description:
+            "Char index to start from (paging). Omit for the first 48,000 chars; pass the offset from a truncation notice to read the next part.",
         },
       },
       required: ["path"],
@@ -597,6 +602,37 @@ export const chatTools: AnthropicTool[] = [
         },
       },
       required: ["path", "content"],
+    },
+  },
+  {
+    name: "workspace_edit_file",
+    description:
+      "Make a TARGETED edit to an existing file: replace an exact oldStr with newStr (single occurrence, or every occurrence with replaceAll). PREFERRED over workspace_write_file for any existing file — one small edit instead of a risky full rewrite. oldStr must be copied EXACTLY from a fresh workspace_read_file of that file (whitespace and indentation count). If the result says the match is not unique, re-read the file and include more surrounding lines; if it says not found, re-read — never guess. New files still need workspace_write_file. Refuses .env / credential files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "File path relative to the workspace root. Must already exist.",
+        },
+        oldStr: {
+          type: "string",
+          description:
+            "The exact current text to replace, copied verbatim from a fresh read (include surrounding lines to make it unique).",
+        },
+        newStr: {
+          type: "string",
+          description:
+            "The replacement text. Empty string deletes oldStr.",
+        },
+        replaceAll: {
+          type: "boolean",
+          description:
+            "Replace every occurrence of oldStr (default false = error if it matches more than once).",
+        },
+      },
+      required: ["path", "oldStr", "newStr"],
     },
   },
   {
@@ -710,6 +746,32 @@ export const chatTools: AnthropicTool[] = [
     description:
       "Read the workspace's package.json summary — name, scripts, and key dependency lists. Use before running anything, so you call `npm run <script>` with a script that actually exists, and to check whether a dependency is installed.",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "workspace_dev_server",
+    description:
+      "Start, stop, or check the workspace's long-lived dev server (the same manager the Dev-servers panel uses). action=start spawns the chosen npm script (default `dev`) on a port and WAITS until the server answers HTTP (up to ~30s), then returns the preview URL (http://localhost:<port>). action=stop SIGTERMs it. action=status reports the current state + URL. This is THE way to run the app for a live UI walkthrough — never `workspace_exec_command` with `npm run dev` (that blocks until timeout and gets killed).",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["start", "stop", "status"],
+          description: "What to do with the dev server.",
+        },
+        script: {
+          type: "string",
+          description:
+            "npm script name for action=start (default \"dev\"). Ignored by stop/status.",
+        },
+        port: {
+          type: "number",
+          description:
+            "Port for action=start (default 5173; pass a different one if 5173 is taken or the script hard-codes another port).",
+        },
+      },
+      required: ["action"],
+    },
   },
   {
     name: "workspace_open_file",
@@ -922,11 +984,13 @@ export const toolLabel: Record<AnthropicTool["name"], string> = {
   workspace_list_files: "list the workspace file tree",
   workspace_read_file: "read a workspace file",
   workspace_write_file: "write a workspace file",
+  workspace_edit_file: "edit a workspace file in place",
   workspace_create_folder: "create a folder in the workspace",
   workspace_delete_path: "permanently delete a file/folder from the workspace",
   workspace_rename_path: "rename or move a workspace file/folder",
   workspace_search: "search text across the workspace",
   workspace_exec_command: "run a shell command in the workspace",
+  workspace_dev_server: "start/stop/check the workspace dev server",
   workspace_npm_scripts: "read the workspace package.json scripts",
   workspace_open_file: "open a file in the editor",
   workspace_open_folder: "open a folder as the workspace root",
@@ -1064,6 +1128,8 @@ export const toolActionSummary: Record<
     `Read ${input.path as string}.`,
   workspace_write_file: (input) =>
     `Wrote ${input.path as string}.`,
+  workspace_edit_file: (input) =>
+    `Edited ${input.path as string}.`,
   workspace_create_folder: (input) =>
     `Created folder ${input.path as string}.`,
   workspace_delete_path: (input) =>
@@ -1075,6 +1141,8 @@ export const toolActionSummary: Record<
   workspace_exec_command: (input) =>
     `Ran \`${input.command as string}\`.`,
   workspace_npm_scripts: () => "Read the workspace package.json.",
+  workspace_dev_server: (input) =>
+    `${input.action === "start" ? "Started" : input.action === "stop" ? "Stopped" : "Checked"} the workspace dev server${input.script ? ` (${input.script as string})` : ""}.`,
   workspace_open_file: (input) =>
     `Opened ${input.path as string} in the editor.`,
   workspace_open_folder: (input) =>
