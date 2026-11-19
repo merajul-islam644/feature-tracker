@@ -309,8 +309,17 @@ export interface ChatAction {
     | "verify_again"
     | "filter_severity"
     | "dismiss"
-    | "request_tool_permission";
+    | "request_tool_permission"
+    | "deny_tool_permission";
   payload?: Record<string, unknown>;
+}
+
+// Live agent phase for the chat status line — the "Thinking… / Writing
+// src/App.tsx…" indicator under the header. Null when the agent is idle.
+export interface ChatActivity {
+  phase: "thinking" | "executing";
+  /** Human sentence for "executing" (e.g. "Running npm install…"). */
+  detail?: string;
 }
 
 // Mirror of Anthropic's `tool_use` content block. We don't pull the SDK
@@ -359,12 +368,14 @@ export type ChatToolName =
   | "workspace_list_files"
   | "workspace_read_file"
   | "workspace_write_file"
+  | "workspace_edit_file"
   | "workspace_create_folder"
   | "workspace_delete_path"
   | "workspace_rename_path"
   | "workspace_search"
   | "workspace_exec_command"
   | "workspace_npm_scripts"
+  | "workspace_dev_server"
   | "workspace_open_file"
   | "workspace_open_folder"
   | "workspace_git_status"

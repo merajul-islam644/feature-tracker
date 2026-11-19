@@ -1003,6 +1003,10 @@ const StartDevServerBody = z.object({
   port: z.number().int().min(1024).max(65535),
   command: z.string().min(1).max(64),
   args: z.array(z.string().min(1).max(200)).max(20).default([]),
+  // Absolute folder to run in (the user's picked root). Validated with
+  // the same guard the exec route uses; optional so older clients that
+  // never send it keep working (they get the sandbox dir as before).
+  root: z.string().min(1).max(4096).optional(),
 });
 const StopDevServerBody = z.object({
   workspaceId: z.string().min(1).max(128),
@@ -1018,11 +1022,19 @@ app.post("/dev-server/start", async (req, reply) => {
     return reply.code(400).send({ error: parsed.error.flatten() });
   }
   const { workspaceId, port, command, args } = parsed.data;
+  // Resolve the run folder before spawning — a bad root must fail the
+  // request, not start a server in the wrong directory.
+  let root: string | undefined;
+  if (parsed.data.root) {
+    const safe = safeResolveUserFolder(parsed.data.root, ".");
+    if (!safe) return reply.code(403).send({ error: "bad root" });
+    root = safe;
+  }
   // Don't `await` — `startDevServer` blocks on the child's `close`
   // event (i.e. it doesn't return until the dev server process exits).
   // Spawning must be fire-and-forget so the route returns immediately
   // and the SSE tail can carry the lifecycle events.
-  void startDevServer({ workspaceId, port, command, args }).catch((err) => {
+  void startDevServer({ workspaceId, port, command, args, root }).catch((err) => {
     appendDevServerLog(devServerId(workspaceId, port), {
       id: devServerId(workspaceId, port),
       kind: "devserver_error",
@@ -1036,6 +1048,10 @@ app.post("/dev-server/start", async (req, reply) => {
     id,
     status: rec?.status ?? "starting",
     port,
+    // The client's start-flow tells the model which URL actually
+    // answers — vite bumps busy ports silently (see actualPort doc in
+    // devServer.ts).
+    actualPort: rec?.actualPort ?? null,
   });
 });
 
@@ -1263,6 +1279,11 @@ const RenameBody = z.object({
 const WriteUserFileBody = RootPathField.merge(RelPathField).extend({
   content: z.string().max(1_000_000), // 1MB — same cap as the sandbox dir
 });
+const EditUserFileBody = RootPathField.merge(RelPathField).extend({
+  oldStr: z.string().min(1).max(1_000_000),
+  newStr: z.string().max(1_000_000),
+  replaceAll: z.boolean().optional(),
+});
 
 app.post<{ Params: { workspaceId: string } }>("/dev-server/:workspaceId/list", async (req, reply) => {
   const ws = WorkspaceIdParam.safeParse(req.params);
@@ -1307,6 +1328,49 @@ app.post<{ Params: { workspaceId: string } }>("/dev-server/:workspaceId/write", 
     await writeFile(safe, parsed.data.content, "utf8");
     return reply.send({ ok: true, size: parsed.data.content.length });
   } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+// Targeted string-replacement edit — the chat agent's partial-edit tool.
+// oldStr must match exactly once (unless replaceAll); the model copies it
+// from a fresh workspace_read_file so whole-file rewrites (and their
+// truncation-drop failures) stop being the only way to change a line.
+app.post<{ Params: { workspaceId: string } }>("/dev-server/:workspaceId/edit", async (req, reply) => {
+  const ws = WorkspaceIdParam.safeParse(req.params);
+  if (!ws.success) return reply.code(400).send({ error: ws.error.flatten() });
+  const parsed = EditUserFileBody.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+  const safe = safeResolveUserFolder(parsed.data.root, parsed.data.path);
+  if (!safe) return reply.code(403).send({ error: "bad path" });
+  try {
+    const content = await readFile(safe, "utf8");
+    const occurrences = content.split(parsed.data.oldStr).length - 1;
+    if (occurrences === 0) {
+      return reply.code(404).send({
+        error:
+          "old_str not found in this file — workspace_read_file the file first and copy old_str EXACTLY (whitespace and indentation count). If the text genuinely differs, read it again rather than guessing.",
+      });
+    }
+    if (occurrences > 1 && !parsed.data.replaceAll) {
+      return reply.code(409).send({
+        error: `old_str matches ${occurrences} places — include more surrounding lines so it is unique, or pass replaceAll:true to change every occurrence.`,
+        occurrences,
+      });
+    }
+    const next =
+      occurrences > 1
+        ? content.split(parsed.data.oldStr).join(parsed.data.newStr)
+        : content.replace(parsed.data.oldStr, parsed.data.newStr);
+    await writeFile(safe, next, "utf8");
+    return reply.send({
+      ok: true,
+      replacements: occurrences,
+      size: next.length,
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return reply.code(404).send({ error: "file not found" });
     return reply.code(500).send({ error: (err as Error).message });
   }
 });

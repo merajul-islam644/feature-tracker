@@ -1,8 +1,12 @@
 // Chat composer — disabled while sending. Enter sends, Shift+Enter newlines.
+// While the agent chain is active the send slot doubles as the Stop button:
+// the input itself is disabled for the whole chain, so this slot is the only
+// always-visible control the user can act on mid-run (observed live
+// 2026-10-09: a runaway scaffold had no brake short of a page reload).
 // Spec section 7.2.
 
 import { useRef, useState, type KeyboardEvent } from "react";
-import { Send, Loader2 } from "lucide-react";
+import { Send, Loader2, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -10,9 +14,12 @@ interface Props {
   onSend: (text: string) => void;
   disabled?: boolean;
   sending?: boolean;
+  /** The agent chain is running — the send slot becomes Stop. */
+  stoppable?: boolean;
+  onStop?: () => void;
 }
 
-export function ChatInput({ onSend, disabled, sending }: Props) {
+export function ChatInput({ onSend, disabled, sending, stoppable, onStop }: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -57,14 +64,27 @@ export function ChatInput({ onSend, disabled, sending }: Props) {
           "disabled:cursor-not-allowed disabled:opacity-50",
         )}
       />
-      <Button type="submit" size="icon" disabled={!value.trim() || sending}>
-        {sending ? (
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-        ) : (
-          <Send className="h-4 w-4" aria-hidden="true" />
-        )}
-        <span className="sr-only">Send message</span>
-      </Button>
+      {stoppable && onStop ? (
+        <Button
+          type="button"
+          size="icon"
+          variant="destructive"
+          onClick={onStop}
+          title="Stop the agent"
+        >
+          <Square className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+          <span className="sr-only">Stop the agent</span>
+        </Button>
+      ) : (
+        <Button type="submit" size="icon" disabled={!value.trim() || sending}>
+          {sending ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Send className="h-4 w-4" aria-hidden="true" />
+          )}
+          <span className="sr-only">Send message</span>
+        </Button>
+      )}
     </form>
   );
 }

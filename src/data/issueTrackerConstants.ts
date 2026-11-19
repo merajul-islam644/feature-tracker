@@ -60,7 +60,7 @@ export const mockInitialChat: ChatMessage[] = [
     id: "msg-seed-1",
     role: "assistant",
     content:
-      "Hello! I'm the AI verification assistant. I can see your current targets, scope, and open issues — ask me anything, or tell me to make a change and I'll ask for your permission first.",
+      "Hello! I'm the AI assistant. I can see your targets, scope, and open issues, and I can build and edit code in your workspace. Routine actions (reading, writing files, installing packages) run right away — I only ask before anything destructive or shared. Tell me what to do.",
     timestamp: new Date().toISOString(),
   },
 ];

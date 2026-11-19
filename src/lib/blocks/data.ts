@@ -2068,7 +2068,13 @@ export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
   fields: ["title", "description", "steps", "status", "stack", "featureId", "envSlug", "environmentId", "clonedFromFlowId", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 export const chatMessagesCollection = blocksClient.data.collection<CloudChatMessage>("ChatMessage", {
-  fields: ["sessionId", "role", "content", "actionsJson", "CreatedDate", "LastUpdatedDate"],
+  // `CreatedBy` MUST be selected: useChatHistory / useChatSessions /
+  // delete / rename all filter with `createdByFilter(userId)`, and the
+  // gateway silently drops any filter clause whose field is missing from
+  // this selector — the whole thread came back empty after a reload
+  // (history + session list zero rows) while the writes themselves
+  // succeeded. Same lesson as the Flow / DirectMessage selectors above.
+  fields: ["sessionId", "role", "content", "actionsJson", "CreatedBy", "CreatedDate", "LastUpdatedDate"],
 });
 // `senderId` / `recipientId` MUST both be in the selector: the inbox and
 // outbox reads filter on them, and the gateway drops filter clauses whose

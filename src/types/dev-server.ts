@@ -28,6 +28,11 @@ export interface DevServerRecord {
   id: string;
   workspaceId: string;
   port: number;
+  /** Port the server ACTUALLY bound — vite bumps busy ports silently
+   *  ("Port 5173 is in use, trying another one..."). Set by the
+   *  backend's stdout watcher; readiness + the chat start-flow report
+   *  against this so a healthy server is never misread as FAILED. */
+  actualPort?: number;
   status: DevServerStatus;
   command: string;
   args: string[];

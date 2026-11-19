@@ -20,8 +20,10 @@ export function GlobalChatAssistant() {
     runActivityLog,
     sendingMessage,
     aiRetryStatus,
+    chatActivity,
     sendMessage,
     applyChatAction,
+    requestStopAgent,
     sessions,
     sessionsLoading,
     currentSessionId,
@@ -29,6 +31,7 @@ export function GlobalChatAssistant() {
     switchSession,
     deleteSession,
     renameSession,
+    assistantOpen,
     setAssistantOpen,
   } = useIssueTrackerStore();
 
@@ -44,12 +47,15 @@ export function GlobalChatAssistant() {
 
   return (
     <ChatLauncher
+      defaultOpen={assistantOpen}
       onOpenChange={setAssistantOpen}
       messages={chat}
       sending={sendingMessage}
       retryStatus={aiRetryStatus}
+      chatActivity={chatActivity}
       onSend={sendMessage}
       onAction={applyChatAction}
+      onStop={requestStopAgent}
       targets={targets}
       activityLog={runActivityLog}
       runActive={run.status === "running"}

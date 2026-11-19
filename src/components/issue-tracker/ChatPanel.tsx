@@ -3,7 +3,7 @@
 // controls. Messages: user / assistant / tool / activity variants per §9.3.
 // Action chips + suggested prompts grid + input bar per §9.4–§9.6.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Bot,
   CheckCircle2,
@@ -13,6 +13,8 @@ import {
   MessageSquarePlus,
   Minus,
   Pencil,
+  ShieldCheck,
+  Square,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,6 +24,7 @@ import { ChatInput } from "./ChatInput";
 import { SuggestedPrompts } from "./SuggestedPrompts";
 import { ChatHistorySheet } from "./ChatHistorySheet";
 import type {
+  ChatActivity,
   ChatMessage as ChatMessageT,
   ChatSessionSummary,
   RunActivityLine,
@@ -32,7 +35,11 @@ interface Props {
   messages: ChatMessageT[];
   sending: boolean;
   retryStatus?: string | null;
+  /** Live agent phase — "Thinking…"/"Running npm install…". Null idle. */
+  chatActivity?: ChatActivity | null;
   onSend: (text: string) => void;
+  /** Cancel the running agent chain (auto-continuation + queued auto-runs). */
+  onStop?: () => void;
   onAction?: (action: NonNullable<ChatMessageT["actions"]>[number]) => void;
   onNewSession?: () => void;
   onSelectSession?: (sessionId: string) => void;
@@ -61,7 +68,9 @@ export function ChatPanel({
   messages,
   sending,
   retryStatus = null,
+  chatActivity = null,
   onSend,
+  onStop,
   onAction,
   onNewSession,
   onSelectSession,
@@ -86,9 +95,45 @@ export function ChatPanel({
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, activityLog.length, sending]);
+  }, [messages.length, activityLog.length, sending, chatActivity]);
+
+  // Elapsed-seconds ticker for the live status line — a status that sits
+  // frozen on "Deleting node_modules…" for minutes reads as a hang; a
+  // live counter makes the silence legible (the delete of a real
+  // project takes 1-3 min with no per-file feedback). Resets to 0
+  // whenever a NEW activity object arrives — every step sets a fresh
+  // {phase, detail}, so the counter tracks per-step duration.
+  const [elapsed, setElapsed] = useState(0);
+  const lastActivityRef = useRef<ChatActivity | null>(null);
+  useEffect(() => {
+    if (lastActivityRef.current !== chatActivity) {
+      lastActivityRef.current = chatActivity;
+      setElapsed(0);
+    }
+    if (!chatActivity && !sending) return;
+    const timer = window.setInterval(
+      () => setElapsed((s) => s + 1),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [chatActivity, sending]);
 
   const isEmpty = messages.length <= 1; // just the greeting
+
+  // Un-approved permission cards = the agent is parked, not dead. The
+  // chain goes idle BY DESIGN while a card waits (nothing mutates until
+  // the user clicks Allow) — but a blank panel with an enabled input
+  // read as "crashed" (observed live 2026-10-09: the user couldn't tell
+  // a waiting run from a dead one). This line makes the parked state
+  // explicit; it disappears the moment every card is answered.
+  const pendingAllowCount = messages.reduce(
+    (n, m) =>
+      n +
+      (m.actions?.filter(
+        (a) => a.kind === "request_tool_permission" && a.label === "Allow",
+      ).length ?? 0),
+    0,
+  );
 
   const currentSessionName =
     sessions.find((s) => s.sessionId === currentSessionId)?.title ??
@@ -176,7 +221,12 @@ export function ChatPanel({
             pickerDisabled={sending}
           />
         ))}
-        {sending && (
+        {/* Live agent status — the Claude-Code-style phase line. Renders
+            during tool execution too, not just while the model reply is
+            streaming (sending is false between turns, which is exactly
+            when tools run). Executing shows WHAT is running; thinking
+            shows the classic bouncing dots with a label. */}
+        {(sending || chatActivity) && (
           <div className="flex w-full items-end gap-2" aria-live="polite">
             <div
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary"
@@ -185,16 +235,60 @@ export function ChatPanel({
               <Bot className="h-3.5 w-3.5" />
             </div>
             <div
-              className="flex items-center gap-1.5 rounded-md border border-border bg-surface-muted px-3.5 py-2.5"
-              aria-label="Assistant is thinking"
+              className="flex items-center gap-2 rounded-md border border-border bg-surface-muted px-3.5 py-2.5"
+              aria-label={
+                chatActivity?.phase === "executing"
+                  ? "Assistant is executing a tool"
+                  : "Assistant is thinking"
+              }
             >
-              {[0, 150, 300].map((delay) => (
-                <span
-                  key={delay}
-                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60"
-                  style={{ animationDelay: `${delay}ms` }}
-                />
-              ))}
+              {chatActivity?.phase === "executing" ? (
+                <>
+                  <Loader2
+                    className="h-3.5 w-3.5 animate-spin text-primary"
+                    aria-hidden="true"
+                  />
+                  <span className="text-xs font-medium text-foreground">
+                    {chatActivity.detail ?? "Working…"}
+                    {elapsed >= 2 ? (
+                      <span className="ml-1.5 font-normal text-muted-foreground">
+                        {elapsed}s
+                      </span>
+                    ) : null}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Thinking…
+                    {elapsed >= 2 ? ` · ${elapsed}s` : ""}
+                  </span>
+                  {[0, 150, 300].map((delay) => (
+                    <span
+                      key={delay}
+                      className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60"
+                      style={{ animationDelay: `${delay}ms` }}
+                    />
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+        {!sending && !chatActivity && pendingAllowCount > 0 && (
+          <div className="flex w-full items-end gap-2" aria-live="polite">
+            <div
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400"
+              aria-hidden="true"
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+            </div>
+            <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3.5 py-2.5">
+              <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                Waiting for your approval — {pendingAllowCount}{" "}
+                {pendingAllowCount === 1 ? "action" : "actions"} parked until
+                you click Allow.
+              </span>
             </div>
           </div>
         )}
@@ -245,7 +339,13 @@ export function ChatPanel({
         </p>
       )}
 
-      <ChatInput onSend={onSend} disabled={sending} sending={sending} />
+      <ChatInput
+        onSend={onSend}
+        disabled={sending}
+        sending={sending}
+        stoppable={Boolean(onStop) && (sending || Boolean(chatActivity))}
+        onStop={onStop}
+      />
 
       <ChatHistorySheet
         open={historyOpen}
