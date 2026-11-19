@@ -85,6 +85,12 @@ COPY mcp-server/package.json mcp-server/package-lock.json* /app/mcp-server/
 COPY mcp-server/src /app/mcp-server/src
 COPY mcp-server/tsconfig.json /app/mcp-server/tsconfig.json
 WORKDIR /app/mcp-server
+# node-pty (PTY backend for the /panel terminal) ships no prebuilt musl
+# binary, so its install script falls back to `node-gyp rebuild` — which
+# needs python3 + make + g++ and none of those exist on node:20-alpine.
+# Install them here, immediately before the mcp-server install, so the
+# frontend dep layer above stays cacheable (apk only busts this layer).
+RUN apk add --no-cache python3 make g++
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 WORKDIR /app
 
