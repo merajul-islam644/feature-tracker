@@ -9,15 +9,22 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { SidebarTrigger } from "@/components/ui/sidebar";
+import { useSidebar } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/hooks/useAuth";
+import { NavToggle } from "./AppSidebar";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { NotificationBell } from "./NotificationBell";
+import { OrgSwitcher } from "./OrgSwitcher";
 import { ThemeToggler } from "./ThemeToggler";
 
 export function Topbar() {
   const { currentUser, logout } = useAuth();
+  // Collapsed-mode toggle slot — when the icon rail can't fit the
+  // sidebar's own header toggle, the expand control moves here (the
+  // topbar's left edge). Hidden entirely in expanded mode where the
+  // sidebar header owns the control.
+  const { state } = useSidebar();
   const navigate = useNavigate();
 
   if (!currentUser) return null;
@@ -29,24 +36,9 @@ export function Topbar() {
 
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-border bg-surface px-4 md:px-6">
-      {/* Left: hamburger toggle + brand */}
+      {/* Left: collapsed-mode expand control (red-marked slot) + brand */}
       <div className="flex items-center gap-2">
-        {/* <SidebarTrigger
-          aria-label="Toggle sidebar"
-          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-        />
-        <Separator
-          orientation="vertical"
-          className="mx-1 hidden h-5 md:block"
-        />
-        <Link
-          to="/dashboard"
-          className="hidden items-center gap-2 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-        >
-          <span className="text-sm font-semibold text-foreground">
-            Feature Tracker
-          </span>
-        </Link> */}
+        {state === "collapsed" && <NavToggle />}
       </div>
 
       {/* Right: utility icons + profile avatar */}
@@ -57,6 +49,11 @@ export function Topbar() {
               the rest of the utility chrome — language, notifications,
               theme — and intentionally drops the speaker icon to avoid
               two entry points for the same surface. */}
+          {/* Org context switcher leads the utility chrome (user
+              directive: left of the language switcher) — it's the
+              broadest context control, so it sits first; renders
+              nothing when the user has no org memberships. */}
+          <OrgSwitcher />
           <LanguageSwitcher />
           <NotificationBell />
           <ThemeToggler />

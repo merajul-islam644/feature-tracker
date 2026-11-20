@@ -620,17 +620,19 @@ export function FeatureItem({
           <Separator className="mb-3" />
           {visibleFlowList.length === 0 ? (
             // Same inverted policy as the "+ Add another flow" button
-            // above: only render the Add Flow CTA for TESTERS on the
-            // dev source env. Managers (curators) and developers
-            // (feature authors) see the empty state without the CTA —
-            // managers author flows via chat tools / kebab create
-            // actions, developers don't author flows inline. Every role
-            // on non-dev envs also sees the read-only empty state
-            // because flows only get authored under dev. Mirroring the
-            // inline button's `!readOnly && isTester` keeps both
+            // above: render the Add Flow CTA for TESTERS and MANAGERS
+            // on the dev source env. (User directive 2026-11-20: the
+            // empty-state CTA opened up for managers — they previously
+            // saw a bare empty state and had to author flows through
+            // chat tools only.) Developers (feature authors) still see
+            // the empty state without the CTA — they don't author
+            // flows inline. Every role on non-dev envs also sees the
+            // read-only empty state because flows only get authored
+            // under dev. Mirroring the inline button's
+            // `!readOnly && (isTester || isManager)` keeps both
             // surfaces in sync: empty or non-empty, the rule is the
             // same.
-            !readOnly && isTester ? (
+            !readOnly && (isTester || isManager) ? (
               <FlowEmptyState onAdd={() => setAddFlowOpen(true)} />
             ) : (
               <FlowEmptyState />
@@ -725,22 +727,22 @@ export function FeatureItem({
                   />
                 </li>
               ))}
-              {!readOnly && isTester && (
+              {!readOnly && (isTester || isManager) && (
                 <li className="pt-2">
-                  {/* "+ Add another flow" button — TESTER-only policy
-                      on the dev source env. Managers (curators) and
-                      developers (feature authors) don't author flows
-                      inline — managers curate via chat tools / kebab
-                      create actions, developers don't author flows at
-                      all — so the inline button is hidden for both.
-                      Mirrors the empty-state "Add Flow" CTA directly
-                      above (same `!readOnly && isTester` gate) and
-                      the project-level header "Add Flow" button in
-                      `ProjectDetailPage`. The dev-only `readOnly`
-                      check still applies so non-dev envs stay
-                      view-only. `useCreateFlow` itself has no role
-                      guard — the chat tools call it on behalf of any
-                      role — so the gate here is UI enforcement only. */}
+                  {/* "+ Add another flow" button — TESTER + MANAGER
+                      policy on the dev source env. (User directive
+                      2026-11-20: managers joined the inline flow
+                      authoring surfaces — previously tester-only.)
+                      Developers (feature authors) don't author flows
+                      at all, so the inline button stays hidden for
+                      them. Mirrors the empty-state "Add Flow" CTA
+                      directly above (same gate) and the project-level
+                      header "Add Flow" button in `ProjectDetailPage`.
+                      The dev-only `readOnly` check still applies so
+                      non-dev envs stay view-only. `useCreateFlow`
+                      itself has no role guard — the chat tools call it
+                      on behalf of any role — so the gate here is UI
+                      enforcement only. */}
                   <Button
                     variant="ghost"
                     size="sm"

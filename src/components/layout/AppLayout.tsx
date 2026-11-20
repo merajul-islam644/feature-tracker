@@ -1,5 +1,6 @@
+import { useEffect } from "react";
 import { Outlet } from "react-router-dom";
-import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
+import { SidebarProvider, SidebarInset, useSidebar } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "./AppSidebar";
 import { Topbar } from "./Topbar";
@@ -46,7 +47,11 @@ export function AppLayout() {
           silently edit the wrong row. */}
       <EnvSync />
       <TooltipProvider delayDuration={150}>
-        <SidebarProvider>
+        <SidebarProvider defaultOpen={readPersistedSidebarOpen()}>
+          {/* Writes the collapsed/expanded choice to localStorage on
+              every change — without this a refresh always reopened the
+              sidebar (SidebarProvider starts from defaultOpen alone). */}
+          <SidebarStatePersistence />
           <AppSidebar />
           <SidebarInset>
             <Topbar />
@@ -84,4 +89,45 @@ export function AppLayout() {
     </ExtensionsProvider>
     </ActiveEnvProvider>
   );
+}
+
+// --- Sidebar collapsed-state persistence -------------------------------------
+//
+// `SidebarProvider` starts every mount from `defaultOpen`, so a refresh
+// after minimizing always re-expanded the sidebar. Two pieces fix it:
+//
+//   1. `readPersistedSidebarOpen()` — runs once at provider creation
+//      (props must not change after mount), reading the last choice
+//      from localStorage.
+//   2. `<SidebarStatePersistence />` — a no-UI child inside the
+//      provider that watches `useSidebar().state` and writes the
+//      choice back on every toggle (header button, topbar button,
+//      rail click — all funnels through the same state).
+//
+// localStorage is the right store here: per-browser UI preference,
+// nothing to share, and a cleared store just means "default open".
+
+const SIDEBAR_OPEN_KEY = "ft-sidebar-open";
+
+function readPersistedSidebarOpen(): boolean {
+  try {
+    const v = localStorage.getItem(SIDEBAR_OPEN_KEY);
+    if (v === "false") return false;
+    if (v === "true") return true;
+  } catch {
+    // storage unavailable (private mode, cleared data) — default open.
+  }
+  return true;
+}
+
+function SidebarStatePersistence() {
+  const { state } = useSidebar();
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_OPEN_KEY, state === "expanded" ? "true" : "false");
+    } catch {
+      // non-fatal — the preference just won't survive refreshes.
+    }
+  }, [state]);
+  return null;
 }
