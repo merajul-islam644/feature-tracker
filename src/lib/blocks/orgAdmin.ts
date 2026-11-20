@@ -18,7 +18,11 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthContext } from "@/components/blocks/AuthProvider";
-import { blocksClient } from "./client";
+import {
+  applyAuthOverlay,
+  blocksClient,
+  getOverlayRefreshToken,
+} from "./client";
 
 // --- Types -------------------------------------------------------------------
 
@@ -535,10 +539,17 @@ export interface MyOrg {
  * The signed-in user's own organization memberships
  * (`organizations.my`). The topbar switcher lists these; an empty
  * result simply hides the switcher.
+ *
+ * Gated on `status === "authenticated"` — `organizations.my()` fires
+ * before the session resolves returns an auth failure that looks
+ * exactly like "no orgs" (the switcher would silently vanish), so the
+ * query must wait until AuthProvider has confirmed the session.
  */
 export function useMyOrganizations() {
+  const { status } = useAuthContext();
   return useQuery<MyOrg[]>({
     queryKey: ["iam-orgs-my"] as const,
+    enabled: status === "authenticated",
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     queryFn: async () => {
@@ -569,31 +580,93 @@ export function useActiveOrgId(): string {
 
 /**
  * Switch the calling session's active organization
- * (`auth.switchOrganization` → POST /iam/v4/auth/switch-org). In this
- * app's cookie-only flow IAM rotates the session cookie server-side;
- * the caller MUST follow a successful switch with
- * `AuthProvider.refresh()` so claims + roles re-resolve against the
- * new org. Fails loudly when the tenant has multi-org disabled — the
- * API error message is surfaced to the toast.
+ * (`auth.switchOrganization` → POST /iam/v4/auth/switch-org). Per the SDK
+ * contract the response is a fresh `BlocksAuthResponse` carrying tokens for
+ * the NEW org context — the SDK never stores tokens, so this app must apply
+ * them itself (`applyAuthOverlay`); without that, subsequent calls would
+ * keep riding the old-org session no matter what IAM returned. The caller
+ * MUST follow a successful switch with `AuthProvider.refresh()` so claims +
+ * roles re-resolve against the new context. Failures surface IAM's actual
+ * error message to the toast.
  */
 export function useSwitchOrganization() {
   const qc = useQueryClient();
+  const { refresh } = useAuthContext();
   return useMutation<void, Error, { organizationId: string }>({
     mutationFn: async ({ organizationId }) => {
+      // VERIFIED LIVE (2026-11-20): IAM's switch-org rejects the SDK's
+      // camelCase field with 400 `{"error":"invalid_request",
+      // "error_description":"organization_id is required"}` — its real
+      // contract spells both fields snake_case. Send both spellings so
+      // either reader finds them.
+      const refreshToken = getOverlayRefreshToken();
       const res = (await blocksClient.auth.switchOrganization({
         organizationId,
-      })) as { isSuccess?: boolean; message?: string };
-      if (res && res.isSuccess === false) {
-        throw new Error(res.message || "IAM rejected the organization switch.");
+        organization_id: organizationId,
+        refreshToken,
+        refresh_token: refreshToken,
+      })) as Record<string, unknown>;
+      // The SDK's `json()` never throws on non-2xx (it returns the parsed
+      // body), and IAM error envelopes don't reliably carry `isSuccess: false`
+      // — so classify defensively before declaring victory:
+      //   explicit error markers  -> failure, surface IAM's message;
+      //   tokens in the response  -> success, apply the overlay session;
+      //   neither (e.g. bare `{ isSuccess: true }`) -> trust IAM — the cookie
+      //   session was rotated server-side and nothing needs applying.
+      const err = res as {
+        isSuccess?: boolean;
+        message?: string;
+        errors?: unknown;
+        error?: unknown;
+        error_description?: unknown;
+      };
+      const failed =
+        err.isSuccess === false ||
+        err.errors != null ||
+        (typeof err.error === "string" && err.error.length > 0);
+      if (failed) {
+        const message =
+          err.message ||
+          firstMessage(err) ||
+          "IAM rejected the organization switch.";
+        throw new Error(message);
       }
+      applyAuthOverlay(res);
     },
-    onSuccess: () => {
-      // Active-org change alters every org-scoped read the session
-      // makes (iam.me roles, org members) — flush the org caches so
-      // nothing stale survives the switch.
-      qc.invalidateQueries({ queryKey: ["iam-orgs-my"] });
-      qc.invalidateQueries({ queryKey: ["iam-org-members"] });
-      qc.invalidateQueries({ queryKey: ["iam-users-admin"] });
+    onSuccess: async () => {
+      // ORDERING IS THE WHOLE POINT: claims (and the module-level active
+      // org id they feed `getActiveOrgId()`) must re-resolve BEFORE the
+      // cache flush. Verified live 2026-11-21 — invalidating first sent
+      // the refetches out with the PREVIOUS org's filter, so the UI
+      // showed the old org's data until the next poll. refresh() re-pulls
+      // /auth/me under the rotated cookie, updating activeOrgId; only
+      // then is it safe to invalidate every query.
+      await refresh();
+      qc.invalidateQueries();
     },
   });
+}
+
+/** Best human-readable message out of an IAM error envelope, any shape. */
+function firstMessage(err: {
+  message?: string;
+  error?: unknown;
+  error_description?: unknown;
+  errors?: unknown;
+}): string | undefined {
+  if (typeof err.error_description === "string" && err.error_description) {
+    return err.error_description;
+  }
+  if (typeof err.error === "string" && err.error) return err.error;
+  const errors = err.errors;
+  if (errors && typeof errors === "object") {
+    for (const value of Object.values(errors as Record<string, unknown>)) {
+      if (typeof value === "string" && value) return value;
+      if (value && typeof value === "object") {
+        const msg = (value as Record<string, unknown>).message;
+        if (typeof msg === "string" && msg) return msg;
+      }
+    }
+  }
+  return undefined;
 }

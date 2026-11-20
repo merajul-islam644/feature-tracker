@@ -20,6 +20,7 @@ import {
   logout as sdkLogout,
   startLogin as sdkStartLogin,
 } from "@/lib/blocks/auth";
+import { setActiveOrgId } from "@/lib/blocks/orgContext";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -66,6 +67,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const run = (async () => {
       const next = await fetchSessionClaims();
       setClaims(next);
+      // Mirror the active org into the non-React module the org-scoped
+      // data reads consult — must happen BEFORE `authenticated` renders
+      // any protected page so the first reads are already scoped.
+      setActiveOrgId(next ? next.org_id : "");
       setStatus(next ? "authenticated" : "unauthenticated");
       // Roles ride alongside the session check. Only fire the IAM
       // lookup when there's a real session — an unauthenticated poll
@@ -109,6 +114,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await sdkLogout();
     setClaims(null);
+    setActiveOrgId("");
     setRoles([]);
     setStatus("unauthenticated");
   }, []);

@@ -4,7 +4,13 @@
 // UI code consumes the local shapes here so renaming a cloud field never
 // ripples into every page.
 
+import type {
+  BlocksDataCollection,
+  BlocksDataCollectionOptions,
+  BlocksDataListOptions,
+} from "@seliseblocks/client";
 import { blocksClient } from "./client";
+import { getActiveOrgId } from "./orgContext";
 
 // --- Raw cloud record shapes (only the fields we read or set) --------------
 
@@ -2037,10 +2043,68 @@ export function unwrapPaged<T>(raw: unknown): { items: T[]; totalCount: number }
 
 // --- Collection accessors ---------------------------------------------------
 
-export const projectsCollection = blocksClient.data.collection<CloudProject>("Project", {
+// --- Organization scoping ----------------------------------------------------
+//
+// Every entity row carries the platform-managed `OrganizationId` system
+// field — the gateway stamps it from the session's active org on insert
+// (verified live 2026-11-21: all pre-existing rows read "default", and a
+// DynamicQueryInput filter on the column matches exactly). Org-scoped
+// collections therefore (a) select the column — the gateway silently drops
+// filter clauses on unselected fields, the recurring selector lesson — and
+// (b) merge an equality filter into EVERY list call, so a switched session
+// only sees its own org's rows without each call site remembering to.
+// `useSwitchOrganization` blanket-invalidates the query cache on switch, so
+// every list refetches under the new org immediately.
+//
+// Scoped here (business artifacts that belong to an org): Project, Feature,
+// Flow, Environment, TestCase, FlowComment, Announcement, and the Issue
+// Tracker set. Deliberately NOT scoped (people-scoped surfaces that must
+// stay visible across orgs): ChatMessage, DirectMessage, CallSignal,
+// Notification, MailMessage/MailAddress, UserProfile, UserAiConfig,
+// UserAvatarConfig, MemberProject, UserPreference, HiddenAnnouncement,
+// UserNote, PlaywrightScript. `get(itemId)` stays unscoped too — ids are
+// GUIDs, lists are filtered, so the UI can't navigate to another org's row.
+
+function orgMergedFilter(
+  filter: BlocksDataListOptions["filter"],
+): BlocksDataListOptions["filter"] {
+  const org = getActiveOrgId();
+  // Unknown org (pre-auth boot) — keep the caller's filter untouched
+  // rather than filtering every row away.
+  if (!org) return filter;
+  if (typeof filter === "string") {
+    try {
+      const parsed = JSON.parse(filter) as Record<string, unknown>;
+      return JSON.stringify({ ...parsed, OrganizationId: org });
+    } catch {
+      return filter;
+    }
+  }
+  return { ...(filter ?? {}), OrganizationId: org };
+}
+
+function scopedCollection<T>(
+  schemaName: string,
+  options?: BlocksDataCollectionOptions,
+): BlocksDataCollection<T> {
+  const inner = blocksClient.data.collection<T>(schemaName, {
+    ...options,
+    fields: [...(options?.fields ?? []), "OrganizationId"],
+  });
+  return {
+    ...inner,
+    list: (listOptions) =>
+      inner.list({
+        ...listOptions,
+        filter: orgMergedFilter(listOptions?.filter),
+      }),
+  };
+}
+
+export const projectsCollection = scopedCollection<CloudProject>("Project", {
   fields: ["name", "description", "status", "color", "customEnvs", "envLabelOverrides", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
-export const featuresCollection = blocksClient.data.collection<CloudFeature>("Feature", {
+export const featuresCollection = scopedCollection<CloudFeature>("Feature", {
   // `CreatedBy` / `LastUpdatedBy` are platform-managed audit fields — not
   // declared in the Feature schema — but they ARE returned by the gateway
   // if listed in the selector. The Feature row's details drawer surfaces
@@ -2055,7 +2119,7 @@ export const featuresCollection = blocksClient.data.collection<CloudFeature>("Fe
   // replacements for the old `developerId` / `qaId` singular fields.
   fields: ["title", "description", "status", "priority", "projectId", "tags", "envSlug", "environmentId", "clonedFromFeatureId", "developerIds", "qaIds", "githubLink", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
-export const flowsCollection = blocksClient.data.collection<CloudFlow>("Flow", {
+export const flowsCollection = scopedCollection<CloudFlow>("Flow", {
   // `CreatedBy` is included in the field list so the per-user filter at
   // sibling-lookup time can match against it. The Flow schema doesn't
   // declare a custom `CreatedBy` — it comes from the platform — but the
@@ -2102,7 +2166,7 @@ export const callSignalsCollection = blocksClient.data.collection<CloudCallSigna
 });
 // `authorId` in the selector for the same filter-gating reason as the DM
 // columns; `CreatedBy` rides along for the audit-style "posted by" render.
-export const announcementsCollection = blocksClient.data.collection<CloudAnnouncement>("Announcement", {
+export const announcementsCollection = scopedCollection<CloudAnnouncement>("Announcement", {
   fields: ["authorId", "content", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be in the selector — the inbox reads with
@@ -2202,7 +2266,7 @@ export function inboundAddressFor(
 // reads it; an unselected column would silently arrive as `undefined`
 // and the comment header would lose that field's display value
 // (matching the same pattern as `notificationsCollection` above).
-export const flowCommentsCollection = blocksClient.data.collection<CloudFlowComment>("FlowComment", {
+export const flowCommentsCollection = scopedCollection<CloudFlowComment>("FlowComment", {
   fields: ["flowId", "parentId", "authorId", "authorName", "authorEmail", "authorAvatar", "content", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be selected: the read path filters on it when looking up the
@@ -2255,7 +2319,7 @@ export const memberProjectsCollection = blocksClient.data.collection<CloudMember
 // unselected filter columns — same lesson as every other env-scoped
 // collection. `bindingsJson` rides along because `toSecretBinding` parses
 // it; `updatedBy` is selected so the audit column round-trips.
-export const secretBindingsCollection = blocksClient.data.collection<CloudSecretBinding>("SecretBinding", {
+export const secretBindingsCollection = scopedCollection<CloudSecretBinding>("SecretBinding", {
   fields: ["projectId", "envSlug", "environmentId", "bindingsJson", "updatedBy", "CreatedBy", "CreatedDate", "LastUpdatedBy", "LastUpdatedDate"],
 });
 // `userId` MUST be selected — `useUserPreference` reads + upserts by
@@ -2313,7 +2377,7 @@ export const playwrightScriptsCollection = blocksClient.data.collection<CloudPla
 // the JSON-encoded `reproductionStepsJson` / `evidenceJson` ride along
 // even though the UI only consumes them through the adapter.
 
-export const verificationTargetsCollection = blocksClient.data.collection<CloudVerificationTarget>(
+export const verificationTargetsCollection = scopedCollection<CloudVerificationTarget>(
   "VerificationTarget",
   {
     fields: [
@@ -2343,7 +2407,7 @@ export const verificationTargetsCollection = blocksClient.data.collection<CloudV
     ],
   },
 );
-export const secretsCollection = blocksClient.data.collection<CloudSecret>(
+export const secretsCollection = scopedCollection<CloudSecret>(
   "Secret",
   {
     fields: [
@@ -2362,7 +2426,7 @@ export const secretsCollection = blocksClient.data.collection<CloudSecret>(
     ],
   },
 );
-export const issuesCollection = blocksClient.data.collection<CloudIssue>(
+export const issuesCollection = scopedCollection<CloudIssue>(
   "Issue",
   {
     fields: [
@@ -2403,7 +2467,7 @@ export const issuesCollection = blocksClient.data.collection<CloudIssue>(
     ],
   },
 );
-export const testCasesCollection = blocksClient.data.collection<CloudTestCase>(
+export const testCasesCollection = scopedCollection<CloudTestCase>(
   "TestCase",
   {
     // Field list mirrors the schema in
@@ -2504,7 +2568,7 @@ export function toEnvironment(e: CloudEnvironment): Environment {
 // (the recurring selector-gating lesson). `slug` rides along as the
 // display/URL cache during the transition; `kind` + `order` drive the badge
 // and sort order.
-export const environmentsCollection = blocksClient.data.collection<CloudEnvironment>(
+export const environmentsCollection = scopedCollection<CloudEnvironment>(
   "Environment",
   {
     fields: [
@@ -2589,7 +2653,7 @@ export function toVerificationCheck(
 // with the flat `{ projectId, environmentId }` pair and unselected filter
 // columns are silently dropped by the gateway. `checkId` is the identity
 // the migration and the toggle hook match on.
-export const verificationChecksCollection = blocksClient.data.collection<CloudVerificationCheck>(
+export const verificationChecksCollection = scopedCollection<CloudVerificationCheck>(
   "VerificationCheck",
   {
     fields: [

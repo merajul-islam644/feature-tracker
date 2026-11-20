@@ -731,7 +731,17 @@ export function useRecentFeatures(limit = 5): UseQueryResult<Feature[]> {
   const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
-    queryKey: [...queryKeys.dashboard(userId), "features", limit] as const,
+    // `dataUpdatedAt` rides in the key so a re-resolved alive scope (e.g.
+    // after an org switch) yields a fresh key — without it, this queryFn
+    // would keep computing from a STALE closure scope even after the
+    // scope query refetched (verified live 2026-11-21: totals showed the
+    // previous org's zeros until this key change).
+    queryKey: [
+      ...queryKeys.dashboard(userId),
+      "features",
+      limit,
+      scopeQuery.dataUpdatedAt,
+    ] as const,
     enabled: Boolean(userId) && scopeQuery.data !== undefined,
     queryFn: async () => {
       const scope = scopeQuery.data;
@@ -757,7 +767,13 @@ export function useRecentFlows(limit = 5): UseQueryResult<Flow[]> {
   const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
-    queryKey: [...queryKeys.dashboard(userId), "flows", limit] as const,
+    // Scope stamp — see useRecentFeatures above.
+    queryKey: [
+      ...queryKeys.dashboard(userId),
+      "flows",
+      limit,
+      scopeQuery.dataUpdatedAt,
+    ] as const,
     enabled: Boolean(userId) && scopeQuery.data !== undefined,
     queryFn: async () => {
       const scope = scopeQuery.data;
@@ -796,7 +812,12 @@ export function useWorkspaceTotals(): UseQueryResult<{
   const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
-    queryKey: [...queryKeys.dashboard(userId), "totals"] as const,
+    // Scope stamp — see useRecentFeatures above.
+    queryKey: [
+      ...queryKeys.dashboard(userId),
+      "totals",
+      scopeQuery.dataUpdatedAt,
+    ] as const,
     enabled: Boolean(userId) && scopeQuery.data !== undefined,
     queryFn: async () => {
       const scope = scopeQuery.data;
@@ -923,7 +944,14 @@ export function useProjectsDevCounts(): UseQueryResult<
   const qc = useQueryClient();
   const scopeQuery = useAliveScope(userId);
   return useQuery({
-    queryKey: [...queryKeys.projects(userId), "devCounts"] as const,
+    // Scope stamp — see useRecentFeatures above (useAliveScope consumers
+    // must re-key on the scope's resolution or they compute from a stale
+    // closure after an org switch).
+    queryKey: [
+      ...queryKeys.projects(userId),
+      "devCounts",
+      scopeQuery.dataUpdatedAt,
+    ] as const,
     enabled: Boolean(userId) && (scopeQuery.isSuccess || scopeQuery.isError),
     queryFn: async () => {
       const scope = scopeQuery.data;
