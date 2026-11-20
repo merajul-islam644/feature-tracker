@@ -2,10 +2,11 @@
 //
 // Session-scoped self-service (NOT manager-gated): any member with more
 // than one org membership can switch their own active org via
-// `auth.switchOrganization`. The switch rotates the session cookie
-// server-side; afterwards `AuthProvider.refresh()` re-pulls claims +
-// roles so every org-scoped surface (menus, data reads) re-resolves
-// against the new context.
+// `auth.switchOrganization`. IAM answers with a fresh auth response for the
+// new org context — tokens are applied client-side (`applyAuthOverlay`) and
+// afterwards `AuthProvider.refresh()` re-pulls claims + roles so every
+// org-scoped surface (menus, data reads) re-resolves against the new
+// context.
 //
 // Behavior:
 //   - 0 orgs or the query failed → render nothing (silent — the
@@ -68,7 +69,8 @@ export function OrgSwitcher() {
         onSuccess: async () => {
           // Claims + roles must re-resolve against the new org before
           // the UI can be trusted — refresh() re-pulls /auth/me and
-          // iam.me() under the rotated cookie.
+          // iam.me() under the switched session (overlay bearer or
+          // rotated cookie, whichever IAM left in place).
           await refresh();
           const switched = orgs.find((o) => o.id === orgId);
           toast.success(
