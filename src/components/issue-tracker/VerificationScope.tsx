@@ -1,5 +1,6 @@
 // Verification Scope card (spec section 11) — pick which checks run during
-// verification. Recommended checks are pre-selected; users can opt in/out.
+// verification. Nothing is pre-selected (user directive, 2026-10-03):
+// every check starts unchecked and the user decides what runs.
 // The device picker sizes the run's browser context (viewport + touch) so
 // responsive layouts actually get exercised differently per preset.
 //
@@ -10,9 +11,9 @@
 // are rows too (source "custom") with inline add / edit / delete — no
 // more localStorage catalog, so the list follows the user across devices.
 //
-// `readOnly` is the non-tester hard gate: QA state, so manager/developer
-// see the matrix but can't flip it (the mutations throw for them too —
-// defense in depth).
+// `readOnly` is the hard gate for every role outside tester/manager:
+// QA state, so developer/viewer see the matrix but can't flip it (the
+// mutations throw for them too — defense in depth).
 
 import { useEffect, useState } from "react";
 import {
@@ -159,7 +160,7 @@ export function VerificationScope({
         </div>
         <ScopeGroup
           title="Recommended"
-          description="Enabled by default — the AI always runs these checks."
+          description="Suggested checks — check the ones you want the AI to run."
           checks={builtinRecommended}
           selected={selected}
           readOnly={readOnly}
@@ -184,8 +185,8 @@ export function VerificationScope({
         />
         {readOnly && (
           <p className="text-xs text-muted-foreground">
-            Only testers can change the verification scope for an
-            environment — the matrix above reflects the tester's setup.
+            Only testers and managers can change the verification scope for
+            an environment — the matrix above reflects their setup.
           </p>
         )}
       </CardContent>

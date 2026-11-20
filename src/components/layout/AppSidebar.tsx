@@ -10,6 +10,9 @@ import {
   Mail,
   Settings as SettingsIcon,
   Contact,
+  UserCog,
+  Building2,
+  Shield,
   NotebookPen,
   Globe,
   KeyRound,
@@ -69,6 +72,9 @@ export function AppSidebar() {
   // surface would be visual noise. The flag is consumed in the
   // flatMap below.
   const isDeveloper = useIsRole("developer");
+  // Manager-only rows (currently just Users) drop for every other
+  // role — see `managerOnly` on the NavItem type.
+  const isManager = useIsRole("manager");
 
   // Active env context — the source of truth for "which project's env
   // am I scoped to". The Features link below consumes this to build
@@ -139,6 +145,14 @@ export function AppSidebar() {
     //     highlight;
     //   - everything else uses === pathname match.
     activeMatch?: (pathname: string) => boolean;
+    // Manager-only surface — hidden for every other role. The Users
+    // page (`/users`) mutates IAM records (invite / roles / account
+    // state), so unlike `/members` (the everyone-visible directory)
+    // it only makes sense for the role that can act on the data. The
+    // page itself still guards its mutations at runtime, so a
+    // deep-link from a non-manager renders a read-only view rather
+    // than an escalation path.
+    managerOnly?: boolean;
     // Opt-in corner decoration: a radiating signal-wave ping anchored
     // at the icon's top-left corner (see the `signal-wave` keyframe in
     // tailwind.config.js). The Mail row uses it so the placeholder
@@ -188,8 +202,12 @@ export function AppSidebar() {
     },
     {
       kind: "link",
+      // The `/panel` route now hosts the VS Code-style workspace
+      // (see `components/workspace/WorkspacePage.tsx`). Sidebar
+      // gets a dedicated `menuLabel` key so translators don't have
+      // to re-translate the page's H1 to change the menu text.
       to: `${issueTrackerBase}/panel`,
-      label: t("issueTracker.panel.title", "Panel"),
+      label: t("issueTracker.workspace.menuLabel", "Workspace"),
       icon: Activity,
       envOnly: true,
     },
@@ -314,6 +332,36 @@ export function AppSidebar() {
     // stable per `t` and its members don't depend on env.
   }, [activeEnv, t, featuresLink, issueTrackerSurface]);
 
+  // IAM admin group (user directive 2026-11-20): the three identity
+  // surfaces get their own labeled sidebar group instead of floating
+  // in the global nav. Every row is manager-only, so the whole group
+  // renders only for managers (see the render gate below).
+  const iamNavItems: NavItem[] = useMemo(() => {
+    return [
+      {
+        kind: "link" as const,
+        to: "/users",
+        label: t("nav.users", "Users"),
+        icon: UserCog,
+        managerOnly: true,
+      },
+      {
+        kind: "link" as const,
+        to: "/organizations",
+        label: t("nav.organizations", "Organizations"),
+        icon: Building2,
+        managerOnly: true,
+      },
+      {
+        kind: "link" as const,
+        to: "/roles",
+        label: t("nav.roles", "Roles & Permissions"),
+        icon: Shield,
+        managerOnly: true,
+      },
+    ];
+  }, [t]);
+
   // Issue Tracker only exists inside a project environment — clicking
   // an env chip on a project card lands on `/projects/:id/:envSlug/features`,
   // and that's the only context where its data (targets / secrets /
@@ -354,26 +402,132 @@ export function AppSidebar() {
       location.pathname,
     );
 
+  // Shared nav filter — applies the SAME visibility rules to both
+  // groups (main nav + IAM group): manager-only gates first, then the
+  // on-env collapse, then the developer narrowing. Extracted so the
+  // IAM group can't drift from the main group's rules.
+  const filterNavItems = (items: NavItem[]): NavItem[] =>
+    items.filter((item) => {
+      // Manager-only rows never render for other roles, in either
+      // env state — the gate runs before the env branch so on-env
+      // collapse can't resurrect them.
+      if (item.managerOnly && !isManager) return false;
+      if (envContextActive) {
+        if (!item.envOnly) return false;
+        // Developer narrowing on env: keep rows that opt in for every
+        // role (`allRoles: true` — currently the Features link) and
+        // rows whose `devAllowKey` matches the developer surface
+        // ("issues"). Every other env-scoped row (Targets, Secrets,
+        // Scope, Panel, History) drops because they are
+        // QA/manager-driven.
+        if (
+          isDeveloper &&
+          item.kind === "link" &&
+          !item.allRoles &&
+          item.devAllowKey !== "issues"
+        ) {
+          return false;
+        }
+        return true;
+      }
+      return !item.envOnly;
+    });
+
+  // Shared nav renderer — one body for both groups so the row markup
+  // (icon tone, signal wave, active match) stays identical.
+  const renderNavItems = (items: NavItem[]) =>
+    items.map((item) => {
+      const Icon = item.icon;
+      // Custom active matcher wins when set — used by the
+      // Features link so it highlights on BOTH the env
+      // landing and the dedicated /features route. Default
+      // predicate applies for everything else:
+      //   - /projects and /notepad use startsWith for
+      //     parent-route highlight;
+      //   - everything else uses === pathname match.
+      const isActive = item.activeMatch
+        ? item.activeMatch(location.pathname)
+        : item.to === "/projects" || item.to === "/notepad"
+          ? location.pathname.startsWith(item.to)
+          : location.pathname === item.to;
+
+      return (
+        <SidebarMenuItem key={item.to}>
+          <SidebarMenuButton
+            asChild
+            tooltip={item.label}
+            isActive={isActive}
+          >
+            <NavLink to={item.to}>
+              <span className="relative inline-flex group-data-[collapsible=icon]:-mx-1">
+                {/* -mx-1 in the icon rail: the lucide icon renders at
+                    its default 24px while the collapsed button's
+                    content box is 16px (size-8 p-2) — without the
+                    negative margin the icon sits 4px right of the
+                    rail's center line. */}
+                <Icon
+                  aria-hidden="true"
+                  // Inactive icons render in a muted version of
+                  // the sidebar foreground — a neutral "default"
+                  // color that doesn't fight the user's chosen
+                  // accent. Active icons flip to the
+                  // contrasting foreground because the active
+                  // button paints its own background in
+                  // `--sidebar-accent`.
+                  className={
+                    isActive
+                      ? "text-sidebar-accent-foreground"
+                      : "text-sidebar-foreground/70"
+                  }
+                />
+                {item.signalWave && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute -left-1.5 -top-1.5 h-2.5 w-2.5 motion-reduce:hidden"
+                  >
+                    {/* Two staggered rings + a static origin
+                        dot — the radiating "signal wave".
+                        Rings scale 0.35→1.5 and fade on the
+                        `signal-wave` keyframe; the second
+                        ring trails the first by half a cycle
+                        so the ping reads continuous. */}
+                    <span className="absolute inset-0 rounded-full border-[1.5px] border-indigo-400 motion-safe:animate-signal-wave" />
+                    <span className="absolute inset-0 rounded-full border-[1.5px] border-indigo-400/70 motion-safe:animate-signal-wave [animation-delay:1.1s]" />
+                    <span className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-500" />
+                  </span>
+                )}
+              </span>
+              <span>{item.label}</span>
+            </NavLink>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      );
+    });
+
   return (
     <Sidebar collapsible="icon" variant="sidebar">
-      <SidebarHeader className="h-14 justify-center border-b border-sidebar-border">
+      {/* Brand + collapse toggle share the header row (user directive:
+          the toggle lives top-right beside the logo, not in the
+          Navigation label row). justify-between pins the brand left
+          and the toggle right; both center vertically in the 56px
+          bar. The brand's own text hides itself in the collapsed
+          state, so the toggle is the only thing beside the logo. */}
+      <SidebarHeader className="flex h-14 flex-row items-center justify-between border-b border-sidebar-border pl-2 pr-3">
         <BrandHeader />
+        {/* Hidden when collapsed — the 47px icon rail can't fit logo +
+            toggle side by side (the button overflowed past the rail
+            edge). In collapsed mode the toggle moves to the topbar's
+            left edge (see Topbar), which is the same affordance the
+            user marked. */}
+        <div className="group-data-[collapsible=icon]:hidden">
+          <NavToggle />
+        </div>
       </SidebarHeader>
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel
-            className={cn(
-              // Keep the label row itself visible in both states so the toggle
-              // icon stays clickable when the sidebar is collapsed.
-              "justify-between group-data-[collapsible=icon]:justify-center",
-              "group-data-[collapsible=icon]:opacity-100 group-data-[collapsible=icon]:mt-0",
-            )}
-          >
-            <span className="group-data-[collapsible=icon]:hidden">
-              {t("nav.navigation", "Navigation")}
-            </span>
-            <NavToggle />
+          <SidebarGroupLabel>
+            <span>{t("nav.navigation", "Navigation")}</span>
           </SidebarGroupLabel>
           <SidebarMenu>
             {/*
@@ -393,94 +547,38 @@ export function AppSidebar() {
               `devAllowKey` matches the developer surface ("issues").
               Features is kept (no narrowing — visible to all roles per
               the user's explicit requirement).
-            */}
-            {navItems
-              .filter((item) => {
-                if (envContextActive) {
-                  if (!item.envOnly) return false;
-                  // Developer narrowing on env: keep rows that opt in
-                  // for every role (`allRoles: true` — currently the
-                  // Features link) and rows whose `devAllowKey`
-                  // matches the developer surface ("issues"). Every
-                  // other env-scoped row (Targets, Secrets, Scope,
-                  // Panel, History) drops because they are
-                  // QA/manager-driven.
-                  if (
-                    isDeveloper &&
-                    item.kind === "link" &&
-                    !item.allRoles &&
-                    item.devAllowKey !== "issues"
-                  ) {
-                    return false;
-                  }
-                  return true;
-                }
-                return !item.envOnly;
-              })
-              .map((item) => {
-                const Icon = item.icon;
-                // Custom active matcher wins when set — used by the
-                // Features link so it highlights on BOTH the env
-                // landing and the dedicated /features route. Default
-                // predicate applies for everything else:
-                //   - /projects and /notepad use startsWith for
-                //     parent-route highlight;
-                //   - everything else uses === pathname match.
-                const isActive = item.activeMatch
-                  ? item.activeMatch(location.pathname)
-                  : item.to === "/projects" || item.to === "/notepad"
-                    ? location.pathname.startsWith(item.to)
-                    : location.pathname === item.to;
 
-                return (
-                  <SidebarMenuItem key={item.to}>
-                    <SidebarMenuButton
-                      asChild
-                      tooltip={item.label}
-                      isActive={isActive}
-                    >
-                      <NavLink to={item.to}>
-                        <span className="relative inline-flex">
-                          <Icon
-                            aria-hidden="true"
-                            // Inactive icons render in a muted version of
-                            // the sidebar foreground — a neutral "default"
-                            // color that doesn't fight the user's chosen
-                            // accent. Active icons flip to the
-                            // contrasting foreground because the active
-                            // button paints its own background in
-                            // `--sidebar-accent`.
-                            className={
-                              isActive
-                                ? "text-sidebar-accent-foreground"
-                                : "text-sidebar-foreground/70"
-                            }
-                          />
-                          {item.signalWave && (
-                            <span
-                              aria-hidden="true"
-                              className="pointer-events-none absolute -left-1.5 -top-1.5 h-2.5 w-2.5 motion-reduce:hidden"
-                            >
-                              {/* Two staggered rings + a static origin
-                                  dot — the radiating "signal wave".
-                                  Rings scale 0.35→1.5 and fade on the
-                                  `signal-wave` keyframe; the second
-                                  ring trails the first by half a cycle
-                                  so the ping reads continuous. */}
-                              <span className="absolute inset-0 rounded-full border-[1.5px] border-indigo-400 motion-safe:animate-signal-wave" />
-                              <span className="absolute inset-0 rounded-full border-[1.5px] border-indigo-400/70 motion-safe:animate-signal-wave [animation-delay:1.1s]" />
-                              <span className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-500" />
-                            </span>
-                          )}
-                        </span>
-                        <span>{item.label}</span>
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
+              Visibility rules live in the shared `filterNavItems` /
+              `renderNavItems` helpers above so both groups stay in
+              lockstep.
+            */}
+            {renderNavItems(filterNavItems(navItems))}
           </SidebarMenu>
         </SidebarGroup>
+
+        {/* IAM admin group — the three identity surfaces (Users /
+            Organizations / Roles & Permissions) under one labeled
+            group, mirroring how the "Navigation" label scopes the
+            global nav (user directive 2026-11-20). Every row is
+            manager-only, so the whole group — label included — is
+            gated on `isManager`; rendering an empty labeled group for
+            other roles would just be noise. In the collapsed state
+            the label hides entirely (there's no toggle living in this
+            row to keep visible, unlike the Navigation group). */}
+        {isManager && (
+          <SidebarGroup>
+            <SidebarGroupLabel
+              className={cn(
+                "group-data-[collapsible=icon]:hidden",
+              )}
+            >
+              {t("nav.iam", "IAM")}
+            </SidebarGroupLabel>
+            <SidebarMenu>
+              {renderNavItems(filterNavItems(iamNavItems))}
+            </SidebarMenu>
+          </SidebarGroup>
+        )}
       </SidebarContent>
 
       <SidebarFooter>
@@ -496,7 +594,7 @@ function BrandHeader() {
   return (
     <NavLink
       to="/dashboard"
-      className="flex items-center gap-2 rounded-md px-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+      className="flex items-center gap-2 rounded-md px-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
     >
       <div
         className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md"
@@ -567,10 +665,10 @@ function BrandHeader() {
   );
 }
 
-// Inline sidebar toggle that sits on the right of the "Navigation" group
-// label. Stays visible and clickable in both expanded and collapsed states
-// so the user can always toggle the sidebar from inside it.
-function NavToggle() {
+// Inline sidebar toggle — lives in the sidebar header when expanded
+// and in the Topbar's left edge when collapsed (exported for Topbar's
+// collapsed-mode slot).
+export function NavToggle() {
   const { state, toggleSidebar } = useSidebar();
   const t = useT();
   const collapsed = state === "collapsed";

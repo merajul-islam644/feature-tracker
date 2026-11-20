@@ -74,22 +74,28 @@ export function loadEntries(): EnvEntry[] {
     return [];
   }
   if (!raw) return [];
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter((item): item is EnvEntry =>
-          item && typeof item === "object" && typeof item.key === "string" && typeof item.value === "string"
-        )
-        .map((item) => ({ id: typeof item.id === "string" ? item.id : makeId(), key: item.key, value: item.value }));
-    }
+    parsed = JSON.parse(raw);
   } catch {
-    // fall through: legacy blob is a `.env` text dump -- import it.
+    // Not valid JSON — treat the raw string as a legacy `.env` text
+    // blob (pre-JSON-entries era) and import its lines.
+    const record = parseEnv(raw);
+    return Object.entries(record).map(([key, value]) => ({ id: makeId(), key, value }));
   }
-  // Legacy migration: parse the text into entries so users on the old
-  // format keep their values when they reload after this change.
-  const record = parseEnv(raw);
-  return Object.entries(record).map(([key, value]) => ({ id: makeId(), key, value }));
+  if (Array.isArray(parsed)) {
+    return parsed
+      .filter((item): item is EnvEntry =>
+        item && typeof item === "object" && typeof item.key === "string" && typeof item.value === "string"
+      )
+      .map((item) => ({ id: typeof item.id === "string" ? item.id : makeId(), key: item.key, value: item.value }));
+  }
+  // Parsed JSON but the wrong shape (object / number / null) — the
+  // value is structurally a JSON document, so it cannot also be a
+  // legacy `.env` text dump. Treat as corrupt and return empty
+  // rather than handing `parseEnv` a JSON string and silently
+  // producing an empty record.
+  return [];
 }
 
 /** Persist env entries. Silently ignores quota / private-mode failures. */

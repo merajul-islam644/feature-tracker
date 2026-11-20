@@ -35,11 +35,19 @@ import url from "node:url";
 import zlib from "node:zlib";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
+import { spawn } from "node:child_process";
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Config — read at module load. The Cloud Run / Kubernetes contract on the
-//  Blocks platform sets $PORT; VERIFY_BACKEND_URL arrives via
-//  `blocks release deploy --with-secrets .env.production`.
+//  Blocks platform sets $PORT; VERIFY_BACKEND_URL / DEV_SERVER_BACKEND_URL
+//  are optional overrides.
+//
+//  Default: both URLs point at `http://127.0.0.1:8787` — the mcp-server
+//  we spawn as a child process below. This makes the production container
+//  self-contained: no second Cloud Run service, no portal-managed URL
+//  substitution. The `process.env.* ?? default` form means the env still
+//  wins when explicitly set, so splitting mcp-server into its own service
+//  later is a no-code change.
 //
 //  AI_GATEWAY_* is intentionally NOT read here — the Settings page is the
 //  sole source of truth for the chat gateway config. Each user saves their
@@ -50,7 +58,8 @@ import { Readable } from "node:stream";
 //  who has them exported in their environment, but only as a hard last
 //  resort if no header is supplied — same precedence as the Vite proxy.
 // ────────────────────────────────────────────────────────────────────────────
-const VERIFY_URL = (process.env.VERIFY_BACKEND_URL ?? "").replace(/\/+$/, "");
+const VERIFY_URL = (process.env.VERIFY_BACKEND_URL ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
+const DEV_SERVER_URL = (process.env.DEV_SERVER_BACKEND_URL ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
 
 // ────────────────────────────────────────────────────────────────────────────
 // AI avatar provider abstraction
@@ -532,14 +541,206 @@ server.requestTimeout = REQUEST_TIMEOUT_MS;
 server.headersTimeout = HEADERS_TIMEOUT_MS;
 server.maxHeadersCount = 64;
 
+// ────────────────────────────────────────────────────────────────────────────
+//  Spawn mcp-server as a child process.
+//
+//  Production runs prod-backend.mjs (Cloud Run entry on :8080) AND
+//  mcp-server (:8787) inside the same container — no second Cloud Run
+//  service, no portal-managed URL substitution. prod-backend owns the
+//  SIGTERM lifecycle: when Cloud Run signals us, we forward to the
+//  child and wait for both to drain. mcp-server already handles
+//  SIGTERM/SIGINT cleanly (see mcp-server/src/index.ts:1146-1147); the
+//  only job here is to bridge the signal.
+//
+//  The mcp-server's source lives at /app/mcp-server in the runtime
+//  image (see the Dockerfile's COPY step), with its own node_modules
+//  (including `tsx`, the .ts loader) installed by `cd mcp-server &&
+//  npm ci` in the build stage. The absolute path keeps this safe in
+//  production; in local dev prod-backend.mjs is never used (Vite
+//  handles dev), so the path doesn't matter outside the container.
+//
+//  MCP_PORT (not PORT) — mcp-server reads MCP_PORT env to avoid
+//  colliding with prod-backend's $PORT=8080.
+// ────────────────────────────────────────────────────────────────────────────
+let mcpProc = null;
+if (process.env.DISABLE_MCP_CHILD !== "1") {
+  // Defaults: hardcoded for the production image. The MCP_CHILD_*
+  // env vars exist purely so local smoke tests can override paths
+  // (e.g. on Windows where `/app/...` doesn't exist). Not expected
+  // to be set in normal deployments.
+  //
+  // Skip the `.bin/tsx` shim and invoke `node <tsx dist/cli.mjs>` directly.
+  // The shim is a `.cmd` file on Windows, which Node refuses to spawn
+  // without `shell: true` (EINVAL). With shell: true, the returned
+  // ChildProcess refers to the *shell*, not the actual tsx process —
+  // so `mcpProc.kill("SIGTERM")` would only kill the shell and orphan
+  // the real mcp-server. Calling `node` directly avoids the shim and
+  // keeps the ChildProcess tied to the real process, so kill()
+  // propagates correctly on every shutdown path.
+  const nodeBin = process.execPath;
+  const tsxLoader =
+    process.env.MCP_CHILD_TSX_LOADER ??
+    "/app/mcp-server/node_modules/tsx/dist/cli.mjs";
+  const mcpCwd = process.env.MCP_CHILD_CWD ?? "/app/mcp-server";
+  const mcpEntry =
+    process.env.MCP_CHILD_ENTRY ?? "/app/mcp-server/src/index.ts";
+  mcpProc = spawn(nodeBin, [tsxLoader, mcpEntry], {
+    cwd: mcpCwd,
+    stdio: "inherit",
+    env: { ...process.env, MCP_PORT: "8787" },
+  });
+  mcpProc.on("exit", (code, signal) => {
+    // eslint-disable-next-line no-console
+    console.log(`[prod-backend] mcp-server exited code=${code} signal=${signal}`);
+  });
+  mcpProc.on("error", (err) => {
+    // spawn-time error (ENOENT, EACCES, …). prod-backend stays up so
+    // /api/health still answers and the SPA can render the
+    // "dev-server sandbox unavailable" toast. Each /api/dev-server/*
+    // call will then 503 with a clear upstream error.
+    // eslint-disable-next-line no-console
+    console.error(`[prod-backend] mcp-server spawn error: ${err.message}`);
+  });
+  // eslint-disable-next-line no-console
+  console.log(
+    `[prod-backend] spawned mcp-server (pid=${mcpProc.pid}) on :8787 (node=${nodeBin} tsx=${tsxLoader})`,
+  );
+}
+
 // Graceful shutdown — Cloud Run sends SIGTERM with ~10 s grace; without this
-// in-flight Anthropic calls and SSE streams drop mid-flight.
+// in-flight Anthropic calls and SSE streams drop mid-flight. We also forward
+// the signal to the mcp-server child so its in-flight requests + SSE streams
+// get the same chance to drain.
 process.on("SIGTERM", () => {
   // eslint-disable-next-line no-console
   console.log("[prod-backend] SIGTERM — draining");
+  if (mcpProc && !mcpProc.killed) mcpProc.kill("SIGTERM");
   server.close(() => process.exit(0));
   // Hard-exit safety net in case a connection refuses to close.
   setTimeout(() => process.exit(1), 10_000).unref();
+});
+process.on("SIGINT", () => {
+  if (mcpProc && !mcpProc.killed) mcpProc.kill("SIGINT");
+});
+
+// ────────────────────────────────────────────────────────────────────
+//  WebSocket upgrade forwarder — /api/dev-server/_agent
+//
+//  The local agent on the user's machine opens a WebSocket to
+//  wss://<this-host>/api/dev-server/_agent. node:http has no built-in
+//  WebSocket handling, so we listen for the 'upgrade' event and pipe
+//  the TCP socket to a fresh WebSocket client pointed at the local
+//  mcp-server's /_agent WS route. The same pattern npm's http-proxy
+//  uses internally — ~50 lines, no streaming quirks. The agent on
+//  the user's side uses Node 22+'s built-in WebSocket, so this side
+//  uses ws@8 (already a dep of mcp-server). We import it lazily to
+//  avoid the cost when the upgrade never fires.
+//
+//  All other upgrade paths (e.g. Vite HMR — N/A in prod) get
+//  destroyed so the client gets a clean close, not a hang.
+// ────────────────────────────────────────────────────────────────────
+
+server.on("upgrade", (req, clientSocket, head) => {
+  const reqUrl = req.url || "";
+  if (!reqUrl.startsWith("/api/dev-server/_agent")) {
+    // Not ours — let the default destroy it. Cloud Run won't have
+    // any other upgrade handler.
+    clientSocket.destroy();
+    return;
+  }
+  if (!DEV_SERVER_URL) {
+    clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+    clientSocket.destroy();
+    return;
+  }
+
+  // Resolve the mcp-server's WS origin from the HTTP origin.
+  // DEV_SERVER_URL is http://127.0.0.1:8787 → ws://127.0.0.1:8787.
+  const wsOrigin = DEV_SERVER_URL.replace(/^http/, "ws");
+  // The agent's URL includes /api/dev-server/_agent; mcp-server's
+  // WS route is mounted at /_agent. Strip the /api/dev-server prefix.
+  const upstreamPath = reqUrl.replace(/^\/api\/dev-server/, "");
+  const upstreamUrl = `${wsOrigin}${upstreamPath}`;
+
+  // Lazy import — ws is only needed if an upgrade actually fires.
+  import("ws").then(({ WebSocket, WebSocketServer }) => {
+    // Upgrade the agent's socket in-place via ws's noServer mode —
+    // handleUpgrade writes the HTTP/1.1 101 Switching Protocols
+    // response and hands us a real WebSocket object. Without this
+    // the agent sees no 101 and closes with code=1006.
+    const wss = new WebSocketServer({ noServer: true });
+    wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
+      const upstreamHeaders = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (!v) continue;
+        if (k === "host") continue;
+        upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
+      }
+      const upstream = new WebSocket(upstreamUrl, {
+        headers: upstreamHeaders,
+      });
+
+      let closed = false;
+      const cleanup = (code, reason) => {
+        if (closed) return;
+        closed = true;
+        try {
+          clientWs.close(code, reason);
+        } catch {
+          /* */
+        }
+        try {
+          if (upstream.readyState <= 1) upstream.close(code, reason);
+        } catch {
+          /* */
+        }
+      };
+
+      clientWs.on("message", (data, isBinary) => {
+        try {
+          if (upstream.readyState === 1) {
+            upstream.send(data, { binary: isBinary });
+          }
+        } catch {
+          cleanup(1011, "upstream_send_failed");
+        }
+      });
+      clientWs.on("close", (code, reason) =>
+        cleanup(code, reason?.toString?.() ?? ""),
+      );
+      clientWs.on("error", () => cleanup(1011, "client_error"));
+
+      upstream.on("open", () => {
+        // No-op — we don't need to send the head bytes here because
+        // handleUpgrade already consumed them and parsed the upgrade
+        // request. The agent's WS messages flow through `message`.
+      });
+      upstream.on("message", (data, isBinary) => {
+        try {
+          clientWs.send(data, { binary: isBinary });
+        } catch {
+          cleanup(1011, "client_send_failed");
+        }
+      });
+      upstream.on("close", (code, reason) =>
+        cleanup(code, reason?.toString?.() ?? ""),
+      );
+      upstream.on("error", (err) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[prod-backend] WS upstream error: ${err.message}`);
+        cleanup(1011, "upstream_error");
+      });
+    });
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(`[prod-backend] WS forwarder failed to import ws: ${err.message}`);
+    try {
+      clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      clientSocket.destroy();
+    } catch {
+      /* */
+    }
+  });
 });
 
 server.listen(PORT, HOST, () => {
@@ -556,6 +757,8 @@ server.listen(PORT, HOST, () => {
   console.log(`[prod-backend]   AI_GATEWAY=user-supplied via Settings → AI Gateway (no env read — per-user only)`);
   // eslint-disable-next-line no-console
   console.log(`[prod-backend]   VERIFY_BACKEND_URL=${VERIFY_URL || "(unset — /api/verify/* returns 503)"}`);
+  // eslint-disable-next-line no-console
+  console.log(`[prod-backend]   DEV_SERVER_BACKEND_URL=${DEV_SERVER_URL || "(unset — /api/dev-server/* returns 503)"}`);
   // eslint-disable-next-line no-console
   console.log(`[prod-backend]   AI_AVATAR_PROVIDER=${getAvatarProvider().id}${getAvatarProvider().isConfigured() ? "" : " (no credentials — /api/ai/avatar returns 503)"}`);
   // eslint-disable-next-line no-console
@@ -646,6 +849,18 @@ function handleApi(req, res, pathname, reqUrl) {
   // /api/playwright/* — bridge to the official Playwright MCP server.
   if (pathname === "/api/playwright" || pathname.startsWith("/api/playwright/")) {
     proxyPlaywright(req, res, reqUrl);
+    return;
+  }
+
+  // /api/dev-server/* — catch-all proxy to the dev-server sandbox
+  // (mcp-server's /dev-server/* routes). Forwards every method +
+  // subpath so the /panel workspace (folder picker, file CRUD,
+  // dev-server children, SSE event tail, reverse-proxy iframe) works
+  // in production exactly the same way it does in dev. Without this,
+  // every dev-server method throws 404 and the /panel page silently
+  // breaks on every interaction.
+  if (pathname === "/api/dev-server" || pathname.startsWith("/api/dev-server/")) {
+    proxyDevServer(req, res, reqUrl);
     return;
   }
 
@@ -1538,6 +1753,89 @@ async function proxyPlaywright(req, res, reqUrl) {
       upstream.headers.get("content-type") ?? "application/json",
     );
     res.end(await upstream.text());
+  } catch (err) {
+    sendUpstreamError(res, err);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  /api/dev-server/* — catch-all proxy to the mcp-server. The dev-server
+//  sandbox surfaces a tree of HTTP routes under /dev-server/* (start,
+//  stop, files/*, events SSE, pick-folder, inspect-package, list,
+//  read, write, delete, rename, mkdir, and a reverse-proxy). This
+//  proxy is intentionally a thin pass-through so adding a new
+//  /dev-server route on the backend needs zero changes here.
+//
+//  SSE / EventSource streams (the /events tail) work transparently —
+//  `proxyDevServer` doesn't buffer the upstream response, so long-
+//  lived connections survive the round trip. The browser's
+//  EventSource auto-reconnects on close, mirroring the behaviour of
+//  the Vite dev proxy.
+//
+//  503 when DEV_SERVER_BACKEND_URL is unset, matching the convention
+//  used by every other proxy in this file. A misconfigured prod
+//  backend (no MCP service URL in the trigger substitutions) is the
+//  most likely cause — surfacing a 503 with a clear message beats a
+//  silent timeout.
+// ────────────────────────────────────────────────────────────────────────────
+async function proxyDevServer(req, res, reqUrl) {
+  if (!DEV_SERVER_URL) {
+    sendJson(res, 503, {
+      error: "dev_server_not_configured",
+      message:
+        "DEV_SERVER_BACKEND_URL is not set on the prod-backend process. The /panel workspace is unavailable.",
+    });
+    return;
+  }
+  try {
+    // Strip the /api prefix so the upstream sees /dev-server/*. The query
+    // string is preserved as-is.
+    const upstreamPath = reqUrl.replace(/^\/api/, "");
+    const upstream = await fetch(`${DEV_SERVER_URL}${upstreamPath}`, {
+      method: req.method,
+      headers: { "content-type": "application/json" },
+      body: req.method === "GET" || req.method === "HEAD"
+        ? undefined
+        : await readBodyCapped(req, MAX_BODY_BYTES),
+    });
+    res.statusCode = upstream.status;
+    // Stream the upstream response so SSE / long-lived streams survive
+    // the round trip. Buffering (the way proxyPlaywright does it) would
+    // only fire after the upstream EventSource ends, which on the dev-
+    // server channel is "never" while the child npm run dev is alive.
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+    const ct = upstream.headers.get("content-type");
+    if (ct) res.setHeader("content-type", ct);
+    const cc = upstream.headers.get("cache-control");
+    if (cc) res.setHeader("cache-control", cc);
+    // SSE keepalive hints — match what the Vite proxy in dev sets.
+    if (ct && ct.startsWith("text/event-stream")) {
+      res.setHeader("cache-control", "no-cache");
+      res.setHeader("connection", "keep-alive");
+    }
+    const reader = upstream.body.getReader();
+    const pump = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+        res.end();
+      } catch {
+        res.end();
+      }
+    };
+    // Cancel upstream on client hangup — same pattern as
+    // proxyVerifyRunEvents. Without this, a closed browser tab leaks
+    // a socket on the MCP server.
+    req.on("close", () => {
+      reader.cancel().catch(() => {});
+    });
+    pump();
   } catch (err) {
     sendUpstreamError(res, err);
   }

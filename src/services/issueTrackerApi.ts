@@ -33,6 +33,7 @@ import type {
   ChatMessage,
   ChatAction,
   RunEvent,
+  RunSummary,
   ToolUseBlock,
   VerificationRun,
   VerificationTarget,
@@ -211,26 +212,7 @@ export const issueTrackerApi = {
   // (newest first, without their event logs). Used by the history panel to
   // show past runs with status/duration. Empty when the flag is off: there
   // is no local mock history worth fabricating.
-  async listRuns(limit = 10): Promise<
-    Array<{
-      id: string;
-      status: string;
-      scope: string[];
-      targetNames: Record<string, string>;
-      startedAt: string;
-      completedAt?: string;
-      eventCount: number;
-    }>
-  > {
-    type RunSummary = {
-      id: string;
-      status: string;
-      scope: string[];
-      targetNames: Record<string, string>;
-      startedAt: string;
-      completedAt?: string;
-      eventCount: number;
-    };
+  async listRuns(limit = 10): Promise<RunSummary[]> {
     const parse = async (res: Response): Promise<RunSummary[]> => {
       const data = (await res.json()) as { runs?: RunSummary[] };
       return data.runs ?? [];
@@ -258,6 +240,170 @@ export const issueTrackerApi = {
     );
   },
 
+  // ────────────────────────────────────────────────────────────────────────
+  // Playwright script runs (panel/menu feature)
+  //
+  // Same /api/verify/runs endpoint as `startVerification`, but the body
+  // carries a `script` payload instead of `targets`/`scope`. The MCP
+  // server's zod `.refine` enforces the XOR; the backend stamps
+  // `kind: "playwright"` on the run record and routes through
+  // `runScript` in agent.ts. Returns just `{ id, replay }` — the panel
+  // drives its own run state from the SSE stream returned by
+  // `subscribeRun`, not the VerificationRun shape used by the
+  // verification flow.
+  // ────────────────────────────────────────────────────────────────────────
+
+  async startScript(
+    script: { name: string; code: string; mode?: "direct" | "spec" },
+    userId: string,
+  ): Promise<{ id: string; replay: boolean; status: string }> {
+    const runId = generateRunId();
+    return gateVerify<{ id: string; replay: boolean; status: string }>(
+      () =>
+        fetch("/api/verify/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            runId,
+            userId: userId || "local",
+            script,
+          }),
+        }),
+      async (res) => {
+        const data = (await res.json()) as {
+          id: string;
+          replay?: boolean;
+          status?: string;
+        };
+        return {
+          id: data.id,
+          replay: !!data.replay,
+          status: data.status ?? "queued",
+        };
+      },
+      // Local fallback when `VITE_USE_REAL_VERIFY` is off — return a
+      // synthetic run the same shape so the panel can still mount its
+      // SSE-less mock driver. The SSE stream returns no events, so the
+      // panel's local "fake streaming" path is responsible for finishing
+      // the run; today that means the Run button doesn't actually do
+      // anything in mock mode (the panel surfaces a "verification
+      // backend off" notice instead).
+      async () => ({
+        id: runId,
+        replay: false,
+        status: "queued",
+      }),
+    );
+  },
+
+  // Runs `npm install --no-save <packageName>` on the mcp-server host
+  // and surfaces the tail of stdout/stderr. Used by the Configure
+  // drawer to let the user install arbitrary helpers (lodash, dayjs,
+  // faker, …) that their Playwright scripts can then `require()`.
+  //
+  // Trust: equivalent to running `npm install <pkg>` in the user's own
+  // terminal — the package is added to mcp-server's node_modules
+  // without touching the manifest. The endpoint validates the package
+  // name against the npm registry's grammar and passes it as a
+  // single argv entry, so a malicious name can't shell-inject.
+  async installTool(packageName: string): Promise<{
+    ok: boolean;
+    exitCode: number;
+    packageName: string;
+    stdout: string;
+    stderr: string;
+  }> {
+    if (!USE_REAL_VERIFY) {
+      throw new Error(
+        "Tool install requires the real verification backend — set VITE_USE_REAL_VERIFY=1 and ensure the mcp-server is running.",
+      );
+    }
+    const trimmed = packageName.trim();
+    if (!trimmed) {
+      throw new Error("Package name is required.");
+    }
+    const res = await fetch("/api/tools/install", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ packageName: trimmed }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      exitCode?: number;
+      packageName?: string;
+      stdout?: string;
+      stderr?: string;
+      error?: unknown;
+      message?: string;
+    };
+    if (!res.ok || data.error) {
+      throw new Error(
+        typeof data.message === "string"
+          ? data.message
+          : typeof data.error === "string"
+            ? data.error
+            : `install failed (HTTP ${res.status})`,
+      );
+    }
+    return {
+      ok: !!data.ok,
+      exitCode: data.exitCode ?? 1,
+      packageName: data.packageName ?? trimmed,
+      stdout: data.stdout ?? "",
+      stderr: data.stderr ?? "",
+    };
+  },
+
+  // Enumerate every package under mcp-server/node_modules so the
+  // Configure drawer's "Installed tools" section can show what's
+  // already there (server's own deps + anything the user pulled in
+  // via installTool). Returns alphabetically sorted by package name.
+  //
+  // The panel re-calls this after every successful installTool so the
+  // list updates without a manual refresh.
+  //
+  // Failure mode: when the backend is down or not configured the
+  // method throws (same shape as installTool) so the caller's
+  // try/catch can render an error banner instead of an empty list —
+  // "no tools installed" should never silently mask a misconfigured
+  // proxy.
+  async listInstalledTools(): Promise<{
+    packages: Array<{ name: string; version: string }>;
+    count: number;
+    directoryError?: string;
+  }> {
+    if (!USE_REAL_VERIFY) {
+      throw new Error(
+        "Installed tools listing requires the real verification backend — set VITE_USE_REAL_VERIFY=1 and ensure the mcp-server is running.",
+      );
+    }
+    const res = await fetch("/api/tools/list", {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      packages?: Array<{ name: string; version: string }>;
+      count?: number;
+      directoryError?: string;
+      error?: unknown;
+      message?: string;
+    };
+    if (!res.ok || data.error) {
+      throw new Error(
+        typeof data.message === "string"
+          ? data.message
+          : typeof data.error === "string"
+            ? data.error
+            : `list failed (HTTP ${res.status})`,
+      );
+    }
+    return {
+      packages: Array.isArray(data.packages) ? data.packages : [],
+      count: typeof data.count === "number" ? data.count : 0,
+      ...(data.directoryError ? { directoryError: data.directoryError } : {}),
+    };
+  },
+
   // Subscribes to the SSE stream that the backend emits while a run is in
   // flight. The returned function tears down the underlying EventSource.
   //
@@ -271,6 +417,12 @@ export const issueTrackerApi = {
     handlers: {
       onEvent: (event: RunEvent) => void;
       onError: (err: Error) => void;
+      // Optional — fires the moment the reconnect budget (MAX_FAILURES)
+      // is exhausted. Without this, callers who drive their own run
+      // state (the Playwright editor panel) would stay in "running"
+      // forever after SSE gives up, since `onError` keeps firing per
+      // individual reconnect attempt. Idempotent — never fires twice.
+      onGiveUp?: (err: Error) => void;
     },
   ): () => void {
     if (!USE_REAL_VERIFY) {
@@ -361,7 +513,12 @@ export const issueTrackerApi = {
         consecutiveFailures += 1;
         if (consecutiveFailures >= MAX_FAILURES) {
           // Budget burnt — stop trying. The caller downgrades on its
-          // side (see `useIssueTracker.startVerification`).
+          // side (see `useIssueTracker.startVerification`). Also notify
+          // any `onGiveUp` listener — without this, callers driving
+          // their own run state would stay in "running" forever after
+          // SSE gave up (the per-attempt onError fires too often to
+          // be the right signal for "we're done trying").
+          handlers.onGiveUp?.(new Error("run stream gave up after retries"));
           return;
         }
         reconnectTimer = window.setTimeout(() => {

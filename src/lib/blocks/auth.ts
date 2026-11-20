@@ -3,7 +3,7 @@
 // for login/callback/logout/session-claims work.
 
 import type { BlocksOidcUserInfo } from "@seliseblocks/client";
-import { blocksClient } from "./client";
+import { blocksClient, clearAuthOverlay } from "./client";
 
 const RETURN_TO_KEY = "blocks:returnTo";
 
@@ -27,6 +27,9 @@ export async function completeLogin(
   callbackUrl: string
 ): Promise<{ ok: true; returnTo: string } | { ok: false; message: string }> {
   const returnTo = readReturnTo();
+  // A fresh hosted session must never inherit a stale token overlay from a
+  // previous login in this tab — drop it BEFORE IAM sets the new cookie.
+  clearAuthOverlay();
   try {
     const response = await blocksClient.auth.idp.callback(callbackUrl);
     if ((response as { error?: unknown }).error) {
@@ -96,6 +99,9 @@ export async function fetchUserRoles(
 // Asks IAM to invalidate the current session cookie, then forgets it locally.
 // Always returns; errors are swallowed because the local logout still succeeds.
 export async function logout(): Promise<void> {
+  // Drop the overlay session even if the network call fails — the UI must
+  // never keep riding an old bearer token after a signed-out state.
+  clearAuthOverlay();
   try {
     await blocksClient.auth.logout();
   } catch {

@@ -427,18 +427,19 @@ export function ProjectDetailPage({ envSlug: envSlugProp }: ProjectDetailPagePro
               counts as dev (see `isDevEnv`). */}
           {isDevEnv && (
             <>
-              {/* Flow authoring is the TESTER-only affordance on this
-                  page (mirroring the inline "+ Add another flow"
+              {/* Flow authoring is the TESTER + MANAGER affordance on
+                  this page (mirroring the inline "+ Add another flow"
                   button and the empty-state "Add Flow" CTA inside
-                  `FeatureItem`). Managers and developers fall into
-                  the read-only branch: managers curate flows via
-                  chat tools / kebab create actions, developers
+                  `FeatureItem` — user directive 2026-11-20 opened the
+                  surfaces up to managers, previously tester-only).
+                  Developers fall into the read-only branch: they
                   author features but not flows. The button stays
                   disabled when there are no features yet — that's
                   a structural guard, not a role check, and applies
-                  to testers too (who would otherwise land on the
-                  modal with no parent feature to attach to). */}
-              {isTester && (
+                  to testers and managers alike (who would otherwise
+                  land on the modal with no parent feature to attach
+                  to). */}
+              {(isTester || isManager) && (
                 <Button
                   variant="secondary"
                   onClick={() => setAddFlowOpen(true)}

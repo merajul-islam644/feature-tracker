@@ -731,11 +731,29 @@ export class ExpectChain {
   }
 
   async toBe(expected: unknown): Promise<void> {
+    // `toBe` is strict identity (Object.is), matching Playwright's
+    // semantics: it's the matcher to use for primitives where
+    // reference identity is the right notion of "equal".
     this._assertPrimitive("toBe", expected);
   }
 
   async toEqual(expected: unknown): Promise<void> {
-    this._assertPrimitive("toEqual", expected);
+    // `toEqual` is deep equality, matching Playwright's semantics.
+    // Without this carve-out, `{a:1}` and `{a:1}` would compare as
+    // not-equal under `Object.is` (line 827), which would surprise
+    // anyone migrating a real spec over. The deep compare is a
+    // shallow structural walk — enough for the JSON-shaped objects
+    // users throw at this in practice, and avoids pulling a full
+    // deep-equal dependency.
+    if (this.isLocator(this.target)) {
+      throw new AssertionError(`toEqual cannot be used with a Locator target`);
+    }
+    const passed = deepEqual(this.target, expected);
+    recordExpect(
+      passed,
+      `toEqual`,
+      `expected ${stringify(this.target)} toEqual ${stringify(expected)}`,
+    );
   }
 
   async toBeTruthy(): Promise<void> {
@@ -982,6 +1000,36 @@ function stringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+// Shallow deep-equal — handles primitives, arrays, plain objects, and
+// `null`. Anything fancier (Date, RegExp, Map, Set, cyclic graphs) is
+// outside what Playwright's `toEqual` needs in practice. NaN equals
+// NaN (matches `Object.is`); the recursion depth is bounded by the
+// user's object graph; throws on cycles would be over-engineering.
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const aKeys = Object.keys(a as object);
+  const bKeys = Object.keys(b as object);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const k of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    if (!deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /* ------------------------------------------------------------------ */

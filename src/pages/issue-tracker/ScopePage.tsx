@@ -42,8 +42,8 @@ export function ScopePage() {
   } = tracker;
 
   // Deployment-gap fallback: pseudo rows built from the shipped catalog,
-  // enabled = recommended (the same defaults the v2.1 seeds wrote).
-  // Toggles are disabled in this state — there's no row to PATCH.
+  // nothing pre-selected (matches the v2.1 seeds' default). Toggles are
+  // disabled in this state — there's no row to PATCH.
   const displayChecks = useMemo<EnvVerificationCheck[]>(() => {
     if (checks.length > 0) return checks;
     return verificationChecks.map((c) => ({
@@ -55,7 +55,7 @@ export function ScopePage() {
       label: c.label,
       description: c.description,
       recommended: c.recommended,
-      enabled: c.recommended,
+      enabled: false,
       createdAt: "",
       updatedAt: "",
     }));
@@ -76,7 +76,7 @@ export function ScopePage() {
         <p className="mt-1 text-sm text-muted-foreground">
           {t(
             "issueTracker.scope.description",
-            "Pick which checks run during verification. Recommended checks are on by default — toggle them off one at a time, or use Select all / Clear. Pick a device preset to size the run's browser viewport.",
+            "Pick which checks run during verification. Nothing is selected by default — check the ones the AI should run, or use Select all / Clear. Pick a device preset to size the run's browser viewport.",
           )}
         </p>
       </div>

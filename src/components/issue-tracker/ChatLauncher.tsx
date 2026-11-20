@@ -16,6 +16,11 @@ type ChatPanelProps = ComponentProps<typeof ChatPanel>;
 export interface ChatLauncherProps extends ChatPanelProps {
   /** Current verification progress percentage (0–100) when active. */
   runProgressPct?: number;
+  /** Open the panel on first mount. The app-wide store persists the
+   *  previous open state, so a reload reopens the conversation instead
+   *  of dropping the user back on the collapsed launcher. Only read on
+   *  mount — afterwards the panel is purely user-controlled. */
+  defaultOpen?: boolean;
   /** Reported on every open/close so owners can react (the app-wide
    *  store gates its chat reads on the panel actually being open —
    *  page-scoped fetching). */
@@ -24,10 +29,11 @@ export interface ChatLauncherProps extends ChatPanelProps {
 
 export function ChatLauncher({
   runProgressPct,
+  defaultOpen,
   onOpenChange,
   ...props
 }: ChatLauncherProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen ?? false);
 
   // Reports before flipping so owners see the NEW state synchronously.
   // Kept outside the `setOpen` updater on purpose — React may invoke

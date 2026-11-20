@@ -52,6 +52,13 @@ export type VerificationRunStatus =
   | "failed"
   | "cancelled";
 
+// Run discriminator — verification vs user-authored Playwright script.
+// Both go through the same /verify/runs endpoint and the same SSE stream;
+// the only difference is which agent branch executes (`runAgent` for
+// verification, `runScript` for scripts). Stored on every row that
+// /verify/runs returns so the History page can mix them with a kind badge.
+export type RunKind = "verification" | "playwright";
+
 export type ChatRole = "user" | "assistant" | "system";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -302,8 +309,17 @@ export interface ChatAction {
     | "verify_again"
     | "filter_severity"
     | "dismiss"
-    | "request_tool_permission";
+    | "request_tool_permission"
+    | "deny_tool_permission";
   payload?: Record<string, unknown>;
+}
+
+// Live agent phase for the chat status line — the "Thinking… / Writing
+// src/App.tsx…" indicator under the header. Null when the agent is idle.
+export interface ChatActivity {
+  phase: "thinking" | "executing";
+  /** Human sentence for "executing" (e.g. "Running npm install…"). */
+  detail?: string;
 }
 
 // Mirror of Anthropic's `tool_use` content block. We don't pull the SDK
@@ -346,7 +362,32 @@ export type ChatToolName =
   | "create_flow"
   | "update_flow"
   | "delete_flow"
-  | "verify_live_url";
+  | "verify_live_url"
+  // ── Workspace (/panel) tools — VS Code-style file, terminal, search
+  // and git actions over the folder the user picked in the workspace.
+  | "workspace_list_files"
+  | "workspace_read_file"
+  | "workspace_write_file"
+  | "workspace_edit_file"
+  | "workspace_create_folder"
+  | "workspace_delete_path"
+  | "workspace_rename_path"
+  | "workspace_search"
+  | "workspace_exec_command"
+  | "workspace_npm_scripts"
+  | "workspace_dev_server"
+  | "workspace_open_file"
+  | "workspace_open_folder"
+  | "workspace_git_status"
+  | "workspace_git_branches"
+  | "workspace_git_diff"
+  | "workspace_git_stage"
+  | "workspace_git_unstage"
+  | "workspace_git_discard"
+  | "workspace_git_commit"
+  | "workspace_git_push"
+  | "workspace_git_pull"
+  | "workspace_git_checkout";
 
 // Anthropic `tools` array shape — declared here once so both the
 // client payload and the proxy can speak the same vocabulary.
@@ -418,7 +459,50 @@ export type RunEvent =
       applicationName: string;
       pages: Record<string, string[]>;
     }
+  // ──────────────────────────────────────────────────────────────────────────
+  // Playwright script runs — emitted by mcp-server's `runScript` (see
+  // mcp-server/src/agent.ts). Two new kinds stream the user's
+  // `console.log` calls and `screenshot(label)` helper invocations into
+  // the same SSE tail the verification run uses, so a single history
+  // panel can render both. The two terminal kinds below (run_completed,
+  // run_failed) carry the final pass/fail verdict.
+  // ──────────────────────────────────────────────────────────────────────────
+  | {
+      kind: "console_log";
+      runId: string;
+      level: "log" | "info" | "warn" | "error";
+      message: string;
+      ts: number;
+    }
+  | {
+      kind: "screenshot_taken";
+      runId: string;
+      storageRef: string;
+      label: string;
+      ts: number;
+    }
   | { kind: "run_failed"; runId: string; reason: string };
+
+// Run summary — the per-row shape /verify/runs returns for the History
+// list. Carries enough metadata to render a row (status dot, duration,
+// target names) without replaying the SSE event log. `kind` lets the
+// History list mix AI verification + user-authored script runs with a
+// kind badge per row. `scriptName` is set only on Playwright rows so
+// the panel can show "checkout-flow · 12s" instead of "0 checks · 12s".
+// Promoted from an inline alias inside src/services/issueTrackerApi.ts
+// when the wildcard landed — both modules now share this single source
+// of truth.
+export interface RunSummary {
+  id: string;
+  kind: RunKind;
+  status: string;
+  scope: string[];
+  targetNames: Record<string, string>;
+  startedAt: string;
+  completedAt?: string;
+  eventCount: number;
+  scriptName?: string;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Chat session summary — derived from the persisted ChatMessage store. One

@@ -75,6 +75,7 @@ import {
   useAddCustomVerificationCheck,
   useUpdateCustomVerificationCheck,
   useRemoveCustomVerificationCheck,
+  canEditVerificationChecks,
 } from "@/lib/blocks/hooks";
 import type { EnvVerificationCheck } from "@/lib/blocks/data";
 import { buildIssueTrackerContext } from "@/lib/issueTrackerContext";
@@ -85,10 +86,20 @@ import {
   removeBinding,
   bindingsEqual,
 } from "@/lib/issueTrackerBindings";
-import { chatTools, browserToolSummary } from "@/lib/chatTools";
+import { chatTools, browserToolSummary, toolActionSummary } from "@/lib/chatTools";
+import { isSafeAutoRun } from "@/lib/chatToolSafety";
+import {
+  getWorkspaceChatState,
+  getWorkspaceOpenFile,
+  getWorkspaceSetRoot,
+} from "@/lib/workspaceChatContext";
+import { devServerApi } from "@/services/devServerApi";
+import type { FileNode } from "@/types/dev-server";
+import type { GitStatus } from "@/types/git";
 import type {
   AnthropicTool,
   ChatAction,
+  ChatActivity,
   ChatMessage,
   ChatToolName,
   Evidence,
@@ -117,6 +128,115 @@ const defaultFilters: IssueFilters = {
   application: null,
   sort: "newest",
 };
+
+// Chat message ids. `msg-${Date.now()}` alone collided once the tiered
+// approval policy started auto-running fast local tools — two "✓ Done"
+// system messages completing in the same millisecond produced duplicate
+// React keys (192 console errors in one turn). A monotonic suffix keeps
+// every id unique even within one millisecond.
+let msgIdSeq = 0;
+function nextMsgId(prefix = "msg"): string {
+  return `${prefix}-${Date.now()}-${(++msgIdSeq).toString(36)}`;
+}
+
+// ─── Workspace (/panel) tool helpers ─────────────────────────────
+// Pure formatters + guards for the workspace_* dispatch cases below.
+// Module-level on purpose — executeTool's useCallback deps stay clean.
+
+// Any path segment named `.env` or `.env.<anything>` — the chatbot must
+// never read, write, delete, or echo these. The user's real .env files
+// (IAM credentials included) can sit at the workspace root.
+const PROTECTED_ENV_PATH = /(^|[\\/])\.env($|\.[^\\/]*$)/i;
+
+function isProtectedEnvPath(path: string): boolean {
+  return PROTECTED_ENV_PATH.test(path);
+}
+
+function guardWorkspacePath(path: string): string | null {
+  if (!path || !path.trim()) return "Skipped — missing path.";
+  if (path.includes("..")) {
+    return "Skipped — paths must stay inside the workspace root (no `..`).";
+  }
+  if (/^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("/")) {
+    return "Skipped — use a path relative to the workspace root, not an absolute path.";
+  }
+  if (isProtectedEnvPath(path)) {
+    return "Skipped — .env / credential files are protected and never read, written, or deleted through chat. The user manages those directly.";
+  }
+  return null;
+}
+
+function guardWorkspaceCommand(command: string): string | null {
+  if (!command || !command.trim()) return "Skipped — missing command.";
+  if (/\.env\b/i.test(command)) {
+    return "Skipped — commands that touch .env / credential files are refused in chat.";
+  }
+  return null;
+}
+
+// Cap a tool result string so one giant read/exec doesn't eat the
+// model's context budget.
+function clip(text: string, max = 6000): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n… (truncated, ${text.length - max} more chars)`;
+}
+
+function formatWorkspaceTree(nodes: FileNode[], indent = 0): string[] {
+  const lines: string[] = [];
+  for (const node of nodes) {
+    lines.push(
+      `${"  ".repeat(indent)}${node.kind === "dir" ? "▸ " : "  "}${node.name}${node.kind === "dir" ? "/" : ""}`,
+    );
+    if (node.children && lines.length < 160) {
+      lines.push(...formatWorkspaceTree(node.children, indent + 1));
+    }
+    if (lines.length >= 160) {
+      lines.push("  … (tree truncated)");
+      break;
+    }
+  }
+  return lines;
+}
+
+function formatGitFile(f: {
+  path: string;
+  x: string;
+  y: string;
+  untracked: boolean;
+}): string {
+  if (f.untracked) return `?? ${f.path}`;
+  return `${f.x === " " ? "_" : f.x}${f.y === " " ? "_" : f.y} ${f.path}`;
+}
+
+function formatGitStatus(s: GitStatus): string {
+  if (!s.isRepo) {
+    return `Not a git repo${s.reason ? ` (${s.reason})` : ""}.`;
+  }
+  const parts = [
+    `Branch: ${s.branch ?? "?"}${s.upstream ? ` (upstream ${s.upstream})` : ""}`,
+    `Ahead/behind: +${s.ahead}/-${s.behind}`,
+    ...s.files.slice(0, 60).map(formatGitFile),
+  ];
+  if (s.files.length > 60) {
+    parts.push(`… and ${s.files.length - 60} more files`);
+  }
+  return parts.join("\n");
+}
+
+function formatExecResult(r: {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  truncated: boolean;
+}): string {
+  const head = r.timedOut
+    ? "Result: TIMED OUT (killed at the timeout)"
+    : `Exit code: ${r.code ?? "null"}${r.truncated ? " (output truncated at 2MB)" : ""}`;
+  const out = r.stdout ? `stdout:\n${clip(r.stdout, 4000)}` : "stdout: (empty)";
+  const err = r.stderr ? `stderr:\n${clip(r.stderr, 3000)}` : "stderr: (empty)";
+  return `${head}\n${out}\n${err}`;
+}
 
 // check id → display label, derived from the verificationChecks catalog so
 // the activity feed and the scope card can never drift apart. Keyed as
@@ -310,6 +430,10 @@ const MAX_TRACKED_RUN_IDS = 20;
 // flags), read through `useVerificationChecks`. The legacy
 // `UserPreference.customChecks` scope list is retired.
 const USER_PREFERENCE_MIRROR_KEY = "lattice.mirror.userPreference.v1";
+// Whether the floating assistant panel was open, persisted so a page
+// reload reopens it instead of slamming the chat shut mid-conversation.
+// Per-device convenience — plain localStorage, not shared state.
+const ASSISTANT_OPEN_KEY = "lattice.assistantOpen.v1";
 const DEVICE_VALUES: ReadonlySet<string> = new Set([
   "desktop",
   "mobile",
@@ -328,7 +452,15 @@ function readPrefMirror(userId: string): MirroredUserPreference {
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object") return {};
-    return parsed as MirroredUserPreference;
+    // The mirror stores one entry per user (`{ <userId>: pref }` — see
+    // writePrefMirror below, which does `all[userId] = value`). Returning
+    // the whole map made every reader index `.activeSession` / `.device`
+    // on the MAP itself, get undefined, and silently fall back — the
+    // active-session restore never fired, so every reload dropped the
+    // user into a fresh conversation (the deepest layer of the F3 bug).
+    const perUser = (parsed as Record<string, MirroredUserPreference>)[userId];
+    if (!perUser || typeof perUser !== "object") return {};
+    return perUser;
   } catch {
     return {};
   }
@@ -417,7 +549,24 @@ export function useIssueTracker() {
       trackerKey === "issues"
     );
   }, [location.pathname]);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(ASSISTANT_OPEN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  // Mirror the open/closed flip to localStorage so a reload reopens the
+  // panel (user request 2026-10-09: "chatbot panel shouldnt close after
+  // reloading"). Best-effort — private-mode quota errors just mean the
+  // next reload starts closed.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ASSISTANT_OPEN_KEY, assistantOpen ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [assistantOpen]);
   const trackerDataGate = onTrackerPage || assistantOpen;
 
   // Schema v2.1 env resolution: the slug in the URL maps to a
@@ -466,6 +615,27 @@ export function useIssueTracker() {
   const [sessionId, setSessionId] = useState<string>(() =>
     readStoredActiveSession(userId, defaultSessionId),
   );
+
+  // The initializer above runs at first mount, when `currentUser` is
+  // still resolving (the IAM /me call is async) — `userId` is "" and
+  // `readStoredActiveSession` bakes the anon fallback into the state.
+  // Nothing re-ran an initializer, so EVERY hard reload dropped the user
+  // into a fresh greeting thread even though the mirror still held the
+  // last active session id (observed live 2026-10-09). Once the real
+  // user id lands, re-read the mirror — but only while the local state
+  // is still sitting on a fallback, so a session the user explicitly
+  // opened this mount is never overridden. Declared BEFORE the persist
+  // effect below so the mirror read wins the race against the one-tick
+  // `activeSession: anon` write this transition also triggers.
+  useEffect(() => {
+    if (!userId) return;
+    setSessionId((cur) => {
+      const isFallback =
+        cur === defaultSessionId || cur === "issue-tracker:anon";
+      if (!isFallback) return cur;
+      return readStoredActiveSession(userId, cur);
+    });
+  }, [userId, defaultSessionId]);
 
   // Persist on every change. Effects run after render, so the UI sees the
   // new id first; the next tick the localStorage mirror + cloud copy
@@ -741,12 +911,21 @@ export function useIssueTracker() {
   // Chat
   const [chat, setChat] = useState<ChatMessage[]>(mockInitialChat);
   const [sendingMessage, setSendingMessage] = useState(false);
+  // Live agent phase for the chat status line (thinking / executing).
+  // Distinct from `sendingMessage` because tool execution happens
+  // BETWEEN model turns, when `sendingMessage` is false — the status
+  // line must keep showing "Writing package.json…" through that gap.
+  const [chatActivity, setChatActivity] = useState<ChatActivity | null>(null);
   // Transient gateway-retry status ("Retrying AI request… 2/3") shown in
   // place of silent dead air while sendChatMessage backs off a 502/503.
   const [aiRetryStatus, setAiRetryStatus] = useState<string | null>(null);
   // Reset when the active session changes — the hydration effect below
   // re-runs and pulls messages for `sessionId`.
-  const [chatLoaded, setChatLoaded] = useState(false);
+  // Which session id the open panel has already hydrated (or seeded) — a
+  // ref, not state: a boolean flag reset by a sibling effect arrives one
+  // render late, which is exactly how History selection used to dead-lock
+  // (see the hydration effect below).
+  const chatLoadedSessionRef = useRef<string | null>(null);
 
   // Official Playwright MCP browser tools — fetched live from the backend
   // bridge (which spawns `npx @playwright/mcp@latest`). Empty when the
@@ -756,6 +935,40 @@ export function useIssueTracker() {
   // stateless per message, so without this the model could never see what
   // the browser showed on the previous turn.
   const browserResultRef = useRef<string[]>([]);
+  // Rolling memory of the last NON-browser tool results (issue/project
+  // writes AND the workspace_* file/git/exec tools). Same stateless-call
+  // problem as browserResultRef: the "✓ Done" chat line the user sees is
+  // a `system` message, and runModelTurn's history only replays
+  // user/assistant turns — so without this the continuation turn can't
+  // see what its own tool just returned and re-runs it (observed live
+  // with workspace_list_files). Kept small — these payloads (file
+  // reads, exec output) can be large.
+  const toolResultMemoryRef = useRef<string[]>([]);
+  // Session-wide ledger of workspace files the model has already seen —
+  // path → "read" | "written" | "missing". The rolling memory above keeps
+  // only the last few payloads, so on a long build task the model
+  // "forgets" it read package.json five turns ago and burns its 60-step
+  // budget re-reading the same files (observed live in the DataGuard
+  // dogfood: one message triggered six 60-step cap pauses, ~15 re-reads
+  // of one file). The ledger is one short line per path and rides the
+  // memory block every turn, giving the model a stable "already seen"
+  // list without holding megabytes of file content.
+  const workspaceFileLedgerRef = useRef<Map<string, string>>(new Map());
+  // A new/switched conversation must not inherit the previous task's
+  // tool results or file ledger — the model can no longer see that
+  // history, so acting on it would be hallucination bait.
+  // browserResultRef is reset too: stale browser observations are worse
+  // than stale tool summaries, because the model treats them as ground
+  // truth about "the app" — an old session's walkthrough of a DIFFERENT
+  // project (observed live 2026-10-09: Mess Manager pages surviving a
+  // session switch) made the new session's model believe the current
+  // build task was that other app, and it navigated to the old app's
+  // URL and wrote files for it.
+  const resetWorkspaceAgentMemory = useCallback(() => {
+    toolResultMemoryRef.current = [];
+    workspaceFileLedgerRef.current.clear();
+    browserResultRef.current = [];
+  }, []);
   // Consecutive AUTO-continuations fired after allowed browser_* tools.
   // Each Allow → tool → next-model-turn cycle increments it; a fresh user
   // message resets it. The walkthrough is meant to run until the user
@@ -768,6 +981,104 @@ export function useIssueTracker() {
   // continuation injects a forceful reminder. Reset whenever a turn
   // carries at least one tool_use block.
   const narrationOnlyStreakRef = useRef(0);
+  // How many stall-nudges the CURRENT stretch of narration-only turns has
+  // consumed. The nudge threshold is one (see the auto-continue block —
+  // with >= 2 the chain dies before the second turn ever runs, the
+  // catch-22 observed live: "Reading router.tsx…" narration, no tool_use,
+  // chat idle forever). One nudge per stall is the ceiling: it re-engages
+  // a promised-but-never-executed action, while a genuine final report
+  // costs at most one extra turn instead of looping forever.
+  const agentNudgeCountRef = useRef(0);
+  // Set by the Stop button — the next auto-continuation / queued
+  // auto-run dispatch / stall nudge observes it and ends the run.
+  // Without this, the ONLY brakes on a runaway build were the 200-step
+  // cap and a full page reload (observed live 2026-10-09: the input is
+  // disabled for the whole chain, so the user had no way to say stop
+  // while the agent scaffolded the wrong app).
+  //
+  // Deliberately NOT one-shot at the observation points: an auto-run
+  // burst leaves several tools in flight, each completion re-enters the
+  // continuation gate, and a first-completion clear let the SECOND
+  // stacked completion resume the run right after the user cancelled it
+  // (same stacked-completion trap that forced the 200-cap's === 201
+  // one-shot fix). The flag stays set until the user initiates something
+  // new — sendMessage entry, a manual Allow click in applyChatAction, or
+  // requestStopAgent's own toggle path. `agentStopAnnouncedRef` makes the
+  // "⏹ Stopped" transcript line a one-shot instead.
+  const agentStopRequestedRef = useRef(false);
+  const agentStopAnnouncedRef = useRef(false);
+  // One-shot guard for the stall dead-end — a COUNTER, not a flag:
+  // 0 = healthy, 1 = auto-recovery rescue turn already sent, 2 = user
+  // notice posted (nothing more will be tried this stretch). Without a
+  // guard the stall-nudge re-entry would post its own copy of the same
+  // line on every stacked completion (same shape as the 200-cap === 201
+  // bug). Reset to 0 by a fresh user message.
+  const agentStallExhaustedAnnouncedRef = useRef(0);
+  // Length of the most recent narration-only reply — feeds the
+  // short-stall heuristic above (long reply = legitimate final report,
+  // short reply = promised action that never executed).
+  const lastNarrationLenRef = useRef(0);
+  // Full text of the most recent narration-only reply — feeds
+  // isPlanLikeNarration, which catches LONG stall narrations that are
+  // really plans ("Pivoting to: delete…") rather than reports.
+  const lastNarrationTextRef = useRef("");
+  // The narration-only reply BEFORE the most recent one — feeding the
+  // verbatim-repeat detector. Observed live 2026-10-09: nudged while
+  // stalled, the model answered by re-emitting its OWN previous
+  // narration word-for-word ("Step 1: reading src/app/AppRoutes.tsx…"
+  // twice in a row) instead of emitting the tool block. Nudging a
+  // repeat-loop makes it repeat more, so a detected repeat skips the
+  // nudge and goes straight to the exhaustion notice.
+  const prevNarrationTextRef = useRef("");
+  // A narration-only reply that PROMISES a future action is a stall
+  // regardless of its length — reports describe what happened, plans
+  // describe what never executed. Tense/keyword shapes observed live:
+  // "Pivoting to: delete…", "I'll run rmdir…", "Now I'll wipe the…",
+  // "**Queue:** 1. List… 2. Check…" (a numbered to-do list is a plan —
+  // observed live 2026-10-09). Kept tight so genuine reports ("Deleted
+  // 12 entries", "All tests pass — here's the summary") never match.
+  //
+  // 2026-10-09 DataGuard round 3 additions — shapes that ESCAPED the
+  // first list and silently killed the chain (three narration turns in
+  // a row, no nudge ever armed):
+  //   "[Act] Reloading the page to confirm…" — "[Act]" is the model's
+  //     OWN protocol marker for the action section; its presence means
+  //     an action is being promised. Any reply containing it is a stall
+  //     unless a tool_use block accompanied it (only narration reaches
+  //     this check).
+  //   "Need to (1) check the fresh console… then (2) build…" — inline
+  //     numbered lists "(1) …" are plans just like "1. …" line lists.
+  //   "Executing now." — an explicit execution promise in future tense.
+  //
+  // 2026-10-10 DataGuard round 4 — the agent narrates in Bengali (the
+  // user's chat language), so English-only promise words missed a whole
+  // class of stalls: "…alias add করছি … confirm করে দিই … non-zero হলে
+  // পরের turn-এ fix, 0 হলে navigate → /scans।" — 737 chars, ledger
+  // attached, zero tool_use, and every gate here let it through, so no
+  // nudge timer ever armed. Bengali future/conditional markers are the
+  // fix; note \b is useless around Bengali (ASCII word-char only), so
+  // these match as plain substrings. Past-tense markers (করেছি/দেখলাম/
+  // হয়েছে) are deliberately absent so genuine reports never match.
+  // The ≥2-arrow chain is the language-proof structural signal: a step
+  // sequence "A → B → C" is a plan in any script.
+  const isPlanLikeNarration = (t: string): boolean =>
+    /\[act\]/i.test(t) ||
+    /\b(pivoting to|now i'?ll|next:|then i'?ll|i'?m going to|i will|i'll|queue|let me|checking|about to|first,? i|need to|executing now|reloading|navigating to)\b/i.test(
+      t,
+    ) ||
+    /^\s*\d+\.\s+\S/m.test(t) ||
+    /\(\d+\)\s+\S/.test(t) ||
+    /(করছি|দিই|করব|করবো|করবে|হলে|তারপর|এরপর|পরের\s*turn)/.test(t) ||
+    /→[^\n]*→/.test(t);
+  // Collapse a narration to its comparable core: whitespace, the
+  // model's [Plan]/[Act]/[Verify] protocol markers, and case all get
+  // stripped so a re-emitted reply matches its original.
+  const normalizeNarration = (t: string): string =>
+    t
+      .replace(/\s+/g, " ")
+      .replace(/^\s*\[(plan|act|verify)\]\s*/i, "")
+      .trim()
+      .toLowerCase();
   // Consecutive BROWSER observations that came back invalid (about:blank
   // URL, or a snapshot whose accessibility tree is essentially empty).
   // Two in a row means the MCP bridge is pointing the snapshot tool at
@@ -848,21 +1159,32 @@ export function useIssueTracker() {
   // obscures more than it helps — the user can already see the
   // failure state on the page they're looking at.
 
-  // Reset the hydration flag whenever the active session changes — the
-  // effect below then re-pulls the messages for the new session.
-  useEffect(() => {
-    setChatLoaded(false);
-  }, [sessionId]);
-
   // Load persisted chat history once we have a session id. If the store has
   // anything for this session, replace the seed greeting with the real
   // conversation; if not, keep the greeting and start fresh.
+  //
+  // The "already hydrated" guard is `chatLoadedSessionRef.current === sessionId`
+  // rather than a boolean state flag. The old flag was reset by a sibling
+  // effect on sessionId change — but both effects ran in the SAME commit, so
+  // this effect's closure still saw the stale `true`, returned early, and
+  // neither effect re-ran afterwards (none of its deps changed on the
+  // flag-only re-render). Selecting a conversation from History updated the
+  // id but the panel kept showing the previous thread forever — first
+  // visible 2026-10-09 once persistence actually worked and History had
+  // entries to click.
+  //
+  // Only trust a RESOLVED result. A DISABLED query (panel was closed when
+  // the session id was restored) reports isLoading=false with no data —
+  // stamping the guard on that state meant that when the panel later opened
+  // and the real rows arrived, this effect early-returned and the thread
+  // stayed on the seed greeting forever (the last layer of the
+  // reload-loses-conversation bug).
   useEffect(() => {
-    if (!sessionId || chatLoaded) return;
-    if (chatHistoryQuery.isLoading) return;
+    if (!sessionId || chatLoadedSessionRef.current === sessionId) return;
+    if (!chatHistoryQuery.isSuccess && !chatHistoryQuery.error) return;
     if (chatHistoryQuery.error) {
       // Don't block the UI on a failed history fetch — fall back to seed.
-      setChatLoaded(true);
+      chatLoadedSessionRef.current = sessionId;
       return;
     }
     const persisted = chatHistoryQuery.data ?? [];
@@ -885,7 +1207,7 @@ export function useIssueTracker() {
       // session.
       setChat(mockInitialChat);
     }
-    setChatLoaded(true);
+    chatLoadedSessionRef.current = sessionId;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sessionId,
@@ -1793,6 +2115,15 @@ export function useIssueTracker() {
           });
           break;
 
+        // Playwright-script runs share the verification SSE envelope
+        // (`mcp-server/src/agent.ts:runScript`). The verification reducer
+        // owns verification-shaped state, so these two event kinds are
+        // explicit no-ops here — the new PlaywrightEditorPanel tracks
+        // them itself.
+        case "console_log":
+        case "screenshot_taken":
+          break;
+
         default: {
           // Exhaustiveness check — TS will flag a missing case here.
           const _exhaustive: never = event;
@@ -2050,11 +2381,55 @@ export function useIssueTracker() {
     const userPart = currentUser?.id ?? "anon";
     const next = `issue-tracker:${userPart}:${cryptoUuid()}`;
     setSessionId(next);
+    // Tool-result memory belongs to the abandoned conversation — a fresh
+    // session must not inherit "workspace_list_files → …" entries from a
+    // task whose history the model can no longer see.
+    resetWorkspaceAgentMemory();
     // Seed the new session with the greeting immediately so the panel
     // doesn't flash empty during the history fetch for an unused session.
     setChat(mockInitialChat);
-    setChatLoaded(true);
+    chatLoadedSessionRef.current = next;
   }, [currentUser?.id]);
+
+  // Stop button — request the running agent chain to cancel. The flag is
+  // one-shot: the next checkpoint observes it, posts the "⏹ Stopped"
+  // system line, clears the status and ends the run (see the auto-run
+  // dispatch, continuation gate and stall-nudge callbacks). Clearing the
+  // activity status here too gives instant feedback even while a model
+  // turn or in-flight tool is still draining.
+  const requestStopAgent = useCallback(() => {
+    agentStopRequestedRef.current = true;
+    agentStopAnnouncedRef.current = false;
+    setChatActivity(null);
+  }, []);
+
+  // Post a system transcript line into the active session (local + cloud).
+  // The agent's FAILURE paths — a continuation or nudge model call that
+  // the gateway rejects (auth expiry, 5xx, the chronic ERR_HTTP2 storms)
+  // — used to swallow the error and clear the status line, leaving the
+  // panel looking EXACTLY like a working run (observed live 2026-10-09:
+  // the IAM session expired mid-build, the next model call died, and the
+  // user stared at a blank panel after an "[Act] Typechecking…" promise,
+  // unable to tell "working" from "dead"). Every silent death now speaks.
+  const postAgentNotice = useCallback(
+    (content: string) => {
+      const notice: ChatMessage = {
+        id: nextMsgId(),
+        role: "system",
+        content,
+        timestamp: new Date().toISOString(),
+      };
+      setChat((cur) => [...cur, notice]);
+      void appendChatMessage
+        .mutateAsync({
+          sessionId,
+          role: "system",
+          content,
+        })
+        .catch(() => {});
+    },
+    [appendChatMessage, sessionId],
+  );
 
   // Switch to an existing conversation. The hydration effect picks this up
   // via the sessionId dep and re-runs.
@@ -2062,8 +2437,11 @@ export function useIssueTracker() {
     (next: string) => {
       if (!next || next === sessionId) return;
       setSessionId(next);
+      // Same reasoning as startNewSession — the other conversation's tool
+      // results would bleed into the new thread's model turns otherwise.
+      resetWorkspaceAgentMemory();
     },
-    [sessionId],
+    [sessionId, resetWorkspaceAgentMemory],
   );
 
   // Delete an entire chat session (every persisted message under its
@@ -2083,7 +2461,7 @@ export function useIssueTracker() {
             : "issue-tracker:anon";
           setSessionId(fallback);
           setChat(mockInitialChat);
-          setChatLoaded(true);
+          chatLoadedSessionRef.current = fallback;
         }
         toast.success("Conversation deleted.");
       } catch (err) {
@@ -2130,6 +2508,10 @@ export function useIssueTracker() {
         toolChoice?: { type: "any" | "auto" | "tool"; name?: string };
       },
     ) => {
+      // Status line: the model turn starts in "thinking" — every path
+      // that reaches the gateway (user send, auto-continuation, nudge)
+      // flows through here, so this one line covers all of them.
+      setChatActivity({ phase: "thinking" });
       // Snapshot the page state at send-time so the model sees exactly
       // what the user sees. Cheap (one shallow copy + filter pass) and
       // avoids stale-context surprises when a run finishes mid-send.
@@ -2152,6 +2534,10 @@ export function useIssueTracker() {
         // UI — see issueTrackerBindings.ts for why we don't read
         // `target.credentialId`.
         boundTargetsBySecretId,
+        // Live /panel workspace snapshot (workspaceId, root, open
+        // editor tabs) — stamped module-globally by WorkspacePage.
+        // Null when the user has no workspace folder open.
+        workspace: getWorkspaceChatState(),
       });
       // Give the model the last browser tool results — the AI call is
       // stateless per message, so this memory is the only way it can
@@ -2160,67 +2546,118 @@ export function useIssueTracker() {
       // workflow cycle needs for the next browser_click, so they are
       // kept generously.
       const browserMemory = browserResultRef.current.join("\n");
+      // Same for the non-browser tools (issue/project writes, the whole
+      // workspace_* surface) — the continuation turn reads this to see
+      // what its last action actually returned instead of re-running it.
+      const toolMemory = toolResultMemoryRef.current.join("\n");
+      // The file ledger — every workspace file this session has already
+      // read / written / confirmed-missing, one short line each. Long
+      // build tasks outlive the rolling memory above; without this the
+      // model re-reads the same files until the 60-step cap (seen live:
+      // package.json re-read ~15 times across six cap pauses in one M2
+      // build). Kept to the last 80 entries to bound tokens.
+      const ledger = [...workspaceFileLedgerRef.current.entries()];
+      const ledgerMemory = ledger.length
+        ? `[Workspace files already seen this session — never re-read these just to plan or verify; re-read only immediately before overwriting one whose exact current text you need]\n${ledger
+            .slice(-80)
+            .map(([p, how]) => `- ${p} (${how})`)
+            .join("\n")}`
+        : "";
+      const memoryBlock = [
+        browserMemory
+          ? `[Recent Playwright browser tool results]\n${browserMemory}`
+          : "",
+        toolMemory ? `[Recent tool results]\n${toolMemory}` : "",
+        ledgerMemory,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       // Plus the last few conversation turns (user questions + assistant
       // answers) so a multi-step browser session survives the stateless
       // call: "open X" → "click the login button" → "what did it show?".
+      // 14 turns × 1500 chars, not 6 × 500: on continuation turns the
+      // user's instruction reaches the model ONLY through this window
+      // (the full text rides the first turn's prompt alone), and a spec
+      // or correction message is 2–3K chars — at 500 chars it was cut
+      // into an unreadable fragment within a few turns and the agent
+      // reverted to building an older, wrong project from its residue
+      // context (observed live 2026-10-09: DataGuard build regenerated
+      // as Mess Manager twice). Worst case ≈ 21K chars of history.
       const history = chat
         .filter((m) => m.role === "user" || m.role === "assistant")
-        .slice(-6)
+        .slice(-14)
         .map((m) => ({
           role: m.role as "user" | "assistant",
-          content: m.content.slice(0, 500),
+          content: m.content.slice(0, 1500),
         }));
-      const reply = await issueTrackerApi.sendChatMessage(
-        browserMemory
-          ? `${promptForModel}\n\n[Recent Playwright browser tool results]\n${browserMemory}`
-          : promptForModel,
-        {
-          context,
-          tools: [...chatTools, ...browserTools],
-          history,
-          onRetry: (attempt, maxAttempts) =>
-            setAiRetryStatus(
-              `AI gateway hiccup — retrying request… (attempt ${attempt} of ${maxAttempts})`,
-            ),
-          // Per-request overrides from the user's saved UserAiConfig row.
-          // Empty strings mean "no override" — server falls back to .env.
-          // `gatewayProvider` selects anthropic vs openai on the proxy; an
-          // older row without a `provider` field falls through to
-          // "anthropic" via `toUserAiConfig`.
-          gatewayProvider: aiConfigQuery.data?.provider ?? "anthropic",
-          gatewayUrl: aiConfigQuery.data?.gatewayUrl ?? "",
-          gatewayModel: aiConfigQuery.data?.model ?? "",
-          gatewayToken: aiConfigQuery.data?.token ?? "",
-          // Force `tool_choice: any` when the caller asks for it. The
-          // browser_* walkthrough auto-continue uses this so the model
-          // CAN'T respond with prose alone — every turn must carry at
-          // least one tool_use block (typically browser_snapshot or
-          // browser_click, but anything in the browser_* set satisfies
-          // the API). Without this the model happily narrates "I'll
-          // click the next button…" and the walkthrough stalls.
-          toolChoice: runOptions?.toolChoice,
-        },
-      );
+      const reply = await issueTrackerApi
+        .sendChatMessage(
+          memoryBlock
+            ? `${promptForModel}\n\n${memoryBlock}`
+            : promptForModel,
+          {
+            context,
+            tools: [...chatTools, ...browserTools],
+            history,
+            onRetry: (attempt, maxAttempts) =>
+              setAiRetryStatus(
+                `AI gateway hiccup — retrying request… (attempt ${attempt} of ${maxAttempts})`,
+              ),
+            // Per-request overrides from the user's saved UserAiConfig row.
+            // Empty strings mean "no override" — server falls back to .env.
+            // `gatewayProvider` selects anthropic vs openai on the proxy; an
+            // older row without a `provider` field falls through to
+            // "anthropic" via `toUserAiConfig`.
+            gatewayProvider: aiConfigQuery.data?.provider ?? "anthropic",
+            gatewayUrl: aiConfigQuery.data?.gatewayUrl ?? "",
+            gatewayModel: aiConfigQuery.data?.model ?? "",
+            gatewayToken: aiConfigQuery.data?.token ?? "",
+            // Force `tool_choice: any` when the caller asks for it. The
+            // browser_* walkthrough auto-continue uses this so the model
+            // CAN'T respond with prose alone — every turn must carry at
+            // least one tool_use block (typically browser_snapshot or
+            // browser_click, but anything in the browser_* set satisfies
+            // the API). Without this the model happily narrates "I'll
+            // click the next button…" and the walkthrough stalls.
+            toolChoice: runOptions?.toolChoice,
+          },
+        )
+        // Dead-chain notice: every caller's failure path used to swallow
+        // this error (.catch(() => {})), so an auth expiry or gateway
+        // outage mid-run cleared the status line and left a blank panel
+        // that was indistinguishable from "still working". The notice
+        // rethrows so callers' timers/finally blocks behave as before.
+        .catch((err: unknown) => {
+          setAiRetryStatus(null);
+          setChatActivity(null);
+          const detail = err instanceof Error ? err.message : String(err);
+          postAgentNotice(
+            `⚠️ The model call failed — the agent chain stopped here (${detail.slice(0, 140)}). Send any message to retry.`,
+          );
+          throw err;
+        });
       setAiRetryStatus(null);
-      // Browser walkthrough steps (browser_*) run WITHOUT a permission
-      // card — navigating, snapshotting and clicking inside the
-      // verification browser is exactly what "verify this app" asks
-      // for, so each step executes right after its narration line.
-      // browser_run_code_unsafe stays carded (it is arbitrary code
-      // execution); every non-browser tool keeps its Allow/Deny card.
-      const isAutoRun = (name: string) =>
-        name.startsWith("browser_") && name !== "browser_run_code_unsafe";
-      const autoRun = (reply.toolUse ?? []).filter((t) => isAutoRun(t.name));
-      const shownActions = autoRun.length
-        ? reply.actions?.filter((a) => {
-            const name = a.payload?.toolName;
-            return !(
-              a.kind === "request_tool_permission" &&
-              typeof name === "string" &&
-              isAutoRun(name)
-            );
-          })
-        : reply.actions;
+      // Tiered auto-run (see chatToolSafety.ts): browser walkthrough
+      // steps AND safe workspace build actions (reads, file writes,
+      // allowlisted shell) execute WITHOUT a permission card — only
+      // destructive/important actions keep theirs. Classification is
+      // per tool_use block (an exec's safety depends on its command),
+      // so the card filter matches on toolUseId, not tool name.
+      const autoRun = (reply.toolUse ?? []).filter((t) =>
+        isSafeAutoRun({ name: t.name, input: t.input }),
+      );
+      const autoIds = new Set(autoRun.map((t) => t.id));
+      const shownActions =
+        autoIds.size > 0
+          ? reply.actions?.filter((a) => {
+              const id = a.payload?.toolUseId;
+              return !(
+                a.kind === "request_tool_permission" &&
+                typeof id === "string" &&
+                autoIds.has(id)
+              );
+            })
+          : reply.actions;
       const replyToShow =
         autoRun.length && (!shownActions || shownActions.length === 0)
           ? { ...reply, actions: undefined }
@@ -2232,8 +2669,28 @@ export function useIssueTracker() {
       // forced-reminder injection in the auto-continue block below.
       if (reply.toolUse && reply.toolUse.length > 0) {
         narrationOnlyStreakRef.current = 0;
+        lastNarrationLenRef.current = 0;
+        // A tool actually ran — the model is making progress, so its
+        // nudge budget for the current stall recovers too.
+        agentNudgeCountRef.current = 0;
       } else {
         narrationOnlyStreakRef.current += 1;
+        // Length of the narration-only reply. A real final report is
+        // long; a stall narration is a one-line promise ("Reading
+        // src/pages/Overview.tsx to confirm…"). The nudge only fires
+        // for the short ones so a genuine report never costs a turn.
+        lastNarrationLenRef.current = (reply.content ?? "").length;
+        // Shift the previous narration down BEFORE overwriting — the
+        // verbatim-repeat detector (see scheduleStallNudge) compares
+        // the last two narration-only replies.
+        prevNarrationTextRef.current = lastNarrationTextRef.current;
+        // Full text of the narration-only reply — the plan-shape check
+        // (isPlanLikeNarration) reads it, because a STALL can be long
+        // too: "Pivoting to: delete the 11 remaining entries…" is a
+        // promise about the future, not a report about the past
+        // (observed live 2026-10-09 — the 400-char heuristic let it
+        // through and the chain sat idle).
+        lastNarrationTextRef.current = reply.content ?? "";
       }
       lastAutoTurnAtRef.current = Date.now();
       setChat((cur) => [...cur, replyToShow]);
@@ -2253,6 +2710,9 @@ export function useIssueTracker() {
       // live chat lookup hasn't caught up yet.
       autoRun.forEach((t) => {
         window.setTimeout(() => {
+          // Stop button pressed between turns — drop the queued auto-run
+          // steps instead of firing them into a run the user cancelled.
+          if (agentStopRequestedRef.current) return;
           void applyChatActionRef.current?.({
             id: `auto-${t.id}`,
             label: "Allow",
@@ -2261,10 +2721,25 @@ export function useIssueTracker() {
           });
         }, 60);
       });
+      // Turn over: with queued auto-run steps the NEXT thing the user
+      // sees must not be a blank panel — applyChatAction flips this to
+      // the specific "Writing src/App.tsx…" within 60ms, but between
+      // here and there the status line would render NOTHING (observed
+      // live 2026-10-09: the whole auto-run burst read as silent —
+      // "✓ Done" lines appeared with no indicator anything was running,
+      // and the gaps between turns showed an idle chat mid-task). Only
+      // a reply with NO auto-run steps (prose / pending cards / final
+      // report) genuinely goes idle.
+      if (autoRun.length > 0) {
+        setChatActivity({ phase: "executing", detail: "Executing tool steps…" });
+      } else {
+        setChatActivity(null);
+      }
       return reply;
     },
     [
       appendChatMessage,
+      postAgentNotice,
       sessionId,
       targets,
       secrets,
@@ -2283,13 +2758,39 @@ export function useIssueTracker() {
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+      // A user message is an explicit new instruction — a stale stop
+      // request from a previous cancelled run must not kill this one.
+      agentStopRequestedRef.current = false;
+      agentStopAnnouncedRef.current = false;
       const userMsg: ChatMessage = {
-        id: `msg-${Date.now()}`,
+        id: nextMsgId(),
         role: "user",
         content: trimmed,
         timestamp: new Date().toISOString(),
       };
-      setChat((cur) => [...cur, userMsg]);
+      setChat((cur) => [
+        // Expiry sweep: any permission card from a PREVIOUS turn that is
+        // still pending is now stale — the user's new message takes
+        // priority, and clicking an old Allow afterwards would fire an
+        // action the model proposed against a plan that just changed.
+        // applyChatAction's label guard makes the relabeled cards inert.
+        ...cur.map((m) =>
+          m.actions?.some(
+            (a) =>
+              a.kind === "request_tool_permission" && a.label === "Allow",
+          )
+            ? {
+                ...m,
+                actions: m.actions.map((a) =>
+                  a.kind === "request_tool_permission" && a.label === "Allow"
+                    ? { ...a, label: "Expired", id: `${a.id}-expired` }
+                    : a,
+                ),
+              }
+            : m,
+        ),
+        userMsg,
+      ]);
       // Persist the user turn immediately so a network blip on the AI reply
       // doesn't lose the question. Failures are silently swallowed — the
       // local state already has the message.
@@ -2318,15 +2819,29 @@ export function useIssueTracker() {
         /\b(app|application|site|website|web\s?app|target|url|product|portal)\b/i.test(
           trimmed,
         ) || trimmed.split(/\s+/).length <= 3;
+      // Build-task signals — "run the app" while a code workspace is in
+      // play is a dev-server + browser-walk job, not a live-URL
+      // verification ask. Observed live 2026-10-09: "start the dev
+      // server … re-verify … fix whatever is broken" matched verifyIntent
+      // via "re-verify" and got hijacked into this picker, so the model
+      // never saw the message. Any build/tooling vocabulary or a
+      // Windows/macOS path (naming the workspace folder) routes to the
+      // model instead — with the routing section in its system prompt it
+      // disambiguates better than this regex can.
+      const workspaceTask =
+        /\b(dev\s?server|npm|npx|pnpm|yarn|build|typecheck|tsc|vite|localhost|workspace|panel|browser_navigate|source|code|compile)\b/i.test(
+          trimmed,
+        ) || /[A-Za-z]:[\\/]/.test(trimmed);
       if (
         targets.length > 0 &&
         verifyIntent &&
         !namesUrl &&
         !aboutIssue &&
+        !workspaceTask &&
         refersToApp
       ) {
         const pickerMsg: ChatMessage = {
-          id: `msg-picker-${Date.now()}`,
+          id: nextMsgId("msg-picker"),
           role: "assistant",
           content:
             "Sure — which app should I verify? Pick one of your verification targets, or paste a different URL below.",
@@ -2352,7 +2867,21 @@ export function useIssueTracker() {
       // prior walkthrough can't bleed into the new one.
       agentTurnsRef.current = 0;
       narrationOnlyStreakRef.current = 0;
+      agentNudgeCountRef.current = 0;
+      // A fresh user message resumes the chain, so the dead-end ladder
+      // (auto-recovery → user notice) may run again if THIS stretch
+      // stalls out too.
+      agentStallExhaustedAnnouncedRef.current = 0;
       invalidObservationStreakRef.current = 0;
+      // The dead-end ladder's [Recovery] nudge quotes "your own last
+      // plan" back at the model. A promise captured before this message
+      // may be exactly what the user just superseded — quoting it would
+      // command the model to re-execute the outdated step (observed live
+      // 2026-10-09: the model kept re-promising a scroll step the user
+      // had replaced with a browser_evaluate read). Clear both narrations
+      // so the next quote, if any, comes from post-message behavior only.
+      lastNarrationTextRef.current = "";
+      prevNarrationTextRef.current = "";
       lastProgressAtRef.current = null;
       lastAutoTurnAtRef.current = null;
       // Force tool use on the FIRST turn of any browser-verification ask.
@@ -2370,11 +2899,66 @@ export function useIssueTracker() {
         await runModelTurn(trimmed, {
           toolChoice: isBrowserTask ? { type: "any" } : undefined,
         });
+        // FIRST-TURN STALL GUARD: the auto-continue loop schedules its
+        // stall nudge only AFTER a tool has run, so a narration-only
+        // reply on the FIRST model turn of a user message killed the
+        // chain silently (observed live 2026-10-09: "Stopping the dev
+        // server first…" — prose promised the action, no tool_use block
+        // followed, chat idle forever). Same short-stall heuristic as
+        // the continuation path: a SHORT narration-only reply with no
+        // newer turn landing within 30s gets one corrective nudge
+        // (budget 2 per user message, reset above). A LONG reply is a
+        // legitimate answer and is left alone. A plan-shaped narration
+        // ("Pivoting to: delete…") stalls too regardless of length.
+        if (
+          narrationOnlyStreakRef.current >= 1 &&
+          (lastNarrationLenRef.current < 400 ||
+            isPlanLikeNarration(lastNarrationTextRef.current)) &&
+          agentNudgeCountRef.current < 2
+        ) {
+          const turnAt = lastAutoTurnAtRef.current ?? Date.now();
+          window.setTimeout(() => {
+            // Stop requested — skip the nudge. The flag is left alone:
+            // it belongs to the continuation gate (and to whatever
+            // stacked completions are still draining), not to this timer.
+            if (agentStopRequestedRef.current) return;
+            // A newer turn (tool ran, nudge already fired, or the user
+            // sent another message — any of them touches these refs)
+            // means this stall is already handled or moot.
+            if (lastAutoTurnAtRef.current !== turnAt) return;
+            if (
+              narrationOnlyStreakRef.current >= 1 &&
+              (lastNarrationLenRef.current < 400 ||
+                isPlanLikeNarration(lastNarrationTextRef.current)) &&
+              agentNudgeCountRef.current < 2
+            ) {
+              agentNudgeCountRef.current += 1;
+              // Plan-shaped stalls force tool_use (same reasoning as the
+              // continuation nudge): the reply PROMISED an action, so it
+              // cannot be a legitimate final report — without the force
+              // the nudge's answer was just another promise and the
+              // budget died with the chain (observed live, DataGuard
+              // round 3). Short report-shaped stalls keep free-form.
+              const firstTurnStallIsPlan = isPlanLikeNarration(
+                lastNarrationTextRef.current,
+              );
+              void runModelTurn(
+                `[Nudge] Your last reply DESCRIBED an action but made no tool call — a text-only reply cannot advance this task. Do NOT write prose, do not restate your plan. Emit exactly ONE tool_use block (the next tool of your plan) with no text before or after it. Only if the task is genuinely complete, reply with the final report (under 120 words) instead.`,
+                {
+                  toolChoice: firstTurnStallIsPlan
+                    ? ({ type: "any" } as const)
+                    : undefined,
+                },
+              ).catch(() => {});
+            }
+          }, 30_000);
+        }
       } catch {
         toast.error("Unable to send message.");
       } finally {
         setSendingMessage(false);
         setAiRetryStatus(null);
+        setChatActivity(null);
       }
     },
     [toast, sessionId, appendChatMessage, runModelTurn, targets],
@@ -3219,6 +3803,754 @@ export function useIssueTracker() {
             }`;
           }
         }
+        // ── Workspace (/panel) tools ───────────────────────────────
+        // All resolve the live workspace (id + root) from the module
+        // bridge — no workspace open → refuse with a clear hint. Every
+        // path is workspace-relative and guarded against traversal and
+        // .env/credential access before it reaches the backend.
+        case "workspace_list_files": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const sub = typeof tool.input.path === "string" ? tool.input.path : "";
+          if (sub) {
+            const bad = guardWorkspacePath(sub);
+            if (bad) return bad;
+          }
+          try {
+            // The backend /list walks from the picked ROOT only — the
+            // `path` argument used to be validated and then silently
+            // dropped, so "list src/pages" returned the root tree and
+            // the model read the two shapes as contradictory evidence
+            // (observed live in the DataGuard dogfood: four list calls,
+            // two different outputs, an essay about a "contradiction").
+            // Fetch deep enough to cover the sub-path's own entries,
+            // then prune the walk down to that subtree.
+            // "." is a valid "the root itself" path (the model sent it
+            // five times in the DataGuard build) — dropping "." segments
+            // here maps ".", "./src", "src/." onto their real subtrees
+            // instead of hunting for a dir literally named ".".
+            const segs = sub
+              .split(/[\\/]+/)
+              .filter((s) => s && s !== ".");
+            const depth =
+              (typeof tool.input.maxDepth === "number"
+                ? Math.min(8, Math.max(1, Math.round(tool.input.maxDepth)))
+                : 2) + segs.length;
+            const tree = await devServerApi.listTree({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              maxDepth: Math.min(12, depth),
+            });
+            let scoped: FileNode[] = tree;
+            for (const seg of segs) {
+              const dir = scoped.find((n) => n.kind === "dir" && n.name === seg);
+              if (!dir) {
+                return `Skipped — "${sub}" does not exist in the workspace. Use workspace_list_files without a path to see the root.`;
+              }
+              scoped = dir.children ?? [];
+            }
+            return `Workspace tree of ${segs.length ? `"${sub}"` : `root ${ws.root}`}:\n${formatWorkspaceTree(scoped).join("\n") || "(empty)"}`;
+          } catch (err) {
+            return `Couldn't list the tree — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_read_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            const content = await devServerApi.readUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+            });
+            if (content === null) {
+              workspaceFileLedgerRef.current.set(path!, "confirmed missing");
+              return `Skipped — "${path}" does not exist in the workspace. Use workspace_list_files to find the right path.`;
+            }
+            workspaceFileLedgerRef.current.set(path!, "read");
+            // Page big files through a generous window instead of a hard
+            // clip — the model needs to SEE whole files (types + seeds +
+            // actions) or its full-file rewrites drop code. Paging hint
+            // tells it exactly how to continue; `offset` comes from the
+            // tool input (chatTools workspace_read_file schema).
+            const offset =
+              typeof tool.input.offset === "number" && tool.input.offset > 0
+                ? Math.floor(tool.input.offset)
+                : 0;
+            const WINDOW = 48_000;
+            const slice = content.slice(offset, offset + WINDOW);
+            const header =
+              offset > 0
+                ? `Content of ${path} (from char ${offset}):\n`
+                : `Content of ${path}:\n`;
+            if (offset + slice.length < content.length) {
+              return `${header}${slice}\n\n[Showing chars ${offset}–${offset + slice.length} of ${content.length} total. Call workspace_read_file again with offset: ${offset + WINDOW} to read the next part.]`;
+            }
+            return `${header}${slice}`;
+          } catch (err) {
+            return `Couldn't read the file — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_write_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const content = tool.input.content as string | undefined;
+          if (typeof content !== "string") {
+            return "Skipped — missing content.";
+          }
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          if (content.length > 1_000_000) {
+            return "Skipped — content exceeds the 1MB server cap. Split the file or reduce it.";
+          }
+          try {
+            await devServerApi.writeUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+              content,
+            });
+            workspaceFileLedgerRef.current.set(path!, "written by you");
+            return `Wrote ${path} (${content.length} chars).`;
+          } catch (err) {
+            return `Couldn't write the file — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_edit_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const oldStr = tool.input.oldStr as string | undefined;
+          const newStr = tool.input.newStr as string | undefined;
+          if (typeof oldStr !== "string" || typeof newStr !== "string") {
+            return "Skipped — workspace_edit_file needs both oldStr and newStr as strings.";
+          }
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            const res = await devServerApi.editUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+              oldStr,
+              newStr,
+              replaceAll: tool.input.replaceAll === true,
+            });
+            workspaceFileLedgerRef.current.set(path!, "written by you");
+            return `Edited ${path} — ${res.replacements} replacement(s), file now ${res.size} chars.`;
+          } catch (err) {
+            // The server's refusal messages (oldStr not found / not
+            // unique) carry the exact self-correction hint — pass them
+            // through verbatim.
+            return `Couldn't edit the file — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_create_folder": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            await devServerApi.mkdirUserPath({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+            });
+            return `Created folder ${path}.`;
+          } catch (err) {
+            return `Couldn't create the folder — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_delete_path": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            await devServerApi.deleteUserPath({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+            });
+            return `Deleted ${path}.`;
+          } catch (err) {
+            return `Couldn't delete — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_rename_path": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const oldPath = tool.input.oldPath as string | undefined;
+          const newPath = tool.input.newPath as string | undefined;
+          const badOld = oldPath
+            ? guardWorkspacePath(oldPath)
+            : "Skipped — missing oldPath.";
+          if (badOld) return badOld;
+          const badNew = newPath
+            ? guardWorkspacePath(newPath)
+            : "Skipped — missing newPath.";
+          if (badNew) return badNew;
+          try {
+            await devServerApi.renameUserPath({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              oldPath: oldPath!,
+              newPath: newPath!,
+            });
+            return `Renamed ${oldPath} → ${newPath}.`;
+          } catch (err) {
+            return `Couldn't rename — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_search": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const query = tool.input.query as string | undefined;
+          if (!query) return "Skipped — missing query.";
+          try {
+            const res = await devServerApi.search({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              query,
+              caseSensitive: tool.input.caseSensitive === true,
+              wholeWord: tool.input.wholeWord === true,
+              regex: tool.input.regex === true,
+              includeGlobs: Array.isArray(tool.input.includeGlobs)
+                ? (tool.input.includeGlobs as string[])
+                : undefined,
+              excludeGlobs: Array.isArray(tool.input.excludeGlobs)
+                ? (tool.input.excludeGlobs as string[])
+                : undefined,
+              maxResults:
+                typeof tool.input.maxResults === "number"
+                  ? Math.min(5000, Math.round(tool.input.maxResults))
+                  : undefined,
+            });
+            if (res.results.length === 0) return "No matches.";
+            const lines = res.results
+              .slice(0, 40)
+              .map(
+                (r) =>
+                  `${r.path}:${r.line}:${r.column}: ${r.preview.trim()}`,
+              );
+            const more =
+              res.results.length > 40
+                ? `\n… and ${res.results.length - 40} more matches`
+                : "";
+            return `${res.count} match(es)${res.truncated ? " (truncated — refine the query)" : ""}:\n${lines.join("\n")}${more}`;
+          } catch (err) {
+            return `Search failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_exec_command": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const command = tool.input.command as string | undefined;
+          const bad = guardWorkspaceCommand(command ?? "");
+          if (bad) return bad;
+          // Long-lived dev servers via BLOCKING exec = timeout kill + an
+          // orphaned child on Windows (.cmd shim outlives the kill).
+          // Observed live 2026-10-09: three orphaned vite processes
+          // squatting ports 5174-5177 came from exactly this path.
+          // Steer to the dedicated tool instead of letting the trap
+          // spring a fourth time.
+          if (
+            /^\s*npm(?:\s|--prefix\s+\S+)\s+run\s+(dev|start|serve|preview)\b/i.test(
+              command ?? "",
+            ) ||
+            /^\s*(vite|next\s+dev|next\s+start|ng\s+serve|yarn\s+dev|pnpm\s+dev)\b/i.test(
+              command ?? "",
+            )
+          ) {
+            return `Refused — \`${command}\` is a long-lived server and workspace_exec_command is BLOCKING: it would be killed at the timeout and orphan its child process on Windows. Use \`workspace_dev_server\` (action=start) instead — it spawns via the dev-server manager, waits for readiness, and returns the URL.`;
+          }
+          try {
+            const result = await devServerApi.execUserCommand({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              command: command!,
+              timeoutMs:
+                typeof tool.input.timeoutMs === "number"
+                  ? Math.min(
+                      300_000,
+                      Math.max(1_000, Math.round(tool.input.timeoutMs)),
+                    )
+                  : undefined,
+            });
+            return `Command \`${command}\` in ${ws.root}\n${formatExecResult(result)}`;
+          } catch (err) {
+            return `Command failed to run — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_dev_server": {
+          // Start/stop/status for the workspace's long-lived dev
+          // server — the chat-side twin of the Dev-servers panel.
+          // Start waits for HTTP readiness so the model can immediately
+          // hand the preview URL to the browser_* walkthrough tools.
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const action = (tool.input.action as string) ?? "status";
+          if (action === "stop") {
+            const port =
+              typeof tool.input.port === "number"
+                ? Math.round(tool.input.port)
+                : undefined;
+            if (!port) {
+              return "Skipped — action=stop needs the `port` you started the server on.";
+            }
+            try {
+              await devServerApi.stopDevServer({
+                workspaceId: ws.workspaceId,
+                port,
+              });
+              return `Stopped the dev server on port ${port}.`;
+            } catch (err) {
+              return `Stop failed — ${err instanceof Error ? err.message : String(err)}`;
+            }
+          }
+          if (action === "status") {
+            const port =
+              typeof tool.input.port === "number"
+                ? Math.round(tool.input.port)
+                : 5173;
+            try {
+              const rec = await devServerApi.getStatus({
+                workspaceId: ws.workspaceId,
+                port,
+              });
+              if (!rec) {
+                return `No dev server record for port ${port} — nothing has been started there in this workspace.`;
+              }
+              return `Dev server on port ${rec.port}: status=${rec.status}, command=\`${rec.command} ${rec.args.join(" ")}\`${rec.status === "ready" || rec.status === "running" ? `, URL=http://localhost:${rec.port}` : ""}${rec.lastExitCode != null ? `, lastExitCode=${rec.lastExitCode}` : ""}`;
+            } catch (err) {
+              return `Status check failed — ${err instanceof Error ? err.message : String(err)}`;
+            }
+          }
+          // action === "start"
+          const script =
+            typeof tool.input.script === "string" && tool.input.script.trim()
+              ? tool.input.script.trim()
+              : "dev";
+          const port =
+            typeof tool.input.port === "number"
+              ? Math.round(tool.input.port)
+              : 5173;
+          try {
+            await devServerApi.startDevServer({
+              workspaceId: ws.workspaceId,
+              port,
+              command: "npm",
+              args: ["run", script],
+              // Run in the user's real folder — without this the
+              // backend spawns in its sandbox dir (no package.json
+              // there; observed live 2026-10-09: the wrong app's dev
+              // script ran entirely).
+              root: ws.root,
+            });
+            // Tell the Dev-servers panel so the row + SSE tail appear
+            // without a remount. Decoupled via a window event — the
+            // chat store can't reach the DevServerProvider from here.
+            window.dispatchEvent(
+              new CustomEvent("lattice:dev-server-started", {
+                detail: {
+                  workspaceId: ws.workspaceId,
+                  port,
+                  command: "npm",
+                  args: ["run", script],
+                },
+              }),
+            );
+            // Poll for readiness — the backend flips starting→ready
+            // when the port answers HTTP, or →failed when the child
+            // dies. 30s cap mirrors the panel's readiness budget.
+            // `actualPort` rides along when the server bumped ports
+            // (vite: "Port X is in use, trying another one") — the
+            // report below points the model at the REAL URL.
+            const deadline = Date.now() + 30_000;
+            let status: string = "starting";
+            let actualPort: number | null = null;
+            while (Date.now() < deadline) {
+              await new Promise((r) => setTimeout(r, 500));
+              const rec = await devServerApi.getStatus({
+                workspaceId: ws.workspaceId,
+                port,
+              });
+              if (!rec) break;
+              status = rec.status;
+              if (rec.actualPort) actualPort = rec.actualPort;
+              if (status === "ready" || status === "running" || status === "failed") break;
+            }
+            if (status === "failed") {
+              // Pull the boot log tail so the model can self-diagnose
+              // WITHOUT falling back to a blocking `npm run dev` exec
+              // (which orphans its child on this Windows setup).
+              let boot = "";
+              try {
+                const res = await fetch(
+                  `/api/dev-server/${encodeURIComponent(ws.workspaceId)}/${port}/events`,
+                );
+                const text = await res.text();
+                const msgs = [
+                  ...text.matchAll(
+                    /"kind":"(?:devserver_log|devserver_error)","(?:level":"\w+",")?message":"((?:[^"\\]|\\.)*)"/g,
+                  ),
+                ].map((m) => m[1]);
+                boot = msgs
+                  .slice(-4)
+                  .map((s) =>
+                    s
+                      .replace(/\\n/g, "\n")
+                      .replace(/\\"/g, '"')
+                      .replace(/\\\\/g, "\\"),
+                  )
+                  .join("\n")
+                  .slice(0, 800);
+              } catch {
+                // Events tail is best-effort — the hint below suffices.
+              }
+              return `Dev server FAILED to start (npm run ${script} on port ${port}).${boot ? `\nBoot output:\n${boot}\n` : ""}\nCommon causes: the script doesn't exist in package.json (check with workspace_npm_scripts), the port is taken (retry with a different port), or the app crashed at boot (see the output above). NEVER diagnose with \`npm run ${script}\` via workspace_exec_command — that's blocking and orphans its child process; use action=start on a different port instead.`;
+            }
+            if (status !== "ready" && status !== "running") {
+              return `Dev server is still starting after 30s (status=${status}). It may just be slow — check again with action=status, or try a different port.`;
+            }
+            const urlPort = actualPort ?? port;
+            const bumped = actualPort && actualPort !== port
+              ? ` NOTE: the server bumped ports — it actually serves on http://localhost:${actualPort} (the requested ${port} was busy); use THAT URL, and remember it for action=stop (stop still takes ${port}, the requested one).`
+              : "";
+            return `Dev server READY — \`npm run ${script}\` on http://localhost:${urlPort}.${bumped} Open that URL with browser_navigate to walk the app's UI.`;
+          } catch (err) {
+            return `Start failed — ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+        case "workspace_npm_scripts": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            // Read package.json directly (NOT inspectPackage — that
+            // summary doesn't carry scripts). A missing/malformed
+            // package.json is the normal "not a Node project" state.
+            const raw = await devServerApi.readUserFile({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: "package.json",
+            });
+            if (raw === null) {
+              return "No package.json found at the workspace root — this folder isn't a Node project.";
+            }
+            let pkg: {
+              name?: string;
+              version?: string;
+              scripts?: Record<string, string>;
+              dependencies?: Record<string, string>;
+              devDependencies?: Record<string, string>;
+            };
+            try {
+              pkg = JSON.parse(raw);
+            } catch {
+              return "package.json exists but is malformed JSON — the user should fix it first.";
+            }
+            const fmt = (deps: Record<string, string> | undefined) => {
+              const entries = Object.entries(deps ?? {});
+              if (!entries.length) return "  (none)";
+              return entries
+                .slice(0, 40)
+                .map(([k, v]) => `  ${k}@${v}`)
+                .join("\n");
+            };
+            return [
+              `package: ${pkg.name ?? "?"}@${pkg.version ?? "?"}`,
+              "scripts (run with workspace_exec_command, `npm run <name>`):",
+              fmt(pkg.scripts),
+              "dependencies:",
+              fmt(pkg.dependencies),
+              "devDependencies:",
+              fmt(pkg.devDependencies),
+            ].join("\n");
+          } catch (err) {
+            return `Couldn't read package.json — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_open_file": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          const openFile = getWorkspaceOpenFile();
+          if (!openFile) {
+            return "Skipped — the workspace editor isn't mounted right now.";
+          }
+          openFile(path!);
+          return `Opened ${path} in the editor.`;
+        }
+        case "workspace_open_folder": {
+          // Deliberately does NOT require an open folder — switching to
+          // one from a bare /panel page is its whole point. The setter
+          // validates the path server-side and refuses phantom folders.
+          const setter = getWorkspaceSetRoot();
+          if (!setter) {
+            return "Skipped — the workspace page (/panel) isn't open. Ask the user to open it from the sidebar first, then retry with the absolute folder path.";
+          }
+          const path = tool.input.path as string | undefined;
+          if (!path || !path.trim()) {
+            return "Skipped — missing path. Ask the user for the absolute folder path (e.g. D:\\projects\\my-app).";
+          }
+          const message = await setter(path.trim());
+          if (!message.startsWith("Opened")) {
+            return `${message} — the folder must already exist on disk. Ask the user to create it (or correct the path) and retry.`;
+          }
+          return `${message}. The workspace root is now ${path.trim()} — list it with workspace_list_files before touching files.`;
+        }
+        case "workspace_git_status": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            const status = await devServerApi.gitStatus({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+            });
+            return formatGitStatus(status);
+          } catch (err) {
+            return `git status failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_branches": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            const branches = await devServerApi.gitBranches({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+            });
+            return branches
+              .map((b) => `${b.current ? "→ " : "  "}${b.name}`)
+              .join("\n");
+          } catch (err) {
+            return `git branches failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_diff": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const path = tool.input.path as string | undefined;
+          const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
+          if (bad) return bad;
+          try {
+            const diff = await devServerApi.gitDiff({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              path: path!,
+              staged: tool.input.staged === true,
+            });
+            return diff
+              ? `Diff of ${path}:\n${clip(diff, 8000)}`
+              : "(no diff — untracked or unchanged)";
+          } catch (err) {
+            return `git diff failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_stage":
+        case "workspace_git_unstage": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const paths = Array.isArray(tool.input.paths)
+            ? (tool.input.paths as string[])
+            : [];
+          for (const p of paths) {
+            const bad = guardWorkspacePath(p);
+            if (bad) return `${bad} (path: ${p})`;
+          }
+          const staging = tool.name === "workspace_git_stage";
+          if (!staging && paths.length === 0) {
+            return "Skipped — name at least one file to unstage.";
+          }
+          try {
+            if (staging) {
+              await devServerApi.gitStage({
+                workspaceId: ws.workspaceId,
+                root: ws.root,
+                paths,
+              });
+              return paths.length
+                ? `Staged: ${paths.join(", ")}`
+                : "Staged all changes (git add -A).";
+            }
+            await devServerApi.gitUnstage({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              paths,
+            });
+            return `Unstaged: ${paths.join(", ")}`;
+          } catch (err) {
+            return `git ${staging ? "stage" : "unstage"} failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_discard": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const paths = Array.isArray(tool.input.paths)
+            ? (tool.input.paths as string[])
+            : [];
+          if (paths.length === 0) {
+            return "Skipped — name the files whose changes should be discarded (never discard everything blindly).";
+          }
+          for (const p of paths) {
+            const bad = guardWorkspacePath(p);
+            if (bad) return `${bad} (path: ${p})`;
+          }
+          try {
+            await devServerApi.gitDiscard({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              paths,
+            });
+            return `Discarded uncommitted changes in: ${paths.join(", ")}`;
+          } catch (err) {
+            return `git discard failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_commit": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const message = tool.input.message as string | undefined;
+          if (!message || !message.trim()) {
+            return "Skipped — missing commit message.";
+          }
+          try {
+            const summary = await devServerApi.gitCommit({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              message,
+            });
+            return summary
+              ? `Committed — ${summary}`
+              : `Committed: "${message}"`;
+          } catch (err) {
+            return `git commit failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_push":
+        case "workspace_git_pull": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          try {
+            const output =
+              tool.name === "workspace_git_push"
+                ? await devServerApi.gitPush({
+                    workspaceId: ws.workspaceId,
+                    root: ws.root,
+                  })
+                : await devServerApi.gitPull({
+                    workspaceId: ws.workspaceId,
+                    root: ws.root,
+                  });
+            return `${
+              tool.name === "workspace_git_push" ? "Push" : "Pull"
+            } output:\n${clip(output || "(done, no output)", 3000)}`;
+          } catch (err) {
+            return `${
+              tool.name === "workspace_git_push" ? "git push" : "git pull"
+            } failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        case "workspace_git_checkout": {
+          const ws = getWorkspaceChatState();
+          if (!ws) {
+            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
+          }
+          const branch = tool.input.branch as string | undefined;
+          if (!branch) return "Skipped — missing branch.";
+          try {
+            await devServerApi.gitCheckout({
+              workspaceId: ws.workspaceId,
+              root: ws.root,
+              branch,
+            });
+            return `Switched to branch ${branch}.`;
+          } catch (err) {
+            return `git checkout failed — ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
         default: {
           // Browser tools from the official Playwright MCP catalog. Names
           // are whatever @playwright/mcp ships (browser_navigate,
@@ -3334,6 +4666,19 @@ export function useIssueTracker() {
           const toolUseId = action.payload?.toolUseId as string | undefined;
           const toolName = action.payload?.toolName as string | undefined;
           if (!toolUseId || !toolName) return;
+          // A MANUAL Allow click is the user re-engaging the agent — a
+          // stale stop request from a previously cancelled run must not
+          // eat this one (the auto-run dispatcher prefixes its ids with
+          // "auto-", so anything else here is a human click).
+          if (!action.id.startsWith("auto-")) {
+            agentStopRequestedRef.current = false;
+            agentStopAnnouncedRef.current = false;
+          }
+          // Only a live "Allow" card may execute. "Allowed" is the
+          // post-click state, "Denied"/"Expired" mean the user or a new
+          // message already retired this proposal — firing them would
+          // execute a stale action.
+          if (action.label !== "Allow") return;
           // Idempotency: an Allow click executes a tool call exactly once,
           // no matter how the action gets re-fired.
           if (executedToolIdsRef.current.has(toolUseId)) return;
@@ -3379,12 +4724,32 @@ export function useIssueTracker() {
             ),
           );
           try {
+            // Status line: show WHAT is running, not just a spinner —
+            // the same one-liner the "✓ Done" entry will use.
+            setChatActivity({
+              phase: "executing",
+              detail:
+                toolActionSummary[toolName as keyof typeof toolActionSummary]?.(
+                  tool.input,
+                ) ?? `${toolName}…`,
+            });
             const summary = await executeTool(tool);
+            // Remember the result for the NEXT model turn — the stateless
+            // AI call otherwise can't see what its own tool returned (the
+            // "✓ Done" line is a system message, which the history
+            // builder skips). Browser tools are excluded: executeTool
+            // already feeds them into browserResultRef.
+            if (!tool.name.startsWith("browser_")) {
+              toolResultMemoryRef.current = [
+                ...toolResultMemoryRef.current.slice(-3),
+                `${tool.name} → ${summary.slice(0, 4000)}`,
+              ];
+            }
             // Surface the result back into the chat so the user has a
             // confirmation in-thread, and persist it for the session
             // history.
             const doneMsg: ChatMessage = {
-              id: `msg-${Date.now()}`,
+              id: nextMsgId(),
               role: "system",
               content: `✓ Done — ${summary}`,
               timestamp: new Date().toISOString(),
@@ -3413,19 +4778,65 @@ export function useIssueTracker() {
               "verify_live_url",
             ]);
             if (!SKIP_CONTINUE.has(tool.name)) {
-              if (agentTurnsRef.current >= 60) {
-                const stopMsg: ChatMessage = {
-                  id: `msg-${Date.now()}`,
-                  role: "system",
-                  content:
-                    "Auto-continuation paused after 60 steps (runaway-loop safety cap) — send any message to continue.",
-                  timestamp: new Date().toISOString(),
-                };
-                setChat((cur) => [...cur, stopMsg]);
+              // Stop button — end the run BEFORE spending another model
+              // turn. The flag is NOT cleared here: late completions from
+              // the same burst re-enter this gate and must break too.
+              // The transcript line is announced once per stop request.
+              if (agentStopRequestedRef.current) {
+                if (!agentStopAnnouncedRef.current) {
+                  agentStopAnnouncedRef.current = true;
+                  const stopMsg: ChatMessage = {
+                    id: nextMsgId(),
+                    role: "system",
+                    content:
+                      "⏹ Stopped — the agent run was cancelled. Send a message to continue.",
+                    timestamp: new Date().toISOString(),
+                  };
+                  setChat((cur) => [...cur, stopMsg]);
+                  void appendChatMessage
+                    .mutateAsync({
+                      sessionId,
+                      role: "system",
+                      content: stopMsg.content,
+                    })
+                    .catch(() => {});
+                }
+                setSendingMessage(false);
+                setAiRetryStatus(null);
+                setChatActivity(null);
+                break;
+              }
+              if (agentTurnsRef.current >= 200) {
+                // Emit the pause notice ONCE — an auto-run burst leaves
+                // several tools in flight when the cap lands, and each
+                // of their completions re-enters this branch. Bumping the
+                // counter to 201 is what makes === a true one-shot: the
+                // counter never grows past 200 on its own (the increment
+                // sits behind this break), so a plain === test kept firing
+                // on every late tool completion — ten stacked pause lines
+                // in one DataGuard build (observed live 2026-10-09).
+                // 200, not 60: a real app build spends a step per file
+                // (write + verify), and a full multi-page spec blew
+                // through 60 mid-scaffold — the model then "finished"
+                // with a starter template (observed live 2026-10-09).
+                if (agentTurnsRef.current === 200) {
+                  agentTurnsRef.current = 201;
+                  const stopMsg: ChatMessage = {
+                    id: nextMsgId(),
+                    role: "system",
+                    content:
+                      "Auto-continuation paused after 200 steps (runaway-loop safety cap) — send any message to continue.",
+                    timestamp: new Date().toISOString(),
+                  };
+                  setChat((cur) => [...cur, stopMsg]);
+                }
                 break;
               }
               agentTurnsRef.current += 1;
               setSendingMessage(true);
+              // Whether the continuation turn queued more auto-run steps —
+              // read by the finally to decide the status line's fate.
+              let contHadAutoRun = false;
               try {
                 // Browser tools get the proven walkthrough prompt — it
                 // explicitly nudges the AI to keep clicking through every
@@ -3479,9 +4890,9 @@ Follow your Plan → Act → Verify → Loop pattern:
 
 1. VERIFY: Did the change actually take effect? For state-changing tools (filters, scope, status updates, edits), the NEXT CURRENT STATE you receive in this turn reflects the result — compare it to what you asked for. For query tools, decide whether the data answers the user's question.
 
-2. DECIDE: If the user's goal is complete AND they have not asked for more, write a final answer (not a tool call). Otherwise propose exactly ONE next step — either a tool call OR a focused clarifying question. DO NOT end a multi-step journey on your own just because one tool succeeded.
+2. DECIDE: If the user's goal is complete AND they have not asked for more, write a final answer (not a tool call) in under 120 words. Otherwise propose exactly ONE next step — either a tool call OR a focused clarifying question. DO NOT end a multi-step journey on your own just because one tool succeeded.
 
-3. NARRATE: Before any next tool call, write ONE line in the same message — present tense, action in progress, include WHY (not just what).
+3. NARRATE: ONE line only (max 20 words) — present tense + why. No essays, no restating plans, no stopping to announce "contradictions" in the evidence — if something conflicts, resolve it with the cheapest tool call (list the exact directory, read the exact file), not prose. A reply that is mostly text is a wasted turn.
 
 Continue.`;
                 // FORCED TOOL USE: for browser_* walkthroughs we set `tool_choice: any`
@@ -3497,41 +4908,178 @@ Continue.`;
                 const toolChoice = isBrowser
                   ? ({ type: "any" } as const)
                   : undefined;
-                await runModelTurn(continuationPrompt + stuckSuffix, {
-                  toolChoice,
-                });
+                const contReply = await runModelTurn(
+                  continuationPrompt + stuckSuffix,
+                  { toolChoice },
+                );
+                // Mirror runModelTurn's end-of-turn decision: if THIS
+                // reply queued more auto-run steps, it already flipped
+                // the status to "Executing…" — the finally below must
+                // NOT null it out (it fires after every burst step, and
+                // nulling there is exactly what made the whole auto-run
+                // build read as silent in the panel). Replies whose tools
+                // all need cards (or none) genuinely go idle.
+                contHadAutoRun = (contReply?.toolUse ?? []).some((t) =>
+                  isSafeAutoRun({ name: t.name, input: t.input }),
+                );
                 // STEP-TIMEOUT SAFETY: if the model produced a tool_use,
                 // `narrationOnlyStreakRef` was reset inside runModelTurn —
                 // we are healthy. If it returned narration only and the
-                // user is staring at a stalled chat, schedule a nudge
-                // that fires only if the NEXT turn also stalls (so we
-                // don't interrupt a still-generating reply). The
-                // invalid-observation streak is included too — two
-                // blank snapshots in a row means even a nudge is
-                // pointless; surface a blocker instead.
-                const needsNudge =
-                  narrationOnlyStreakRef.current >= 2 ||
-                  invalidObservationStreakRef.current >= 2;
-                if (needsNudge) {
+                // user is staring at a stalled chat, schedule a nudge.
+                // Threshold is ONE, not two: this check runs at the END
+                // of the continuation turn — with a two-streak gate the
+                // second narration-only turn never happens because
+                // nothing re-invokes the model (the silent "Reading
+                // router.tsx…" stall observed live: narration promised a
+                // read, no tool_use block, chain dead, chat idle).
+                // Short-stall heuristic: a SHORT narration-only reply is
+                // a promised action that never executed; a LONG one is a
+                // legitimate final report and is left alone. Zero-length
+                // counts as a stall too — an EMPTY model reply (no text,
+                // no tool_use) used to slip past the `> 0` guard: the
+                // streak rose but the nudge stayed silent and the chain
+                // died with the chat idle (observed live 2026-10-09).
+                // Budget two per tool-making stretch (reset whenever a
+                // tool runs) — the MiniMax-class models through the
+                // gateway stall more than once on a long build.
+                //
+                // Scheduled through a self-re-opening closure: the first
+                // nudge's own reply is often ANOTHER narration-only ack
+                // ("You're right — I stalled, let me read the file now")
+                // and, being a nudge turn rather than a continuation,
+                // nothing re-ran this check after it — so the budget of
+                // two could only ever spend one nudge before the chain
+                // went silent for good.
+                const scheduleStallNudge = (): void => {
+                  // Short narration-only reply OR a plan-shaped one
+                  // ("Pivoting to: …" can be long — it's still a
+                  // promise that never executed, not a report).
+                  const isShortStall =
+                    lastNarrationLenRef.current < 400 ||
+                    isPlanLikeNarration(lastNarrationTextRef.current);
+                  // Dead-end checks MUST run here, before the needsNudge
+                  // gate — once the budget dies, needsNudge is false and
+                  // the timer is never scheduled again, so any dead-end
+                  // handling placed inside the timer callback is
+                  // unreachable (observed live 2026-10-09: three nudges
+                  // burned on verbatim narration repeats, chain dead,
+                  // exhaustion notice never posted).
+                  const stallStillHolds =
+                    narrationOnlyStreakRef.current >= 1 &&
+                    isShortStall &&
+                    invalidObservationStreakRef.current < 2;
+                  const isRepeatLoop =
+                    stallStillHolds &&
+                    normalizeNarration(prevNarrationTextRef.current).length >
+                      0 &&
+                    normalizeNarration(prevNarrationTextRef.current) ===
+                      normalizeNarration(lastNarrationTextRef.current);
+                  if (
+                    stallStillHolds &&
+                    (isRepeatLoop || agentNudgeCountRef.current >= 2)
+                  ) {
+                    // Dead-end ladder. State 0: the generic nudges failed
+                    // (or a verbatim repeat-loop makes more nudges
+                    // pointless) — send a fresh, structured instruction
+                    // that quotes the model's own promised step back at
+                    // it. State 1: the rescue also stalled — auto-resume
+                    // ONE more time, user-style, before bothering the
+                    // human (typing "continue" is the human doing the
+                    // machine's job; observed live 2026-10-09 and the
+                    // user rightly rejected it). State 2: silent — the
+                    // notice is already on screen.
+                    if (agentStallExhaustedAnnouncedRef.current === 0) {
+                      agentStallExhaustedAnnouncedRef.current = 1;
+                      const promisedStep =
+                        lastNarrationTextRef.current.slice(0, 300);
+                      postAgentNotice(
+                        "⚠️ The agent stalled mid-task — attempting one automatic recovery (re-issuing its own last promised step as a direct command)…",
+                      );
+                      void runModelTurn(
+                        `[Recovery] You have narrated the same step repeatedly without executing it. Your own last plan said: "${promisedStep}". Execute that step NOW: reply with exactly ONE tool_use block for it and NO prose. If it is genuinely already done, reply with a 30-word status instead.`,
+                        { toolChoice: { type: "any" } },
+                      )
+                        .catch(() => {})
+                        .then(() => scheduleStallNudge());
+                    } else if (
+                      agentStallExhaustedAnnouncedRef.current === 1 &&
+                      !agentStopRequestedRef.current
+                    ) {
+                      agentStallExhaustedAnnouncedRef.current = 2;
+                      postAgentNotice(
+                        "⚠️ The agent froze twice — auto-resuming once more. You'll only need to step in if it freezes a third time.",
+                      );
+                      void runModelTurn(
+                        "[Auto-resume] Continue the task from your last promised step. Reply with exactly ONE tool_use block, or the final report if the task is genuinely complete.",
+                        { toolChoice: { type: "any" } },
+                      )
+                        .catch(() => {})
+                        .then(() => scheduleStallNudge());
+                    } else if (
+                      agentStallExhaustedAnnouncedRef.current === 2 &&
+                      !agentStopRequestedRef.current
+                    ) {
+                      agentStallExhaustedAnnouncedRef.current = 3;
+                      postAgentNotice(
+                        '⚠️ The agent stalled three times despite automatic recovery — this one needs you. Send any message (e.g. "continue") to resume.',
+                      );
+                    }
+                    return;
+                  }
+                  const needsNudge =
+                    (narrationOnlyStreakRef.current >= 1 &&
+                      isShortStall &&
+                      agentNudgeCountRef.current < 2) ||
+                    invalidObservationStreakRef.current >= 2;
+                  if (!needsNudge) return;
                   const turnAt = lastAutoTurnAtRef.current ?? Date.now();
                   window.setTimeout(() => {
-                    // Only nudge if no new reply has landed in the
-                    // meantime AND the streak is still elevated. By then
-                    // the AI should have either called a tool or written
-                    // the final report — if it hasn't, force it to act.
-                    const stillStuck =
-                      narrationOnlyStreakRef.current >= 2 ||
-                      invalidObservationStreakRef.current >= 2;
-                    if (stillStuck && lastAutoTurnAtRef.current === turnAt) {
-                      // The nudge also uses `tool_choice: any` for the
-                      // same reason the auto-continue does: a nudge-only
+                    // Stop requested — skip the nudge, keep the flag for
+                    // the continuation gate (see the sibling timer).
+                    if (agentStopRequestedRef.current) return;
+                    // Only nudge if no NEW reply has landed in the
+                    // meantime (a tool ran / user typed since), the stall
+                    // condition still holds, and the budget allows. By
+                    // then the AI should have either called a tool or
+                    // written the final report — if it hasn't, force it
+                    // to act.
+                    if (lastAutoTurnAtRef.current !== turnAt) return;
+                    const stillShortStall =
+                      narrationOnlyStreakRef.current >= 1 &&
+                      (lastNarrationLenRef.current < 400 ||
+                        isPlanLikeNarration(lastNarrationTextRef.current));
+                    if (
+                      (stillShortStall && agentNudgeCountRef.current < 2) ||
+                      invalidObservationStreakRef.current >= 2
+                    ) {
+                      if (invalidObservationStreakRef.current < 2) {
+                        agentNudgeCountRef.current += 1;
+                      }
+                      // The nudge uses `tool_choice: any` for the same
+                      // reason the auto-continue does: a nudge-only
                       // text reply re-stalls the walkthrough just as
                       // quickly as the original narration. Forcing
-                      // tool use keeps the loop honest. Non-browser
-                      // stalls still get to terminate with a summary.
-                      const nudgeToolChoice = isBrowser
-                        ? ({ type: "any" } as const)
-                        : undefined;
+                      // tool use keeps the loop honest.
+                      // Browser stalls always force. Non-browser stalls
+                      // force too when the stall is PLAN-shaped — a plan
+                      // promise ("[Act] Reloading the page…", "Need to
+                      // (1) check…") is by definition not a final
+                      // report, so forcing a tool can never suppress a
+                      // legitimate summary. Observed live (DataGuard
+                      // round 3): plan-shaped narrations escaped the
+                      // plan detector, and when nudges DID fire the
+                      // model answered with yet another plan — two
+                      // nudges burned, chain dead. Only a SHORT
+                      // report-shaped stall (a promised action that
+                      // may have become a real final answer) keeps the
+                      // free-form nudge.
+                      const stallIsPlan = isPlanLikeNarration(
+                        lastNarrationTextRef.current,
+                      );
+                      const nudgeToolChoice =
+                        isBrowser || stallIsPlan
+                          ? ({ type: "any" } as const)
+                          : undefined;
                       // Pick the right nudge message — an invalid
                       // browser observation needs a different action
                       // (write the final report and stop) than a
@@ -3539,13 +5087,42 @@ Continue.`;
                       const nudgeText =
                         invalidObservationStreakRef.current >= 2
                           ? `[Nudge] The last ${invalidObservationStreakRef.current} browser observation(s) returned about:blank or an empty accessibility tree — the Playwright MCP is not pointing at the verification tab. Do NOT call browser_snapshot again. Write the FINAL VERIFICATION REPORT now (what you observed, what is blocked, evidence captured) and stop the walkthrough.`
-                          : `[Nudge] Your last reply was narration-only and the walkthrough has been idle. Reply with EITHER one tool_use block (next flow, screenshot, console check, etc.) OR the final verification report — no more prose-only turns.`;
+                          : isBrowser
+                            ? `[Nudge] Your last reply was narration-only and the walkthrough has been idle. Reply with EITHER one tool_use block (next flow, screenshot, console check, etc.) OR the final verification report — no more prose-only turns.`
+                            : `[Nudge] Your last reply DESCRIBED an action but made no tool call — a text-only reply cannot advance this task. Do NOT write prose, do not restate your plan. Emit exactly ONE tool_use block (the next tool of your plan) with no text before or after it. Only if the task is genuinely complete, reply with the final report (under 120 words) instead.`;
                       void runModelTurn(nudgeText, {
                         toolChoice: nudgeToolChoice,
-                      }).catch(() => {});
+                      })
+                        // Re-arm whether the nudge turn succeeded or the
+                        // gateway ate it — both leave the stall counters
+                        // standing, and both stay bounded by the budget
+                        // check above (at most two nudges per stretch).
+                        .catch(() => {})
+                        .then(() => scheduleStallNudge());
+                    } else if (
+                      stillShortStall &&
+                      invalidObservationStreakRef.current < 2
+                    ) {
+                      // A stacked-timer edge: this timer armed when the
+                      // budget was alive, but another nudge spent it
+                      // before the tick. scheduleStallNudge's own dead-end
+                      // ladder (auto-recovery → user notice) owns the
+                      // recovery from here — this branch only guards
+                      // against the silent-idle case where that ladder
+                      // hasn't run yet because no fresh schedule call
+                      // happens before this timer fires. Advance the
+                      // ladder to the user-notice state if nobody started
+                      // it; never post twice.
+                      if (agentStallExhaustedAnnouncedRef.current === 0) {
+                        agentStallExhaustedAnnouncedRef.current = 3;
+                        postAgentNotice(
+                          '⚠️ The agent stalled: repeated replies promised actions without executing any tool, and automatic recovery did not take. Send any message (e.g. "continue") to resume.',
+                        );
+                      }
                     }
                   }, 30_000);
-                }
+                };
+                scheduleStallNudge();
               } catch {
                 toast.error(
                   "Couldn't continue the conversation — send a message to resume.",
@@ -3553,10 +5130,25 @@ Continue.`;
               } finally {
                 setSendingMessage(false);
                 setAiRetryStatus(null);
+                // Null the status only when this continuation turn
+                // genuinely went idle. If it queued another auto-run
+                // burst, runModelTurn already flipped the status to
+                // "Executing tool steps…" — unconditional nulling here
+                // is what blanked the status between burst steps.
+                if (!contHadAutoRun) setChatActivity(null);
               }
+            } else {
+              // SKIP_CONTINUE tools (start_verification / verify_live_url):
+              // progress rides the SSE verification feed instead of a
+              // continuation turn, so nothing below re-decides the status —
+              // clear it here or "Executing…" spins next to the live feed.
+              setChatActivity(null);
             }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
+            // The turn died in the except — drop the "Executing…" status
+            // or it would keep spinning with nothing running.
+            setChatActivity(null);
             // Un-mark the call so the user can retry straight from the
             // card, and restore its Allow button — leaving an "Allowed"
             // label on a failed call misrepresents what happened.
@@ -3582,7 +5174,7 @@ Continue.`;
               ),
             );
             const failMsg: ChatMessage = {
-              id: `msg-${Date.now()}`,
+              id: nextMsgId(),
               role: "system",
               content: `✗ Tool failed — ${message}. You can retry from the card above.`,
               timestamp: new Date().toISOString(),
@@ -3599,6 +5191,56 @@ Continue.`;
           }
           break;
         }
+        case "deny_tool_permission": {
+          // User declined a proposed action. Retire the card (Allow can
+          // never fire afterwards — executedToolIdsRef is the hard
+          // guard), record the refusal for the NEXT model turn, and
+          // stop. No auto-continuation on purpose: the user just took
+          // the wheel, the agent shouldn't immediately act again.
+          const toolUseId = action.payload?.toolUseId as string | undefined;
+          const toolName = action.payload?.toolName as string | undefined;
+          if (!toolUseId || !toolName) return;
+          if (executedToolIdsRef.current.has(toolUseId)) return;
+          executedToolIdsRef.current.add(toolUseId);
+          setChat((cur) =>
+            cur.map((m) =>
+              m.actions?.some(
+                (a) =>
+                  a.kind === "request_tool_permission" &&
+                  (a.payload?.toolUseId as string | undefined) === toolUseId,
+              )
+                ? {
+                    ...m,
+                    actions: m.actions.map((a) =>
+                      a.kind === "request_tool_permission" &&
+                      (a.payload?.toolUseId as string | undefined) === toolUseId
+                        ? { ...a, label: "Denied", id: `${a.id}-denied` }
+                        : a,
+                    ),
+                  }
+                : m,
+            ),
+          );
+          const declineMsg: ChatMessage = {
+            id: nextMsgId(),
+            role: "system",
+            content: `✗ Denied — ${toolName} was not executed. Send a new instruction to continue.`,
+            timestamp: new Date().toISOString(),
+          };
+          setChat((cur) => [...cur, declineMsg]);
+          void appendChatMessage
+            .mutateAsync({
+              sessionId,
+              role: "system",
+              content: declineMsg.content,
+            })
+            .catch(() => {});
+          toolResultMemoryRef.current = [
+            ...toolResultMemoryRef.current.slice(-3),
+            `${toolName} → DENIED by the user — do not retry the same call; wait for their direction.`,
+          ];
+          break;
+        }
         case "dismiss":
         default:
           break;
@@ -3610,6 +5252,7 @@ Continue.`;
       executeTool,
       setChat,
       appendChatMessage,
+      postAgentNotice,
       sessionId,
       chat,
       runModelTurn,
@@ -3729,9 +5372,10 @@ Continue.`;
     // until then. Empty data after ready = deployment gap — the page
     // falls back to a read-only catalog view.
     checksReady: Boolean(activeEnvironmentId) && !checksQuery.isLoading,
-    // Scope toggles are tester-only QA state — mirrors the mutation
-    // hooks' own throws (defense in depth).
-    checksReadOnly: !(currentUser?.roles?.includes("tester") ?? false),
+    // Scope toggles are tester/manager QA state — mirrors the mutation
+    // hooks' own throws (defense in depth; one source of truth in
+    // `canEditVerificationChecks`).
+    checksReadOnly: !canEditVerificationChecks(currentUser),
     // Assistant panel visibility, reported back by GlobalChatAssistant.
     // Drives the page-scoped gate above: chat history / sessions /
     // projects / AI config only fetch while the panel is open.
@@ -3799,6 +5443,8 @@ Continue.`;
     // chat
     sendMessage,
     applyChatAction,
+    chatActivity,
+    requestStopAgent,
     currentSessionId: sessionId,
     sessions: chatSessionsQuery.data ?? [],
     sessionsLoading: chatSessionsQuery.isLoading,

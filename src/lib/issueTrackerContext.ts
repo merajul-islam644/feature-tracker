@@ -23,6 +23,7 @@ import type {
   VerificationTarget,
 } from "@/types/issue-tracker";
 import type { Project } from "@/lib/blocks/data";
+import type { WorkspaceChatData } from "@/lib/workspaceChatContext";
 import { verificationChecks } from "@/data/issueTrackerConstants";
 
 export interface IssueTrackerContextSnapshot {
@@ -121,6 +122,11 @@ export interface IssueTrackerContextSnapshot {
     enabledTargets: number;
     enabledChecks: number;
   };
+  // Live /panel workspace snapshot, when the user has the VS Code-style
+  // workspace page open (any page route — it's stamped module-globally).
+  // `null` = no workspace folder is open; the file/git/exec tools refuse
+  // in that state, but `workspace_open_folder` (root switch) still works.
+  workspace: WorkspaceChatData | null;
 }
 
 export function buildIssueTrackerContext(input: {
@@ -145,6 +151,9 @@ export function buildIssueTrackerContext(input: {
   // VerificationTarget rows. Required for `hasCredential` /
   // `boundToTargetNames` to match what the UI renders.
   boundTargetsBySecretId?: Record<string, string[]>;
+  // Live workspace state from `workspaceChatContext.ts` — pass
+  // `getWorkspaceChatState()` here. Null/omitted = workspace not open.
+  workspace?: WorkspaceChatData | null;
 }): IssueTrackerContextSnapshot {
   const {
     targets,
@@ -157,6 +166,7 @@ export function buildIssueTrackerContext(input: {
     activeEnv = null,
     checkLabels = {},
     boundTargetsBySecretId = {},
+    workspace = null,
   } = input;
   // Merge built-in + per-env row labels so the AI can answer "what does
   // this scope do?" for any id the user has enabled, including
@@ -291,6 +301,7 @@ export function buildIssueTrackerContext(input: {
       enabledTargets: targets.filter((t) => t.enabled).length,
       enabledChecks: scope.length,
     },
+    workspace,
   };
 }
 
@@ -302,7 +313,19 @@ export function buildIssueTrackerContext(input: {
 export function renderContextForSystemPrompt(
   ctx: IssueTrackerContextSnapshot,
 ): string {
-  return "CURRENT STATE:\n" + JSON.stringify(ctx, null, 2);
+  // Static reminder in the header, repeated every turn: the model read
+  // its built app's IDENTITY out of these rows mid-build (observed live
+  // 2026-10-09 — scaffolded an unrelated project that happened to sit in
+  // the projects list). The prompt rule in chatSystemPrompt.ts explains
+  // it in full; this line rides the snapshot itself so the warning is
+  // adjacent to the data at the moment of reading, every single turn.
+  return (
+    "CURRENT STATE — the rows below are Lattice's own platform data " +
+    "(your verification projects, targets, secrets, issues). They describe " +
+    "THIS dashboard, never the app you may be building; an app you build is " +
+    "specified by the user's message only:\n" +
+    JSON.stringify(ctx, null, 2)
+  );
 }
 
 function trimUrl(url: string): string {

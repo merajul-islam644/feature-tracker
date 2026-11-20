@@ -103,6 +103,39 @@ function scopeFilter({ projectId, envSlug, environmentId } = {}) {
   return undefined;
 }
 
+/** Paginated list → flat items, via a shape fn picking the collection's
+ * payload (`d?.getVerificationTargets ?? d`). */
+async function listAll(col, listArgs, shape) {
+  const items = [];
+  let page = 1;
+  while (true) {
+    const r = await col.list({ ...listArgs, pageNo: page });
+    const d = shape(r.data);
+    items.push(...(d?.items ?? []));
+    if (!d?.hasNextPage) break;
+    page++;
+  }
+  return items;
+}
+
+/** Scope a paginated read: v2.1 `environmentId` filter first; when that
+ * comes back empty but the caller has the legacy pair too, retry with
+ * (projectId, envSlug) — pre-migration rows carry only the pair, with an
+ * empty `environmentId`, and the strict filter silently matches nothing. */
+async function listScoped(col, base, shape, scope) {
+  const { projectId, envSlug, environmentId } = scope;
+  const filter = scopeFilter(scope);
+  let items = await listAll(col, filter ? { ...base, filter } : base, shape);
+  if (items.length === 0 && environmentId && projectId && envSlug) {
+    items = await listAll(
+      col,
+      { ...base, filter: { projectId, envSlug } },
+      shape,
+    );
+  }
+  return items;
+}
+
 /** Pull the project's env rows (blx_Environments). Ordered by `order` —
  * canonical kinds seed 0/10/20/30, customs trail. `id` is the Environment
  * ItemId — the identity every env-scoped row points at. */
@@ -198,23 +231,12 @@ export async function fetchTargets(
   const col = client.data.collection("VerificationTarget", {
     fields: TARGET_FIELDS,
   });
-  const items = [];
-  let page = 1;
-  while (true) {
-    const list_args = {
-      pageNo: page,
-      pageSize: 100,
-      sort: { LastUpdatedDate: -1 },
-    };
-    const filter = scopeFilter({ projectId, envSlug, environmentId });
-    if (filter) list_args.filter = filter;
-    const r = await col.list(list_args);
-    const page_items =
-      r.data?.getVerificationTargets?.items ?? r.data?.items ?? [];
-    items.push(...page_items);
-    if (!r.data?.getVerificationTargets?.hasNextPage) break;
-    page++;
-  }
+  const items = await listScoped(
+    col,
+    { pageSize: 100, sort: { LastUpdatedDate: -1 } },
+    (d) => d?.getVerificationTargets ?? d,
+    { projectId, envSlug, environmentId },
+  );
   const out = items.map((t) => ({
     id: t.ItemId,
     applicationName: t.applicationName ?? "",
@@ -239,22 +261,12 @@ export async function fetchSecrets(
   { projectId, envSlug, environmentId } = {},
 ) {
   const col = client.data.collection("Secret", { fields: SECRET_FIELDS });
-  const items = [];
-  let page = 1;
-  while (true) {
-    const list_args = {
-      pageNo: page,
-      pageSize: 100,
-      sort: { CreatedDate: -1 },
-    };
-    const filter = scopeFilter({ projectId, envSlug, environmentId });
-    if (filter) list_args.filter = filter;
-    const r = await col.list(list_args);
-    const page_items = r.data?.getSecrets?.items ?? r.data?.items ?? [];
-    items.push(...page_items);
-    if (!r.data?.getSecrets?.hasNextPage) break;
-    page++;
-  }
+  const items = await listScoped(
+    col,
+    { pageSize: 100, sort: { CreatedDate: -1 } },
+    (d) => d?.getSecrets ?? d,
+    { projectId, envSlug, environmentId },
+  );
   return items.map((s) => ({
     id: s.ItemId,
     projectId: s.projectId ?? "",
@@ -279,11 +291,12 @@ export async function fetchSecretBindings(
   const col = client.data.collection("SecretBinding", {
     fields: SECRET_BINDING_FIELDS,
   });
-  const list_args = { pageNo: 1, pageSize: 10 };
-  const filter = scopeFilter({ projectId, envSlug, environmentId });
-  if (filter) list_args.filter = filter;
-  const r = await col.list(list_args);
-  const items = r.data?.getSecretBindings?.items ?? r.data?.items ?? [];
+  const items = await listScoped(
+    col,
+    { pageSize: 10 },
+    (d) => d?.getSecretBindings ?? d,
+    { projectId, envSlug, environmentId },
+  );
   if (items.length === 0) {
     return { id: "", bindings: {}, updatedBy: null };
   }
