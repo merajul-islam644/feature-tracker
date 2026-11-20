@@ -10,6 +10,9 @@ import { FeaturesPage } from "@/pages/FeaturesPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { MembersPage } from "@/pages/MembersPage";
+import { UsersPage } from "@/pages/UsersPage";
+import { OrganizationsPage } from "@/pages/OrganizationsPage";
+import { RolesPermissionsPage } from "@/pages/RolesPermissionsPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { MailPage } from "@/pages/MailPage";
 import { TargetsPage } from "@/pages/issue-tracker/TargetsPage";
@@ -79,6 +82,9 @@ export default function App() {
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/members" element={<MembersPage />} />
+            <Route path="/users" element={<UsersPage />} />
+            <Route path="/organizations" element={<OrganizationsPage />} />
+            <Route path="/roles" element={<RolesPermissionsPage />} />
             <Route path="/mail" element={<MailPage />} />
             <Route path="/chat" element={<ChatPage />} />
             {/* Issue Tracker is project+env scoped — every sub-surface
