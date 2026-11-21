@@ -35,7 +35,11 @@ import { X } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { UserAvatar } from "@/components/ui/UserAvatar";
 import { useAnnouncements } from "@/lib/blocks/hooks";
-import { lookupUserById, useAllJoinedUsers } from "@/lib/blocks/users";
+import {
+  lookupRoleById,
+  lookupUserById,
+  useAllJoinedUsers,
+} from "@/lib/blocks/users";
 import { cn } from "@/lib/utils";
 
 interface TestConfirmationDialogProps {
@@ -108,16 +112,22 @@ export function TestConfirmationDialog({
     senderRecord?.name ??
     (latestAnnouncement ? currentUser?.name ?? "User" : currentUser?.name ?? "User");
   // Designation falls back to the sender's first IAM role (e.g.
-  // "manager", "tester") — same logic that used to apply to
-  // `currentUser`. When the sender is unresolvable (deleted account,
-  // empty roster) we skip the designation line entirely so the
-  // signature doesn't dangle with a blank second row.
+  // "manager", "tester"). The chain matters — observed bug
+  // (2026-11-21): the manager posted, but on a session whose live
+  // roster (`useAllJoinedUsers`) hadn't loaded yet, the signature
+  // showed the VIEWER's role ("— Mostafizur Rahman / Developer"),
+  // because the old fallback stamped `currentUser.roles[0]` onto the
+  // sender. Now: live roster role → hardcoded master roster role
+  // (`lookupRoleById`, same safety net as the name above) → and only
+  // for the no-announcement viewer-card case, the viewer's own role.
+  // An unresolvable sender skips the designation entirely so the
+  // signature never dangles with a wrong or blank second row.
   const senderRole =
     (senderRecord && "role" in senderRecord
       ? (senderRecord as { role?: string }).role
       : undefined) ??
     (latestAnnouncement
-      ? currentUser?.roles?.[0]
+      ? lookupRoleById(latestAnnouncement.authorId)
       : currentUser?.roles?.[0]) ??
     "";
   const designation = senderRole ? senderRole.replace(/^./, (c) => c.toUpperCase()) : "";

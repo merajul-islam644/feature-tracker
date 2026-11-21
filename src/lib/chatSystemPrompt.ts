@@ -278,18 +278,13 @@ The bell icon (top-right of every page, via \`NotificationBell\`) shows an unrea
 | \`feature.promotion_requested\` | Promotion requested | \`BlockPromoteModal\` when promotion is blocked (0 flows OR failed) |
 | \`flow.created / renamed / deleted\` | New flow / Flow name updated / Flow deleted | \`useCreateFlow / useUpdateFlow / useDeleteFlow\` |
 | \`flow.status_changed / stack_changed\` | Flow status updated / Flow stack updated | \`useUpdateFlowStatus / useUpdateFlowStack\` |
-| \`flow.cloned / promoted\` | Flow cloned / Flow promoted | cross-env clone + promotion paths |
-| \`environment.created / renamed / deleted\` | Environment added / Environment renamed / Environment updated | \`useUpdateProject\` when customEnvs / envLabelOverrides change |
+| \`flow.promoted\` | Flow promoted | promotion path (cross-env clone emits NO notification) |
+| \`environment.created / renamed / deleted\` | Environment added / renamed (label or slug) / deleted | \`useCreateEnvironment\` (AddEnvironmentModal), \`useUpdateEnvironment\` (RenameEnvModal), \`useDeleteEnvironment\` (DeleteEnvDialog), and \`useUpdateProject\`'s customEnvs / envLabelOverrides diffs (pre-state diffed, so unchanged envs stay silent) |
 | \`comment.replied\` | New reply on your comment | \`useAddFlowCommentReply.onSuccess\` → \`notifyCommentReply\` (parent.authorId, self-skip) |
 
-### Notifier role map (RECIPIENTS_BY_ROLE in \`src/lib/blocks/notifier.ts\`)
+### Notifier recipients (dynamic IAM resolution — \`fetchUserIdsByRoles\` in \`src/lib/blocks/users.ts\`)
 
-A hardcoded \`{role: [uid...]}\` map drives role-broadcast notifications (one Notification row per recipient). Tenant state (verified 2026-09-24):
-- **tester**: \`db4bca2e-…\` (1 user)
-- **developer**: \`d39eb926-…\`, \`4832284e-…\`, \`9890d32d-…\` (3 users)
-- **manager**: \`41a74053-…\` (1 user)
-
-**TODO server-side-proxy**: \`iam.users.list({filter: {roles}})\` returns 403 from a browser session. Until a proxy ships, adding testers/devs/managers requires a hand-edit of \`RECIPIENTS_BY_ROLE\` AND a redeploy. **Actor exclusion** is enforced inside \`notifyRole\` (filters out \`payload.actorId\`) and inside \`notifyCommentReply\` (filters out the parent's own author) — three places share the rule.
+Role-broadcast notifications (one Notification row per recipient) resolve recipients LIVE from IAM at each event: one unfiltered \`iam.users.list\` call, matched against EVERY role the user holds, cached in-memory for 60 seconds. Adding or removing a tester/developer/manager in IAM changes who gets notified within ~1 minute — no code edit, no redeploy. If the IAM read fails (403 / network) or matches no member of any requested role, it falls back to the admin-CLI-derived safety-net roster (\`HARDCODED_USERS_BY_ROLE\`). This depends on the "View Users" permission (\`blocks-iam::iam::users\`) staying granted to manager/developer/tester — revoking it silently degrades notifications to the fallback roster. **Actor exclusion** is enforced inside \`notifyRole\` (filters out \`payload.actorId\`) and inside \`notifyCommentReply\` (filters out the parent's own author) — three places share the rule.
 
 ## The Workspace (/panel) — your code editor hands
 

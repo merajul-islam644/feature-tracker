@@ -306,10 +306,7 @@ export interface FlowCommentRow {
 // sender's hooks write one row per user they target. The inbox reads with
 // `filter: { userId: <me> }` so each user only sees their own rows —
 // same per-user filter pattern as `CloudDirectMessage.recipientId` and
-// `CloudCallSignal.recipientId`. Replaces the previous path through the
-// platform's `GetNotifications` endpoint, which on this tenant returns
-// an empty `notifications` array for app-sent records (see
-// `docs/platform-bug-notifier-enumeration.md`).
+// `CloudCallSignal.recipientId`.
 //
 // The denormalized display fields (projectName / featureName / flowName /
 // envSlug / oldName / newName / status / stack) are captured at write
