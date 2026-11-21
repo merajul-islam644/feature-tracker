@@ -23,6 +23,7 @@ import {
   blocksClient,
   getOverlayRefreshToken,
 } from "./client";
+import { logout as sdkLogout } from "./auth";
 
 // --- Types -------------------------------------------------------------------
 
@@ -599,13 +600,37 @@ export function useSwitchOrganization() {
       // "error_description":"organization_id is required"}` — its real
       // contract spells both fields snake_case. Send both spellings so
       // either reader finds them.
-      const refreshToken = getOverlayRefreshToken();
-      const res = (await blocksClient.auth.switchOrganization({
-        organizationId,
-        organization_id: organizationId,
-        refreshToken,
-        refresh_token: refreshToken,
-      })) as Record<string, unknown>;
+      const callOnce = async (): Promise<Record<string, unknown>> => {
+        const refreshToken = getOverlayRefreshToken();
+        return (await blocksClient.auth.switchOrganization({
+          organizationId,
+          organization_id: organizationId,
+          refreshToken,
+          refresh_token: refreshToken,
+        })) as Record<string, unknown>;
+      };
+      // Post-login propagation window: IAM can transiently answer
+      // "session expired" / policy-denial right after a fresh login even
+      // though the session is fine seconds later. Retry those with
+      // backoff (≈29s coverage) before surfacing anything to the user;
+      // permanent failures fail fast on attempt 1.
+      let res = await callOnce();
+      // `session_expired` gets ONE quick double-check (in case of a
+      // momentary flap), then it is terminal — only re-login renews the
+      // hosted session's switch capability (verified live 2026-11-21:
+      // 5/5 retries over 29s failed, and a direct attempt 4 minutes
+      // later failed again while /auth/me kept answering 200).
+      if (isSessionExpired(res)) {
+        await sleep(2_500);
+        res = await callOnce();
+      }
+      // Gateway policy denials ("No policy grants access") flap for
+      // seconds and self-heal — those earn the patient backoff.
+      for (let i = 0; i < 3 && isTransientSwitchFailure(res); i++) {
+        await sleep([4_000, 8_000, 15_000][i]);
+        res = await callOnce();
+        if (!isTransientSwitchFailure(res)) break;
+      }
       // The SDK's `json()` never throws on non-2xx (it returns the parsed
       // body), and IAM error envelopes don't reliably carry `isSuccess: false`
       // — so classify defensively before declaring victory:
@@ -625,11 +650,26 @@ export function useSwitchOrganization() {
         err.errors != null ||
         (typeof err.error === "string" && err.error.length > 0);
       if (failed) {
+        if (isSessionExpired(res)) {
+          // The hosted session can read but can no longer switch — only
+          // signing in again renews it. End the session client-side and
+          // let RequireAuth route the user to /login (refresh() with a
+          // cleared cookie resolves null → unauthenticated).
+          await sdkLogout();
+          await refresh();
+          throw new Error(
+            "Your session has ended. Please sign in again — organization switching works right after sign-in.",
+          );
+        }
         const message =
           err.message ||
           firstMessage(err) ||
           "IAM rejected the organization switch.";
-        throw new Error(message);
+        throw new Error(
+          isTransientSwitchFailure(res)
+            ? "IAM is temporarily refusing organization switches — please try again in a minute."
+            : message,
+        );
       }
       applyAuthOverlay(res);
     },
@@ -645,6 +685,51 @@ export function useSwitchOrganization() {
       qc.invalidateQueries();
     },
   });
+}
+
+/** Sleep helper for the switch retry backoff. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether a switch-org failure looks TRANSIENT — the gateway's policy
+ * engine sometimes denies a fully authenticated session for seconds
+ * ("No policy grants access", seen live 2026-11-21 morning) and
+ * recovers on its own. Those deserve patient retry.
+ *
+ * `session_expired` is deliberately NOT in this set: verified live, IAM
+ * answers 401 `{"error":"session_expired"}` for the hosted session once
+ * its ~2.5h lifetime runs out — while /auth/me and gateway reads keep
+ * working. Retrying it for 29s was pointless (5/5 attempts failed) and
+ * only delayed the honest outcome: the session must be renewed by
+ * signing in again.
+ */
+function isTransientSwitchFailure(res: Record<string, unknown>): boolean {
+  const err = res as {
+    isSuccess?: boolean;
+    message?: string;
+    error?: unknown;
+    error_description?: unknown;
+    errors?: unknown;
+  };
+  if (err.isSuccess === true) return false;
+  const parts = [err.message, err.error_description, err.error].filter(
+    (v): v is string => typeof v === "string",
+  );
+  const blob =
+    err.errors && typeof err.errors === "object"
+      ? JSON.stringify(err.errors)
+      : "";
+  const hay = `${parts.join(" ")} ${blob}`.toLowerCase();
+  return /no policy grants|forbidden/.test(hay);
+}
+
+/** IAM's exact live signature for "this hosted session can no longer switch". */
+function isSessionExpired(res: Record<string, unknown>): boolean {
+  const err = res as { error?: unknown; isSuccess?: boolean };
+  if (err.isSuccess === true) return false;
+  return typeof err.error === "string" && err.error === "session_expired";
 }
 
 /** Best human-readable message out of an IAM error envelope, any shape. */
