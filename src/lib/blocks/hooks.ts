@@ -2355,6 +2355,38 @@ export function useAppendIceCandidates(): UseMutationResult<
 // same defense-in-depth pattern as the tester guards on project
 // mutations (the composer doesn't even render for non-managers).
 
+// Data-gateway mutations answer HTTP 200 even when the write is REJECTED —
+// the body carries either a GraphQL `errors` array or an IAM-style
+// `{ isSuccess: false, message }` envelope, and the SDK never throws on
+// either. Verified live 2026-11-21: a post dropped under a transient IAM
+// policy denial still surfaced as success in the UI while no row existed
+// server-side. This guard converts those envelopes into thrown errors so
+// the existing `onError` toasts fire honestly.
+function assertMutationOk(res: unknown, fallbackMessage: string): void {
+  const r = res as
+    | { errors?: unknown; isSuccess?: boolean; message?: string }
+    | undefined;
+  if (!r || typeof r !== "object") return;
+  if (Array.isArray(r.errors) && r.errors.length > 0) {
+    const first = r.errors[0] as { message?: string } | undefined;
+    throw new Error(first?.message || fallbackMessage);
+  }
+  if (r.isSuccess === false) {
+    throw new Error(r.message || fallbackMessage);
+  }
+}
+
+// The platform stamps `acknowledged: false` on writes it accepted
+// structurally but failed to execute (same silent pattern, one level
+// deeper — see the markNotificationAsRead precedent). Checks the
+// unwrapped inner record; `message` rides along when present.
+function assertAcknowledged(item: unknown, fallbackMessage: string): void {
+  const r = item as { acknowledged?: boolean; message?: string } | undefined;
+  if (r && r.acknowledged === false) {
+    throw new Error(r.message || fallbackMessage);
+  }
+}
+
 export function useAnnouncements(): UseQueryResult<Announcement[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
@@ -2407,10 +2439,12 @@ export function usePostAnnouncement(): UseMutationResult<
         authorId: userId,
         content: input.content,
       })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      assertMutationOk(created, "IAM rejected the announcement post.");
       const item =
         "data" in created && created.data
           ? created.data
           : (created as CloudAnnouncement);
+      assertAcknowledged(item, "IAM rejected the announcement post.");
       return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
@@ -2440,10 +2474,12 @@ export function useUpdateAnnouncement(): UseMutationResult<
         authorId: input.authorId,
         content: input.content,
       })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      assertMutationOk(updated, "IAM rejected the announcement edit.");
       const item =
         "data" in updated && updated.data
           ? updated.data
           : (updated as CloudAnnouncement);
+      assertAcknowledged(item, "IAM rejected the announcement edit.");
       return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
@@ -2476,10 +2512,12 @@ export function useRepostAnnouncement(): UseMutationResult<
         authorId: source.authorId,
         content: source.content,
       })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      assertMutationOk(updated, "IAM rejected the announcement repost.");
       const item =
         "data" in updated && updated.data
           ? updated.data
           : (updated as CloudAnnouncement);
+      assertAcknowledged(item, "IAM rejected the announcement repost.");
       return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
