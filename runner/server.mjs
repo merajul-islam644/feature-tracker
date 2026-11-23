@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { prepareWorkspace } from "./workspace-prepare.mjs";
 import { registerTerminal } from "./terminal-pty.mjs";
 import { registerLsp } from "./lsp-bridge.mjs";
-import { listPlaywrightTools, callPlaywrightTool } from "./playwright-mcp.mjs";
+import { listPlaywrightTools, callPlaywrightTool, playwrightStatus, playwrightDisconnect } from "./playwright-mcp.mjs";
 
 // TestPilot AI runner v0.1 -- the piece that actually executes Playwright.
 // The SPA cannot run browsers, so it hands spec files to this service over
@@ -1547,7 +1547,15 @@ app.post("/api/workbench/mkdir", async (req, res) => {
 // The AI chat's browser_* tools + /test-runner read their tool catalog
 // and forward calls through these routes; the shapes mirror the old
 // mcp-server exactly so the vite proxy and clients stay untouched.
-app.get("/api/playwright/tools", async (_req, res) => {
+app.get("/playwright/status", (_req, res) => {
+  res.json(playwrightStatus());
+});
+
+app.post("/playwright/disconnect", (_req, res) => {
+  res.json(playwrightDisconnect());
+});
+
+app.get("/playwright/tools", async (_req, res) => {
   try {
     res.json({ tools: await listPlaywrightTools() });
   } catch (error) {
@@ -1558,7 +1566,7 @@ app.get("/api/playwright/tools", async (_req, res) => {
   }
 });
 
-app.post("/api/playwright/call", async (req, res) => {
+app.post("/playwright/call", async (req, res) => {
   const body = req.body ?? {};
   if (typeof body.tool !== "string" || !body.tool.trim()) {
     res.status(400).json({ error: "tool is required" });
@@ -1574,6 +1582,88 @@ app.post("/api/playwright/call", async (req, res) => {
     });
   }
 });
+
+// Long-lived dev-server manager — the AI panel's `workspace_dev_server`
+// tool. Spawns the project's dev command DETACHED (survives this runner
+// restarting), waits for the port to answer HTTP, and returns the URL.
+// One child per port; /stop kills it.
+const devServers = new Map(); // port → child
+
+app.post("/api/devserver/start", async (req, res) => {
+  const { root, command } = req.body ?? {};
+  const port = Number(req.body?.port) || 5174;
+  if (!isPlainRoot(root) || typeof command !== "string" || !command.trim()) {
+    res.status(400).json({ error: "root and command are required" });
+    return;
+  }
+  const safe = safeResolveUserFolder(root, ".");
+  if (!safe) {
+    res.status(403).json({ error: "bad root" });
+    return;
+  }
+  const existing = devServers.get(port);
+  if (existing && existing.exitCode === null) {
+    res.json({ ok: true, url: `http://localhost:${port}`, reused: true });
+    return;
+  }
+  const isWin = process.platform === "win32";
+  const full = `${command} -- --port ${port}`.replace("-- --port", "--port").replace("--  --port", "--port");
+  const line = /--port/.test(command) ? command : full;
+  const shell = isWin ? "cmd.exe" : "/bin/bash";
+  const shellArgs = isWin ? ["/d", "/s", "/c", line] : ["-lc", line];
+  let child;
+  try {
+    child = spawn(shell, shellArgs, { cwd: safe, windowsHide: true, detached: isWin, stdio: "ignore" });
+  } catch (error) {
+    res.status(500).json({ error: String(error?.message || error).slice(0, 300) });
+    return;
+  }
+  child.on("exit", () => {
+    if (devServers.get(port) === child) devServers.delete(port);
+  });
+  devServers.set(port, child);
+  // Readiness poll: up to 40s for the port to answer HTTP.
+  const deadline = Date.now() + 40_000;
+  let up = false;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) break;
+    try {
+      const probe = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1_500) });
+      if (probe.status < 500) { up = true; break; }
+    } catch {
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
+  if (!up) {
+    res.status(504).json({ error: "dev server did not become ready in 40s", port });
+    return;
+  }
+  res.json({ ok: true, url: `http://localhost:${port}`, port });
+});
+
+app.post("/api/devserver/stop", async (req, res) => {
+  const port = Number(req.body?.port) || 0;
+  const child = devServers.get(port);
+  if (!child) {
+    res.json({ ok: true, stopped: false });
+    return;
+  }
+  try {
+    if (isWinMixin()) {
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    } else {
+      process.kill(-child.pid);
+    }
+  } catch {
+    /* already gone */
+  }
+  devServers.delete(port);
+  res.json({ ok: true, stopped: true });
+});
+
+function isWinMixin() {
+  return process.platform === "win32";
+}
 
 app.post("/api/workbench/exec", async (req, res) => {
   const { root, command } = req.body ?? {};

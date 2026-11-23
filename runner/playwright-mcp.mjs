@@ -52,7 +52,10 @@ function ensureChild() {
   const isWin = process.platform === "win32";
   const next = spawn(
     isWin ? "cmd" : "npx",
-    [...(isWin ? ["/d", "/s", "/c", "npx"] : []), MCP_PACKAGE],
+    // --isolated: the AI gets its OWN ephemeral browser — without this it
+    // attached to the shared persistent profile and drove the SAME
+    // browser window the developer is testing in.
+    [...(isWin ? ["/d", "/s", "/c", "npx"] : []), MCP_PACKAGE, "--isolated"],
     { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
   );
   child = next;
@@ -145,6 +148,29 @@ function enqueueTool(task) {
   return next;
 }
 
+/** Connection status for the /mcp slash command. */
+export function playwrightStatus() {
+  return {
+    connected: Boolean(ready && child && child.exitCode === null),
+    package: MCP_PACKAGE,
+  };
+}
+
+/** Drop the MCP connection (kills the child). */
+export function playwrightDisconnect() {
+  ready = false;
+  const c = child;
+  child = null;
+  for (const waiter of pending.values()) waiter.reject(new Error("Playwright MCP disconnected"));
+  pending.clear();
+  try {
+    c?.kill();
+  } catch {
+    /* already gone */
+  }
+  return { disconnected: Boolean(c) };
+}
+
 /** Live tool catalog from the official server. */
 export async function listPlaywrightTools() {
   await ensureReady();
@@ -165,7 +191,13 @@ export async function callPlaywrightTool(name, args) {
       { name, arguments: args ?? {} },
       300_000,
     );
-    if (res?.isError) throw new Error(`playwright tool ${name} failed`);
+    if (res?.isError) {
+      const detail = (res?.content ?? [])
+        .map((b) => (typeof b?.text === "string" ? b.text : ""))
+        .join(" | ")
+        .slice(0, 400);
+      throw new Error(`playwright tool ${name} failed${detail ? `: ${detail}` : ""}`);
+    }
     const parts = [];
     let images = 0;
     for (const block of res?.content ?? []) {

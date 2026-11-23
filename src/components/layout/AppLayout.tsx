@@ -9,7 +9,6 @@ import { Topbar } from "./Topbar";
 import { Toaster } from "@/components/ui/sonner";
 import { IssueTrackerStoreProvider } from "@/hooks/issueTrackerStore";
 import { ActiveEnvProvider } from "@/contexts/ActiveEnvContext";
-import { GlobalChatAssistant } from "@/components/issue-tracker/GlobalChatAssistant";
 import { IncomingCallDialog } from "@/components/team-chat/IncomingCallDialog";
 import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
 import { EnvSync } from "./EnvSync";
@@ -73,7 +72,6 @@ export function AppLayout() {
           {/* Floating AI Assistant — every authenticated page (fixed
               position, so DOM placement inside the layout is irrelevant;
               it renders on top of whatever page the Outlet shows). */}
-          <GlobalChatAssistant />
           {/* Global incoming-call ring prompt — mounts once at the layout
               level so it pops regardless of which page the user is on.
               Fixed-position Dialog; sibling placement with Toaster keeps

@@ -912,8 +912,75 @@ function handleApi(req, res, pathname, reqUrl) {
  *   isConfigured: (cfg: ChatProviderConfig) => boolean,
  *   notConfiguredMessage: () => string,
  *   sendChat: (cfg: ChatProviderConfig, body: AnthropicRequestBody, signal: AbortSignal) => Promise<AnthropicResponseBody>,
+ *   streamChat: (cfg: ChatProviderConfig, body: AnthropicRequestBody & { stream: true }, res: import("http").ServerResponse, signal: AbortSignal) => Promise<void>,
  * }} ChatProvider
  */
+
+// ── SSE plumbing shared by both providers' streamChat ───────────────────
+// (lockstep with vite.config.ts — same helpers, plain-JS edition)
+
+/** SSE response envelope — headers tuned against proxy buffering. */
+function beginSse(res) {
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/event-stream");
+  res.setHeader("cache-control", "no-cache");
+  res.setHeader("connection", "keep-alive");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders?.();
+}
+
+/** Write one Anthropic-format SSE event frame. */
+function sseEvent(res, event) {
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/** Pump a byte stream to the client verbatim — the passthrough core. */
+async function pipeToRes(body, res) {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch {
+    res.end();
+  }
+}
+
+/** Non-OK upstream in stream mode: status + error body verbatim. */
+async function writeStreamError(res, upstream) {
+  res.statusCode = upstream.status;
+  res.setHeader(
+    "content-type",
+    upstream.headers.get("content-type") ?? "application/json",
+  );
+  res.end(await upstream.text().catch(() => ""));
+}
+
+/**
+ * Strict user/assistant alternation for the upstream `messages` array
+ * (lockstep with vite.config.ts → normalizeTurns). The workbench ledger
+ * can carry back-to-back same-role rows; Anthropic's Messages API
+ * rejects non-alternating messages outright — merge consecutive
+ * same-role entries and lead with a user row.
+ */
+function normalizeTurns(messages) {
+  const merged = [];
+  for (const message of messages) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === message.role) {
+      last.content = `${last.content}\n\n${message.content}`;
+    } else {
+      merged.push({ ...message });
+    }
+  }
+  if (merged.length > 0 && merged[0].role !== "user") {
+    merged.unshift({ role: "user", content: "(conversation context)" });
+  }
+  return merged;
+}
 
 /** @returns {ChatProvider} */
 function createAnthropicChatProvider() {
@@ -949,6 +1016,56 @@ function createAnthropicChatProvider() {
       }
       return /** @type {AnthropicResponseBody} */ (await upstream.json());
     },
+    async streamChat(cfg, body, res, signal) {
+      const upstream = await fetch(
+        `${cfg.url.replace(/\/+$/, "")}/v1/messages`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${cfg.token}`,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify(body),
+          signal,
+        },
+      );
+      if (!upstream.ok || !upstream.body) {
+        await writeStreamError(res, upstream);
+        return;
+      }
+      // Native Anthropic SSE — relay byte-for-byte.
+      beginSse(res);
+      await pipeToRes(upstream.body, res);
+    },
+  };
+}
+
+/**
+ * Anthropic → OpenAI request translation, shared by sendChat and
+ * streamChat (lockstep with vite.config.ts → toOpenAiRequest).
+ *   • Anthropic `system` → OpenAI system message at the head.
+ *   • Anthropic `tools[]` → OpenAI `tools[].function.parameters`.
+ */
+function toOpenAiRequest(cfg, body) {
+  const openaiMessages = body.system
+    ? [{ role: "system", content: body.system }, ...body.messages]
+    : [...body.messages];
+  const openaiTools = Array.isArray(body.tools)
+    ? body.tools.map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description ?? "",
+          parameters: t.input_schema,
+        },
+      }))
+    : undefined;
+  return {
+    model: cfg.model,
+    max_tokens: body.max_tokens,
+    messages: openaiMessages,
+    ...(openaiTools ? { tools: openaiTools } : {}),
   };
 }
 
@@ -962,25 +1079,6 @@ function createOpenAIChatProvider() {
     notConfiguredMessage: () =>
       "OpenAI provider is not configured. Open Settings → AI Gateway, pick OpenAI, and enter the Base URL + API key.",
     async sendChat(cfg, body, signal) {
-      // Anthropic → OpenAI request translation.
-      //   • Anthropic `system` → OpenAI system message at the head.
-      //   • Anthropic `tools[]` → OpenAI `tools[].function.parameters`
-      //     (both APIs use JSON Schema for the function-parameter shape
-      //     so `input_schema` passes through unchanged).
-      const openaiMessages = body.system
-        ? [{ role: "system", content: body.system }, ...body.messages]
-        : [...body.messages];
-      const openaiTools = Array.isArray(body.tools)
-        ? body.tools.map((t) => ({
-            type: "function",
-            function: {
-              name: t.name,
-              description: t.description ?? "",
-              parameters: t.input_schema,
-            },
-          }))
-        : undefined;
-
       const upstream = await fetch(
         `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
         {
@@ -989,12 +1087,7 @@ function createOpenAIChatProvider() {
             "content-type": "application/json",
             authorization: `Bearer ${cfg.token}`,
           },
-          body: JSON.stringify({
-            model: cfg.model,
-            max_tokens: body.max_tokens,
-            messages: openaiMessages,
-            ...(openaiTools ? { tools: openaiTools } : {}),
-          }),
+          body: JSON.stringify(toOpenAiRequest(cfg, body)),
           signal,
         },
       );
@@ -1053,7 +1146,130 @@ function createOpenAIChatProvider() {
         stop_reason: stopReason,
       };
     },
+    async streamChat(cfg, body, res, signal) {
+      const upstream = await fetch(
+        `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${cfg.token}`,
+          },
+          body: JSON.stringify({ ...toOpenAiRequest(cfg, body), stream: true }),
+          signal,
+        },
+      );
+      if (!upstream.ok || !upstream.body) {
+        await writeStreamError(res, upstream);
+        return;
+      }
+      // OpenAI chunks → Anthropic SSE events, live.
+      beginSse(res);
+      await translateOpenAiStreamToAnthropic(upstream.body, res);
+    },
   };
+}
+
+/**
+ * Translate an OpenAI chat-completions SSE stream into the Anthropic SSE
+ * event shapes the client parses (lockstep with vite.config.ts →
+ * translateOpenAiStreamToAnthropic). Mappings:
+ *   delta.content                          → content_block_delta {text_delta}
+ *   delta.tool_calls[i] with id            → content_block_start {tool_use}
+ *   delta.tool_calls[i].arguments fragment → content_block_delta {input_json_delta}
+ *   finish_reason / data: [DONE]           → message_stop
+ *   {"error": …} mid-stream                → {"type":"error"} event
+ */
+async function translateOpenAiStreamToAnthropic(body, res) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  // Anthropic block indexes are allocated in arrival order — the client
+  // appends blocks to its content array in the same order.
+  let nextIndex = 0;
+  let textIndex = null;
+  const toolIndexes = new Map(); // OpenAI tool idx → Anthropic idx
+  let stopped = false;
+  const emitStop = () => {
+    if (stopped) return;
+    stopped = true;
+    sseEvent(res, { type: "message_stop" });
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith("data:")) continue;
+        const dataStr = line.slice(5).trim();
+        if (!dataStr) continue;
+        if (dataStr === "[DONE]") {
+          emitStop();
+          res.end();
+          return;
+        }
+        let chunk;
+        try {
+          chunk = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
+        if (chunk.error) {
+          sseEvent(res, { type: "error", error: { message: chunk.error?.message ?? "stream error" } });
+          res.end();
+          return;
+        }
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta;
+        if (!delta && !choice?.finish_reason) continue;
+        const text = delta?.content;
+        if (typeof text === "string" && text.length > 0) {
+          if (textIndex === null) {
+            textIndex = nextIndex;
+            nextIndex += 1;
+            sseEvent(res, { type: "content_block_start", index: textIndex, content_block: { type: "text" } });
+          }
+          sseEvent(res, { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text } });
+        }
+        for (const tc of delta?.tool_calls ?? []) {
+          const openaiIdx = typeof tc.index === "number" ? tc.index : 0;
+          let blockIndex = toolIndexes.get(openaiIdx);
+          if (blockIndex === undefined && (tc.id || tc.function?.name)) {
+            blockIndex = nextIndex;
+            nextIndex += 1;
+            toolIndexes.set(openaiIdx, blockIndex);
+            sseEvent(res, {
+              type: "content_block_start",
+              index: blockIndex,
+              content_block: {
+                type: "tool_use",
+                id: tc.id ?? `toolu_${openaiIdx}`,
+                name: tc.function?.name ?? "",
+              },
+            });
+          }
+          if (blockIndex !== undefined && tc.function?.arguments) {
+            sseEvent(res, {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+            });
+          }
+        }
+        if (choice?.finish_reason) emitStop();
+      }
+    }
+    emitStop();
+    res.end();
+  } catch {
+    // Upstream died mid-stream — close cleanly (partial answer stands).
+    res.end();
+  }
 }
 
 const CHAT_PROVIDERS = {
@@ -1206,6 +1422,32 @@ async function proxyAiChat(req, res) {
           }))
       : [];
 
+    // ── SSE streaming passthrough (lockstep with vite.config.ts) ──
+    // When the client asks (stream:true), the selected provider streams
+    // the answer as Anthropic-format SSE (Anthropic relayed byte-for-byte,
+    // OpenAI translated live). The 25s chatTimer is tuned for single-shot
+    // JSON answers — a stream can legitimately run for minutes, so it is
+    // disarmed here; disconnects surface as broken writes inside the pipe.
+    if (parsed?.stream === true) {
+      responseStarted = true;
+      clearTimeout(chatTimer);
+      await provider.streamChat(
+        cfg,
+        {
+          model: cfg.model,
+          max_tokens: 16384,
+          system: systemPrompt,
+          messages: normalizeTurns([...history, { role: "user", content: userText }]),
+          ...(tools ? { tools } : {}),
+          ...(toolChoice ? { tool_choice: toolChoice } : {}),
+          stream: true,
+        },
+        res,
+        abort.signal,
+      );
+      return;
+    }
+
     // Provider receives an Anthropic-format body; each provider
     // factory translates to its native wire (or passes through for
     // Anthropic) and returns Anthropic-format JSON.
@@ -1216,7 +1458,7 @@ async function proxyAiChat(req, res) {
         model: cfg.model,
         max_tokens: 4096,
         system: systemPrompt,
-        messages: [...history, { role: "user", content: userText }],
+        messages: normalizeTurns([...history, { role: "user", content: userText }]),
         ...(tools ? { tools } : {}),
         ...(toolChoice ? { tool_choice: toolChoice } : {}),
       },

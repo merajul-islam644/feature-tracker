@@ -66,7 +66,100 @@ import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import path from "path";
 import fs from "fs";
-import { WebSocket as NodeWebSocket, WebSocketServer as NodeWebSocketServer } from "ws";
+// ── SSE plumbing shared by both providers' streamChat ───────────────────
+/** SSE response envelope — every header tuned against proxy buffering so
+ *  deltas reach the browser the moment the gateway emits them. */
+function beginSse(res) {
+    var _a;
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/event-stream");
+    res.setHeader("cache-control", "no-cache");
+    res.setHeader("connection", "keep-alive");
+    res.setHeader("x-accel-buffering", "no");
+    (_a = res.flushHeaders) === null || _a === void 0 ? void 0 : _a.call(res);
+}
+/** Write one Anthropic-format SSE event frame. */
+function sseEvent(res, event) {
+    res.write("data: ".concat(JSON.stringify(event), "\n\n"));
+}
+/** Strict user/assistant alternation for the upstream `messages` array.
+ *  The workbench ledger can carry back-to-back same-role rows (e.g. a
+ *  "[tool results]" user entry followed by the next user text), and
+ *  Anthropic's Messages API rejects non-alternating messages outright —
+ *  merge consecutive same-role entries and lead with a user row so any
+ *  provider accepts the shape. */
+function normalizeTurns(messages) {
+    var merged = [];
+    for (var _i = 0, messages_1 = messages; _i < messages_1.length; _i++) {
+        var message = messages_1[_i];
+        var last = merged[merged.length - 1];
+        if (last && last.role === message.role) {
+            last.content = "".concat(last.content, "\n\n").concat(message.content);
+        }
+        else {
+            merged.push(__assign({}, message));
+        }
+    }
+    if (merged.length > 0 && merged[0].role !== "user") {
+        merged.unshift({ role: "user", content: "(conversation context)" });
+    }
+    return merged;
+}
+/** Pump a byte stream to the client verbatim — the passthrough core. */
+function pipeToRes(body, res) {
+    return __awaiter(this, void 0, void 0, function () {
+        var reader, _a, done, value, _b;
+        return __generator(this, function (_c) {
+            switch (_c.label) {
+                case 0:
+                    reader = body.getReader();
+                    _c.label = 1;
+                case 1:
+                    _c.trys.push([1, 6, , 7]);
+                    _c.label = 2;
+                case 2: return [4 /*yield*/, reader.read()];
+                case 3:
+                    _a = _c.sent(), done = _a.done, value = _a.value;
+                    if (done)
+                        return [3 /*break*/, 5];
+                    res.write(Buffer.from(value));
+                    _c.label = 4;
+                case 4: return [3 /*break*/, 2];
+                case 5:
+                    res.end();
+                    return [3 /*break*/, 7];
+                case 6:
+                    _b = _c.sent();
+                    // Upstream died / client disconnected mid-stream — close cleanly;
+                    // the client's reader just sees stream end.
+                    res.end();
+                    return [3 /*break*/, 7];
+                case 7: return [2 /*return*/];
+            }
+        });
+    });
+}
+/** Non-OK upstream in stream mode: pass status + error body through
+ *  verbatim — the client's !response.ok branch parses the message out of
+ *  it, so the user sees "401 unauthorized" / "404 model not found". */
+function writeStreamError(res, upstream) {
+    return __awaiter(this, void 0, void 0, function () {
+        var _a, _b;
+        var _c;
+        return __generator(this, function (_d) {
+            switch (_d.label) {
+                case 0:
+                    res.statusCode = upstream.status;
+                    res.setHeader("content-type", (_c = upstream.headers.get("content-type")) !== null && _c !== void 0 ? _c : "application/json");
+                    _b = (_a = res).end;
+                    return [4 /*yield*/, upstream.text().catch(function () { return ""; })];
+                case 1:
+                    _b.apply(_a, [_d.sent()]);
+                    return [2 /*return*/];
+            }
+        });
+    });
+}
 function createAnthropicChatProvider() {
     return {
         id: "anthropic",
@@ -105,7 +198,65 @@ function createAnthropicChatProvider() {
                 });
             });
         },
+        streamChat: function (cfg, body, res, signal) {
+            return __awaiter(this, void 0, void 0, function () {
+                var upstream;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0: return [4 /*yield*/, fetch("".concat(cfg.url.replace(/\/+$/, ""), "/v1/messages"), {
+                                method: "POST",
+                                headers: {
+                                    "content-type": "application/json",
+                                    authorization: "Bearer ".concat(cfg.token),
+                                    "anthropic-version": "2023-06-01",
+                                },
+                                body: JSON.stringify(body),
+                                signal: signal,
+                            })];
+                        case 1:
+                            upstream = _a.sent();
+                            if (!(!upstream.ok || !upstream.body)) return [3 /*break*/, 3];
+                            return [4 /*yield*/, writeStreamError(res, upstream)];
+                        case 2:
+                            _a.sent();
+                            return [2 /*return*/];
+                        case 3:
+                            // Native Anthropic SSE — relay byte-for-byte, no parsing here; the
+                            // client (workbenchAi.ts → streamAnthropicResponse) reads the
+                            // events itself.
+                            beginSse(res);
+                            return [4 /*yield*/, pipeToRes(upstream.body, res)];
+                        case 4:
+                            _a.sent();
+                            return [2 /*return*/];
+                    }
+                });
+            });
+        },
     };
+}
+// Anthropic → OpenAI request translation, shared by sendChat (single
+// JSON) and streamChat (SSE):
+//   • Anthropic `system` → OpenAI system message at the head.
+//   • Anthropic `tools[]` → OpenAI `tools[].function.parameters` (we
+//     pass through `input_schema` unchanged — both APIs use JSON
+//     Schema for the function parameter shape).
+function toOpenAiRequest(cfg, body) {
+    var _a;
+    var openaiMessages = body.system
+        ? __spreadArray([{ role: "system", content: body.system }], body.messages, true) : __spreadArray([], body.messages, true);
+    var openaiTools = (_a = body.tools) === null || _a === void 0 ? void 0 : _a.map(function (t) {
+        var _a;
+        return ({
+            type: "function",
+            function: {
+                name: t.name,
+                description: (_a = t.description) !== null && _a !== void 0 ? _a : "",
+                parameters: t.input_schema,
+            },
+        });
+    });
+    return __assign({ model: cfg.model, max_tokens: body.max_tokens, messages: openaiMessages }, (openaiTools ? { tools: openaiTools } : {}));
 }
 function createOpenAIChatProvider() {
     return {
@@ -119,50 +270,36 @@ function createOpenAIChatProvider() {
         },
         sendChat: function (cfg, body, signal) {
             return __awaiter(this, void 0, void 0, function () {
-                var openaiMessages, openaiTools, upstream, text_1, json, choice, content, text, _i, _a, tc, input, parsed, stopReason;
-                var _b, _c, _d, _e, _f, _g;
-                return __generator(this, function (_h) {
-                    switch (_h.label) {
-                        case 0:
-                            openaiMessages = body.system
-                                ? __spreadArray([{ role: "system", content: body.system }], body.messages, true) : __spreadArray([], body.messages, true);
-                            openaiTools = (_b = body.tools) === null || _b === void 0 ? void 0 : _b.map(function (t) {
-                                var _a;
-                                return ({
-                                    type: "function",
-                                    function: {
-                                        name: t.name,
-                                        description: (_a = t.description) !== null && _a !== void 0 ? _a : "",
-                                        parameters: t.input_schema,
-                                    },
-                                });
-                            });
-                            return [4 /*yield*/, fetch("".concat(cfg.url.replace(/\/+$/, ""), "/v1/chat/completions"), {
-                                    method: "POST",
-                                    headers: {
-                                        "content-type": "application/json",
-                                        authorization: "Bearer ".concat(cfg.token),
-                                    },
-                                    body: JSON.stringify(__assign({ model: cfg.model, max_tokens: body.max_tokens, messages: openaiMessages }, (openaiTools ? { tools: openaiTools } : {}))),
-                                    signal: signal,
-                                })];
+                var upstream, text_1, json, choice, content, text, _i, _a, tc, input, parsed, stopReason;
+                var _b, _c, _d, _e, _f;
+                return __generator(this, function (_g) {
+                    switch (_g.label) {
+                        case 0: return [4 /*yield*/, fetch("".concat(cfg.url.replace(/\/+$/, ""), "/v1/chat/completions"), {
+                                method: "POST",
+                                headers: {
+                                    "content-type": "application/json",
+                                    authorization: "Bearer ".concat(cfg.token),
+                                },
+                                body: JSON.stringify(toOpenAiRequest(cfg, body)),
+                                signal: signal,
+                            })];
                         case 1:
-                            upstream = _h.sent();
+                            upstream = _g.sent();
                             if (!!upstream.ok) return [3 /*break*/, 3];
                             return [4 /*yield*/, upstream.text()];
                         case 2:
-                            text_1 = _h.sent();
+                            text_1 = _g.sent();
                             throw new Error("upstream_".concat(upstream.status, ": ").concat(text_1.slice(0, 500)));
                         case 3: return [4 /*yield*/, upstream.json()];
                         case 4:
-                            json = (_h.sent());
-                            choice = (_c = json.choices) === null || _c === void 0 ? void 0 : _c[0];
+                            json = (_g.sent());
+                            choice = (_b = json.choices) === null || _b === void 0 ? void 0 : _b[0];
                             content = [];
-                            text = (_d = choice === null || choice === void 0 ? void 0 : choice.message) === null || _d === void 0 ? void 0 : _d.content;
+                            text = (_c = choice === null || choice === void 0 ? void 0 : choice.message) === null || _c === void 0 ? void 0 : _c.content;
                             if (typeof text === "string" && text.length > 0) {
                                 content.push({ type: "text", text: text });
                             }
-                            for (_i = 0, _a = (_f = (_e = choice === null || choice === void 0 ? void 0 : choice.message) === null || _e === void 0 ? void 0 : _e.tool_calls) !== null && _f !== void 0 ? _f : []; _i < _a.length; _i++) {
+                            for (_i = 0, _a = (_e = (_d = choice === null || choice === void 0 ? void 0 : choice.message) === null || _d === void 0 ? void 0 : _d.tool_calls) !== null && _e !== void 0 ? _e : []; _i < _a.length; _i++) {
                                 tc = _a[_i];
                                 input = {};
                                 try {
@@ -171,7 +308,7 @@ function createOpenAIChatProvider() {
                                         input = parsed;
                                     }
                                 }
-                                catch (_j) {
+                                catch (_h) {
                                     input = {};
                                 }
                                 content.push({
@@ -190,7 +327,7 @@ function createOpenAIChatProvider() {
                                     id: "chatcmpl-".concat(Date.now()),
                                     type: "message",
                                     role: "assistant",
-                                    model: (_g = json.model) !== null && _g !== void 0 ? _g : cfg.model,
+                                    model: (_f = json.model) !== null && _f !== void 0 ? _f : cfg.model,
                                     content: content,
                                     stop_reason: stopReason,
                                 }];
@@ -198,7 +335,164 @@ function createOpenAIChatProvider() {
                 });
             });
         },
+        streamChat: function (cfg, body, res, signal) {
+            return __awaiter(this, void 0, void 0, function () {
+                var upstream;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0: return [4 /*yield*/, fetch("".concat(cfg.url.replace(/\/+$/, ""), "/v1/chat/completions"), {
+                                method: "POST",
+                                headers: {
+                                    "content-type": "application/json",
+                                    authorization: "Bearer ".concat(cfg.token),
+                                },
+                                body: JSON.stringify(__assign(__assign({}, toOpenAiRequest(cfg, body)), { stream: true })),
+                                signal: signal,
+                            })];
+                        case 1:
+                            upstream = _a.sent();
+                            if (!(!upstream.ok || !upstream.body)) return [3 /*break*/, 3];
+                            return [4 /*yield*/, writeStreamError(res, upstream)];
+                        case 2:
+                            _a.sent();
+                            return [2 /*return*/];
+                        case 3:
+                            // OpenAI's chunk stream is NOT the downstream wire — translate it
+                            // into Anthropic SSE events live so the client keeps parsing one
+                            // shape (this file's declared design).
+                            beginSse(res);
+                            return [4 /*yield*/, translateOpenAiStreamToAnthropic(upstream.body, res)];
+                        case 4:
+                            _a.sent();
+                            return [2 /*return*/];
+                    }
+                });
+            });
+        },
     };
+}
+// Translate an OpenAI chat-completions SSE stream into the Anthropic SSE
+// event shapes the client parses. Mappings:
+//   delta.content                        → content_block_delta {text_delta}
+//   delta.tool_calls[i] with id          → content_block_start {tool_use}
+//   delta.tool_calls[i].arguments fragment → content_block_delta {input_json_delta}
+//   finish_reason / data: [DONE]         → message_stop
+//   {"error": …} mid-stream              → {"type":"error"} event
+function translateOpenAiStreamToAnthropic(body, res) {
+    return __awaiter(this, void 0, void 0, function () {
+        var reader, decoder, buffer, nextIndex, textIndex, toolIndexes, stopped, emitStop, _a, done, value, newline, line, dataStr, chunk, choice, delta, text, _i, _b, tc, openaiIdx, blockIndex, _c;
+        var _d, _e, _f, _g, _h, _j, _k, _l;
+        return __generator(this, function (_m) {
+            switch (_m.label) {
+                case 0:
+                    reader = body.getReader();
+                    decoder = new TextDecoder();
+                    buffer = "";
+                    nextIndex = 0;
+                    textIndex = null;
+                    toolIndexes = new Map();
+                    stopped = false;
+                    emitStop = function () {
+                        if (stopped)
+                            return;
+                        stopped = true;
+                        sseEvent(res, { type: "message_stop" });
+                    };
+                    _m.label = 1;
+                case 1:
+                    _m.trys.push([1, 6, , 7]);
+                    _m.label = 2;
+                case 2: return [4 /*yield*/, reader.read()];
+                case 3:
+                    _a = _m.sent(), done = _a.done, value = _a.value;
+                    if (done)
+                        return [3 /*break*/, 5];
+                    buffer += decoder.decode(value, { stream: true });
+                    for (;;) {
+                        newline = buffer.indexOf("\n");
+                        if (newline === -1)
+                            break;
+                        line = buffer.slice(0, newline).trim();
+                        buffer = buffer.slice(newline + 1);
+                        if (!line.startsWith("data:"))
+                            continue;
+                        dataStr = line.slice(5).trim();
+                        if (!dataStr)
+                            continue;
+                        if (dataStr === "[DONE]") {
+                            emitStop();
+                            res.end();
+                            return [2 /*return*/];
+                        }
+                        chunk = void 0;
+                        try {
+                            chunk = JSON.parse(dataStr);
+                        }
+                        catch (_o) {
+                            continue;
+                        }
+                        if (chunk.error) {
+                            sseEvent(res, { type: "error", error: { message: (_d = chunk.error.message) !== null && _d !== void 0 ? _d : "stream error" } });
+                            res.end();
+                            return [2 /*return*/];
+                        }
+                        choice = (_e = chunk.choices) === null || _e === void 0 ? void 0 : _e[0];
+                        delta = choice === null || choice === void 0 ? void 0 : choice.delta;
+                        if (!delta && !(choice === null || choice === void 0 ? void 0 : choice.finish_reason))
+                            continue;
+                        text = delta === null || delta === void 0 ? void 0 : delta.content;
+                        if (typeof text === "string" && text.length > 0) {
+                            if (textIndex === null) {
+                                textIndex = nextIndex;
+                                nextIndex += 1;
+                                sseEvent(res, { type: "content_block_start", index: textIndex, content_block: { type: "text" } });
+                            }
+                            sseEvent(res, { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: text } });
+                        }
+                        for (_i = 0, _b = (_f = delta === null || delta === void 0 ? void 0 : delta.tool_calls) !== null && _f !== void 0 ? _f : []; _i < _b.length; _i++) {
+                            tc = _b[_i];
+                            openaiIdx = typeof tc.index === "number" ? tc.index : 0;
+                            blockIndex = toolIndexes.get(openaiIdx);
+                            if (blockIndex === undefined && (tc.id || ((_g = tc.function) === null || _g === void 0 ? void 0 : _g.name))) {
+                                blockIndex = nextIndex;
+                                nextIndex += 1;
+                                toolIndexes.set(openaiIdx, blockIndex);
+                                sseEvent(res, {
+                                    type: "content_block_start",
+                                    index: blockIndex,
+                                    content_block: {
+                                        type: "tool_use",
+                                        id: (_h = tc.id) !== null && _h !== void 0 ? _h : "toolu_".concat(openaiIdx),
+                                        name: (_k = (_j = tc.function) === null || _j === void 0 ? void 0 : _j.name) !== null && _k !== void 0 ? _k : "",
+                                    },
+                                });
+                            }
+                            if (blockIndex !== undefined && ((_l = tc.function) === null || _l === void 0 ? void 0 : _l.arguments)) {
+                                sseEvent(res, {
+                                    type: "content_block_delta",
+                                    index: blockIndex,
+                                    delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+                                });
+                            }
+                        }
+                        if (choice === null || choice === void 0 ? void 0 : choice.finish_reason)
+                            emitStop();
+                    }
+                    _m.label = 4;
+                case 4: return [3 /*break*/, 2];
+                case 5:
+                    emitStop();
+                    res.end();
+                    return [3 /*break*/, 7];
+                case 6:
+                    _c = _m.sent();
+                    // Upstream died mid-stream — close cleanly (partial answer stands).
+                    res.end();
+                    return [3 /*break*/, 7];
+                case 7: return [2 /*return*/];
+            }
+        });
+    });
 }
 var CHAT_PROVIDERS = {
     anthropic: createAnthropicChatProvider,
@@ -279,7 +573,7 @@ function aiChatProxy(_env) {
                             });
                             _e.label = 1;
                         case 1:
-                            _e.trys.push([1, 15, , 16]);
+                            _e.trys.push([1, 17, , 18]);
                             chunks = [];
                             _e.label = 2;
                         case 2:
@@ -345,12 +639,17 @@ function aiChatProxy(_env) {
                                     content: m.content.slice(0, 2000),
                                 }); })
                                 : [];
-                            return [4 /*yield*/, provider.sendChat(cfg, __assign(__assign({ model: cfg.model, 
-                                    // 16384 — reasoning models (MiniMax-M3) spend thousands of
-                                    // tokens thinking before any content; 4096 truncated them
-                                    // mid-thought, returning content:null with stop max_tokens.
-                                    max_tokens: 16384, system: systemPrompt, messages: __spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false) }, (tools ? { tools: tools } : {})), (toolChoice ? { tool_choice: toolChoice } : {})), abort.signal)];
+                            if (!((parsed === null || parsed === void 0 ? void 0 : parsed.stream) === true)) return [3 /*break*/, 15];
+                            return [4 /*yield*/, provider.streamChat(cfg, __assign(__assign(__assign({ model: cfg.model, max_tokens: 16384, system: systemPrompt, messages: normalizeTurns(__spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false)) }, (tools ? { tools: tools } : {})), (toolChoice ? { tool_choice: toolChoice } : {})), { stream: true }), res, abort.signal)];
                         case 14:
+                            _e.sent();
+                            return [2 /*return*/];
+                        case 15: return [4 /*yield*/, provider.sendChat(cfg, __assign(__assign({ model: cfg.model, 
+                                // 16384 — reasoning models (MiniMax-M3) spend thousands of
+                                // tokens thinking before any content; 4096 truncated them
+                                // mid-thought, returning content:null with stop max_tokens.
+                                max_tokens: 16384, system: systemPrompt, messages: normalizeTurns(__spreadArray(__spreadArray([], history_1, true), [{ role: "user", content: userText }], false)) }, (tools ? { tools: tools } : {})), (toolChoice ? { tool_choice: toolChoice } : {})), abort.signal)];
+                        case 16:
                             response = _e.sent();
                             if (disconnected || abort.signal.aborted) {
                                 // Browser went away mid-call; nothing to send back.
@@ -360,8 +659,8 @@ function aiChatProxy(_env) {
                             res.statusCode = 200;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify(response));
-                            return [3 /*break*/, 16];
-                        case 15:
+                            return [3 /*break*/, 18];
+                        case 17:
                             err_1 = _e.sent();
                             if (disconnected || abort.signal.aborted) {
                                 res.end();
@@ -373,8 +672,8 @@ function aiChatProxy(_env) {
                                 error: "upstream_failure",
                                 message: err_1 instanceof Error ? err_1.message : String(err_1),
                             }));
-                            return [3 /*break*/, 16];
-                        case 16: return [2 /*return*/];
+                            return [3 /*break*/, 18];
+                        case 18: return [2 /*return*/];
                     }
                 });
             }); });
@@ -456,502 +755,17 @@ function mailBridgeProxy(env) {
         },
     };
 }
-// Server-side proxy for the dev-server sandbox.
-//
-// `mcp-server` (on `:8787`) owns the per-(workspace, port) child
-// processes that the /panel workspace's terminal + preview panels
-// drive. The browser hits `/api/dev-server/*` and this middleware
-// forwards transparently — same registrable domain as the Lattice
-// page, so the IAM cookie + Vite HMR iframe both work.
-//
-// Behaviour:
-//   • GET  /api/dev-server/<wsId>/<port>/events   → SSE pump (preserves
-//                                                    the streaming
-//                                                    response so the
-//                                                    xterm panel can
-//                                                    see live output)
-//   • POST /api/dev-server/start                  → JSON forward
-//   • POST /api/dev-server/stop                   → JSON forward
-//   • GET  /api/dev-server/<wsId>/<port>/status   → JSON forward
-//   • GET  /api/dev-server/<wsId>/<port>/files/* → JSON forward
-//   • PUT  /api/dev-server/<wsId>/<port>/files/* → JSON forward
-//   • GET  /api/dev-server/<wsId>/<port>/proxy/*  → stream relay —
-//                                                    reverse-proxy to
-//                                                    127.0.0.1:<port>.
-//                                                    The dev-server
-//                                                    preview iframe
-//                                                    hangs off this.
-//
-// When `DEV_SERVER_BACKEND_URL` is unset the proxy returns 503 and
-// the client (`devServerApi`) throws — the workspace context catches
-// and degrades to "Run mode only".
-function devServerProxy(env) {
-    // Default to the local MCP server. Set to empty string to disable
-    // (the proxy will then 503 every request).
-    var backendUrl = (env.DEV_SERVER_BACKEND_URL !== undefined
-        ? env.DEV_SERVER_BACKEND_URL
-        : "http://localhost:8787").replace(/\/+$/, "");
-    return {
-        name: "feature-tracker:dev-server-proxy",
-        apply: "serve",
-        configureServer: function (server) {
-            var _this = this;
-            var notConfigured = function (res) {
-                res.statusCode = 503;
-                res.setHeader("content-type", "application/json");
-                res.end(JSON.stringify({
-                    error: "dev_server_not_configured",
-                    message: "DEV_SERVER_BACKEND_URL is not set on the Vite server. Set it (and VITE_USE_DEV_SERVER=1 on the client) to enable the dev-server sandbox.",
-                }));
-            };
-            // Single mount at `/api/dev-server` catches every sub-path. The
-            // forward URL is `${backendUrl}/dev-server${req.url}` because
-            // Connect has already peeled the `/api/dev-server` prefix off by
-            // the time this handler sees the request.
-            server.middlewares.use("/api/dev-server", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var ssePath, upstream, reader_1, pump, err_3, upstream, _a, _b, _c, text, err_4;
-                var _d;
-                var _this = this;
-                var _e, _f, _g, _h, _j, _k;
-                return __generator(this, function (_l) {
-                    switch (_l.label) {
-                        case 0:
-                            if (!backendUrl) {
-                                notConfigured(res);
-                                return [2 /*return*/];
-                            }
-                            ssePath = ((_e = req.url) !== null && _e !== void 0 ? _e : "").split("?")[0];
-                            if (!(req.method === "GET" &&
-                                (ssePath.endsWith("/events") ||
-                                    ssePath.endsWith("/watch") ||
-                                    ssePath.endsWith("/diagnostics")))) return [3 /*break*/, 5];
-                            _l.label = 1;
-                        case 1:
-                            _l.trys.push([1, 3, , 4]);
-                            return [4 /*yield*/, fetch("".concat(backendUrl, "/dev-server").concat((_f = req.url) !== null && _f !== void 0 ? _f : "/"), {
-                                    headers: {
-                                        accept: "text/event-stream",
-                                        // Forward `accept-encoding` identity so the SSE
-                                        // stream isn't gzipped — Vite's compression
-                                        // middleware would otherwise buffer the response.
-                                        "accept-encoding": "identity",
-                                    },
-                                })];
-                        case 2:
-                            upstream = _l.sent();
-                            res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_g = upstream.headers.get("content-type")) !== null && _g !== void 0 ? _g : "text/event-stream");
-                            res.setHeader("cache-control", "no-cache");
-                            res.setHeader("connection", "keep-alive");
-                            res.setHeader("x-accel-buffering", "no");
-                            if (upstream.body) {
-                                reader_1 = upstream.body.getReader();
-                                pump = function () { return __awaiter(_this, void 0, void 0, function () {
-                                    var _a, done, value, _b;
-                                    return __generator(this, function (_c) {
-                                        switch (_c.label) {
-                                            case 0:
-                                                _c.trys.push([0, 4, , 5]);
-                                                _c.label = 1;
-                                            case 1:
-                                                if (!true) return [3 /*break*/, 3];
-                                                return [4 /*yield*/, reader_1.read()];
-                                            case 2:
-                                                _a = _c.sent(), done = _a.done, value = _a.value;
-                                                if (done)
-                                                    return [3 /*break*/, 3];
-                                                res.write(Buffer.from(value));
-                                                return [3 /*break*/, 1];
-                                            case 3:
-                                                res.end();
-                                                return [3 /*break*/, 5];
-                                            case 4:
-                                                _b = _c.sent();
-                                                res.end();
-                                                return [3 /*break*/, 5];
-                                            case 5: return [2 /*return*/];
-                                        }
-                                    });
-                                }); };
-                                pump();
-                            }
-                            else {
-                                res.end();
-                            }
-                            return [3 /*break*/, 4];
-                        case 3:
-                            err_3 = _l.sent();
-                            res.statusCode = 502;
-                            res.setHeader("content-type", "application/json");
-                            res.end(JSON.stringify({
-                                error: "upstream_failure",
-                                message: err_3 instanceof Error ? err_3.message : String(err_3),
-                            }));
-                            return [3 /*break*/, 4];
-                        case 4: return [2 /*return*/];
-                        case 5:
-                            _l.trys.push([5, 11, , 12]);
-                            _a = fetch;
-                            _b = ["".concat(backendUrl, "/dev-server").concat((_h = req.url) !== null && _h !== void 0 ? _h : "/")];
-                            _d = {
-                                method: req.method,
-                                headers: { "content-type": "application/json" }
-                            };
-                            if (!["GET", "HEAD"].includes((_j = req.method) !== null && _j !== void 0 ? _j : "")) return [3 /*break*/, 6];
-                            _c = undefined;
-                            return [3 /*break*/, 8];
-                        case 6: return [4 /*yield*/, readBody(req)];
-                        case 7:
-                            _c = _l.sent();
-                            _l.label = 8;
-                        case 8: return [4 /*yield*/, _a.apply(void 0, _b.concat([(_d.body = _c,
-                                    _d)]))];
-                        case 9:
-                            upstream = _l.sent();
-                            return [4 /*yield*/, upstream.text()];
-                        case 10:
-                            text = _l.sent();
-                            res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_k = upstream.headers.get("content-type")) !== null && _k !== void 0 ? _k : "application/json");
-                            res.end(text);
-                            return [3 /*break*/, 12];
-                        case 11:
-                            err_4 = _l.sent();
-                            res.statusCode = 502;
-                            res.setHeader("content-type", "application/json");
-                            res.end(JSON.stringify({
-                                error: "upstream_failure",
-                                message: err_4 instanceof Error ? err_4.message : String(err_4),
-                            }));
-                            return [3 /*break*/, 12];
-                        case 12: return [2 /*return*/];
-                    }
-                });
-            }); });
-        },
-    };
-}
-// Local-agent bridge — same shape as prod-backend.mjs's `upgrade`
-// handler. The local agent opens a WebSocket to ws://<vite-host>/
-// api/dev-server/_agent; we forward the upgrade to ws://localhost:
-// <MCP_PORT>/_agent. Both server-side paths are inside the same dev
-// machine, so the wire is plain ws:// (no TLS). The agent's URL
-// must match the agent's --remote flag.
-function agentBridgeProxy(env) {
-    var mcpHttpUrl = (env.DEV_SERVER_BACKEND_URL !== undefined
-        ? env.DEV_SERVER_BACKEND_URL
-        : "http://localhost:8787").replace(/\/+$/, "");
-    var mcpWsUrl = mcpHttpUrl.replace(/^http/, "ws");
-    return {
-        name: "feature-tracker:agent-bridge-proxy",
-        apply: "serve",
-        configureServer: function (server) {
-            var _a;
-            var bind = function (httpServer) {
-                httpServer.on("upgrade", function (req, clientSocket, head) {
-                    var reqUrl = req.url || "";
-                    // Only consume upgrades targeted at the agent bridge. For
-                    // every other path (Vite's own HMR, etc.) we just return
-                    // so the remaining "upgrade" listeners — Node's
-                    // EventEmitter fires them all — handle it. Destroying
-                    // here would also kill Vite's HMR socket and freeze the
-                    // dev page on a blank screen.
-                    if (!reqUrl.startsWith("/api/dev-server/_agent")) {
-                        return;
-                    }
-                    // Dynamic import so `ws` is only loaded when the upgrade
-                    // actually fires (cold start of dev mode stays fast).
-                    import("ws").then(function (_a) {
-                        var WebSocket = _a.WebSocket, WebSocketServer = _a.WebSocketServer;
-                        var upstreamPath = reqUrl.replace(/^\/api\/dev-server/, "");
-                        var upstreamUrl = "".concat(mcpWsUrl).concat(upstreamPath);
-                        // Upgrade the agent's socket in-place via ws's noServer mode.
-                        // handleUpgrade writes the HTTP/1.1 101 Switching Protocols
-                        // response — without it the agent sees no 101 and closes with
-                        // code=1006.
-                        var wss = new WebSocketServer({ noServer: true });
-                        wss.handleUpgrade(req, clientSocket, head, function (clientWs) {
-                            var upstreamHeaders = {};
-                            for (var _i = 0, _a = Object.entries(req.headers); _i < _a.length; _i++) {
-                                var _b = _a[_i], k = _b[0], v = _b[1];
-                                if (!v)
-                                    continue;
-                                if (k === "host")
-                                    continue;
-                                upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
-                            }
-                            var upstream = new WebSocket(upstreamUrl, {
-                                headers: upstreamHeaders,
-                            });
-                            var closed = false;
-                            var cleanup = function (code, reason) {
-                                if (closed)
-                                    return;
-                                closed = true;
-                                try {
-                                    clientWs.close(code, reason);
-                                }
-                                catch (_a) {
-                                    /* */
-                                }
-                                try {
-                                    if (upstream.readyState <= 1)
-                                        upstream.close(code, reason);
-                                }
-                                catch (_b) {
-                                    /* */
-                                }
-                            };
-                            clientWs.on("message", function (data, isBinary) {
-                                try {
-                                    if (upstream.readyState === 1) {
-                                        upstream.send(data, { binary: isBinary });
-                                    }
-                                }
-                                catch (_a) {
-                                    cleanup(1011, "upstream_send_failed");
-                                }
-                            });
-                            clientWs.on("close", function (code, reason) { var _a, _b; return cleanup(code, (_b = (_a = reason === null || reason === void 0 ? void 0 : reason.toString) === null || _a === void 0 ? void 0 : _a.call(reason)) !== null && _b !== void 0 ? _b : ""); });
-                            clientWs.on("error", function () { return cleanup(1011, "client_error"); });
-                            upstream.on("message", function (data, isBinary) {
-                                try {
-                                    var buf = isBinary
-                                        ? Buffer.isBuffer(data)
-                                            ? data
-                                            : Buffer.from(data)
-                                        : Buffer.from(data);
-                                    clientWs.send(buf, { binary: isBinary });
-                                }
-                                catch (_a) {
-                                    cleanup(1011, "client_send_failed");
-                                }
-                            });
-                            upstream.on("close", function (code, reason) {
-                                var _a, _b;
-                                cleanup(code, (_b = (_a = reason === null || reason === void 0 ? void 0 : reason.toString) === null || _a === void 0 ? void 0 : _a.call(reason)) !== null && _b !== void 0 ? _b : "");
-                            });
-                            upstream.on("error", function () { return cleanup(1011, "upstream_error"); });
-                        });
-                    }).catch(function () {
-                        try {
-                            clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-                            clientSocket.destroy();
-                        }
-                        catch (_a) {
-                            /* */
-                        }
-                    });
-                });
-            };
-            // httpServer is created during Vite's setup; bind immediately
-            // if it exists, otherwise wait for the listening event.
-            var httpServer = server.httpServer;
-            if (httpServer) {
-                bind(httpServer);
-            }
-            else {
-                (_a = server.httpServer) === null || _a === void 0 ? void 0 : _a.once("listening", function () {
-                    var hs = server.httpServer;
-                    if (hs)
-                        bind(hs);
-                });
-            }
-        },
-    };
-}
-// Interactive shell bridge — forward `/api/dev-terminal/*` WebSocket
-// upgrades to `ws://localhost:8787/dev-terminal/*` (or wherever
-// `DEV_SERVER_BACKEND_URL` points). The terminal panel in
-// WorkspacePage opens a single WS that mcp-server keeps alive for
-// the duration of the PTY — this proxy is the leg from the visitor
-// to the backend. Bytes pass through bidirectionally with no
-// framing: xterm.js' `term.onData` strings go up, PTY output
-// strings come back down.
-function terminalProxy(env) {
-    var mcpHttpUrl = (env.DEV_SERVER_BACKEND_URL !== undefined
-        ? env.DEV_SERVER_BACKEND_URL
-        : "http://localhost:8787").replace(/\/+$/, "");
-    var mcpWsUrl = mcpHttpUrl.replace(/^http/, "ws");
-    return {
-        name: "feature-tracker:terminal-proxy",
-        apply: "serve",
-        configureServer: function (server) {
-            var _this = this;
-            var _a;
-            // HTTP forward for the non-WS routes under `/api/dev-terminal/*`
-            // (today: only `GET /shells` — the dropdown catalog). The
-            // upgrade handler below covers `GET /shell` (the PTY WS). The
-            // plugin's middleware must run before Vite's SPA fallback, so
-            // we mount it explicitly here.
-            server.middlewares.use("/api/dev-terminal", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var upstream, _a, _b, _c, text, err_5;
-                var _d;
-                var _e, _f, _g;
-                return __generator(this, function (_h) {
-                    switch (_h.label) {
-                        case 0:
-                            _h.trys.push([0, 6, , 7]);
-                            _a = fetch;
-                            _b = ["".concat(mcpHttpUrl, "/dev-terminal").concat((_e = req.url) !== null && _e !== void 0 ? _e : "/")];
-                            _d = {
-                                method: req.method,
-                                headers: { "content-type": "application/json" }
-                            };
-                            if (!["GET", "HEAD"].includes(((_f = req.method) !== null && _f !== void 0 ? _f : "GET").toUpperCase())) return [3 /*break*/, 1];
-                            _c = undefined;
-                            return [3 /*break*/, 3];
-                        case 1: return [4 /*yield*/, readBody(req)];
-                        case 2:
-                            _c = _h.sent();
-                            _h.label = 3;
-                        case 3: return [4 /*yield*/, _a.apply(void 0, _b.concat([(_d.body = _c,
-                                    _d)]))];
-                        case 4:
-                            upstream = _h.sent();
-                            return [4 /*yield*/, upstream.text()];
-                        case 5:
-                            text = _h.sent();
-                            res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_g = upstream.headers.get("content-type")) !== null && _g !== void 0 ? _g : "application/json");
-                            res.end(text);
-                            return [3 /*break*/, 7];
-                        case 6:
-                            err_5 = _h.sent();
-                            res.statusCode = 502;
-                            res.setHeader("content-type", "application/json");
-                            res.end(JSON.stringify({
-                                error: "upstream_failure",
-                                message: err_5 instanceof Error ? err_5.message : String(err_5),
-                            }));
-                            return [3 /*break*/, 7];
-                        case 7: return [2 /*return*/];
-                    }
-                });
-            }); });
-            var bind = function (httpServer) {
-                httpServer.on("upgrade", function (req, clientSocket, head) {
-                    var reqUrl = req.url || "";
-                    console.log("[vite:dev-terminal-proxy] upgrade", reqUrl);
-                    // Same fan-out rule as the agent-bridge plugin: only
-                    // consume upgrades for our path; every other upgrade
-                    // (Vite's own HMR, etc.) must pass through untouched.
-                    if (!reqUrl.startsWith("/api/dev-terminal/")) {
-                        return;
-                    }
-                    (function () {
-                        var WebSocket = NodeWebSocket;
-                        var WebSocketServer = NodeWebSocketServer;
-                        var upstreamPath = reqUrl.replace(/^\/api\/dev-terminal/, "");
-                        var upstreamUrl = "".concat(mcpWsUrl, "/dev-terminal").concat(upstreamPath);
-                        var wss = new WebSocketServer({ noServer: true });
-                        try {
-                            console.log("[vite:dev-terminal-proxy] handleUpgrade", upstreamUrl);
-                            wss.handleUpgrade(req, clientSocket, head, function (clientWs) {
-                                var upstreamHeaders = {};
-                                for (var _i = 0, _a = Object.entries(req.headers); _i < _a.length; _i++) {
-                                    var _b = _a[_i], k = _b[0], v = _b[1];
-                                    if (!v)
-                                        continue;
-                                    if (k === "host")
-                                        continue;
-                                    upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
-                                }
-                                var upstream = new WebSocket(upstreamUrl, {
-                                    headers: upstreamHeaders,
-                                });
-                                var closed = false;
-                                var cleanup = function (code, reason) {
-                                    if (closed)
-                                        return;
-                                    closed = true;
-                                    try {
-                                        clientWs.close(code, reason);
-                                    }
-                                    catch (_a) {
-                                        /* */
-                                    }
-                                    try {
-                                        if (upstream.readyState <= 1)
-                                            upstream.close(code, reason);
-                                    }
-                                    catch (_b) {
-                                        /* */
-                                    }
-                                };
-                                clientWs.on("message", function (data, isBinary) {
-                                    try {
-                                        if (upstream.readyState === 1) {
-                                            upstream.send(data, { binary: isBinary });
-                                        }
-                                    }
-                                    catch (_a) {
-                                        cleanup(1011, "upstream_send_failed");
-                                    }
-                                });
-                                clientWs.on("close", function (code, reason) { var _a, _b; return cleanup(code, (_b = (_a = reason === null || reason === void 0 ? void 0 : reason.toString) === null || _a === void 0 ? void 0 : _a.call(reason)) !== null && _b !== void 0 ? _b : ""); });
-                                clientWs.on("error", function () { return cleanup(1011, "client_error"); });
-                                upstream.on("message", function (data, isBinary) {
-                                    try {
-                                        var buf = isBinary
-                                            ? Buffer.isBuffer(data)
-                                                ? data
-                                                : Buffer.from(data)
-                                            : Buffer.from(data);
-                                        clientWs.send(buf, { binary: isBinary });
-                                    }
-                                    catch (_a) {
-                                        cleanup(1011, "client_send_failed");
-                                    }
-                                });
-                                upstream.on("close", function (code, reason) {
-                                    var _a, _b;
-                                    cleanup(code, (_b = (_a = reason === null || reason === void 0 ? void 0 : reason.toString) === null || _a === void 0 ? void 0 : _a.call(reason)) !== null && _b !== void 0 ? _b : "");
-                                });
-                                upstream.on("error", function () { return cleanup(1011, "upstream_error"); });
-                            });
-                        }
-                        catch (_a) {
-                            try {
-                                clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-                                clientSocket.destroy();
-                            }
-                            catch (_b) {
-                                /* */
-                            }
-                        }
-                    })();
-                });
-            };
-            var httpServer = server.httpServer;
-            if (httpServer) {
-                bind(httpServer);
-            }
-            else {
-                (_a = server.httpServer) === null || _a === void 0 ? void 0 : _a.once("listening", function () {
-                    var hs = server.httpServer;
-                    if (hs)
-                        bind(hs);
-                });
-            }
-        },
-    };
-}
-// Server-side proxy for the Issue Tracker verification endpoints (MCP).
-// Same shape as aiChatProxy: when VERIFY_BACKEND_URL is unset the proxy
-// returns 503, and the client falls back to the in-browser mock so the UI
-// keeps working in dev without a backend running. Today's flow (Test
-// Connection against a fake URL) is fully preserved when
-// `VITE_USE_REAL_VERIFY` is unset on the client.
 function verifyProxy(env) {
     // Default to the local MCP server (mcp-server/ sub-folder). When the
     // env var is set to an empty string explicitly, the proxy keeps the
     // previous in-process stub behaviour (503). Set it to any other URL
     // to forward to that backend. `env` comes from loadEnv() so a value
-    // in .env works without the shell exporting it.
+    // in .env works without the shell exporting it. Default is EMPTY —
+    // the built-in stub backend answers when unset (the mcp-server that
+    // used to live on :8787 was retired).
     var backendUrl = (env.VERIFY_BACKEND_URL !== undefined
         ? env.VERIFY_BACKEND_URL
-        : "http://localhost:8787").replace(/\/+$/, "");
+        : "").replace(/\/+$/, "");
     return {
         name: "feature-tracker:verify-proxy",
         apply: "serve",
@@ -969,7 +783,7 @@ function verifyProxy(env) {
             // to do a headless HTTP check (and, when a credential is bound, a
             // login attempt) and return { urlReachable, loginSuccessful }.
             server.middlewares.use("/api/verify/test", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var chunks, chunk, e_2_1, raw, upstream, text, err_6;
+                var chunks, chunk, e_2_1, raw, upstream, text, err_3;
                 var _a, req_2, req_2_1;
                 var _b, e_2, _c, _d;
                 var _e;
@@ -1040,12 +854,12 @@ function verifyProxy(env) {
                             res.end(text);
                             return [3 /*break*/, 17];
                         case 16:
-                            err_6 = _f.sent();
+                            err_3 = _f.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_6 instanceof Error ? err_6.message : String(err_6),
+                                message: err_3 instanceof Error ? err_3.message : String(err_3),
                             }));
                             return [3 /*break*/, 17];
                         case 17: return [2 /*return*/];
@@ -1064,7 +878,7 @@ function verifyProxy(env) {
             // trailing-slash handler below can take over. Without this the
             // GET SSE stream would hit the bare handler's 405 fallback.
             server.middlewares.use("/api/verify/runs", function (req, res, next) { return __awaiter(_this, void 0, void 0, function () {
-                var pathOnly, qs, runId, chunks, chunk, e_3_1, raw, upstream, text, err_7, upstream, text, err_8;
+                var pathOnly, qs, runId, chunks, chunk, e_3_1, raw, upstream, text, err_4, upstream, text, err_5;
                 var _a, req_3, req_3_1;
                 var _b, e_3, _c, _d;
                 var _e, _f, _g, _h;
@@ -1148,12 +962,12 @@ function verifyProxy(env) {
                             res.end(text);
                             return [3 /*break*/, 17];
                         case 16:
-                            err_7 = _j.sent();
+                            err_4 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_7 instanceof Error ? err_7.message : String(err_7),
+                                message: err_4 instanceof Error ? err_4.message : String(err_4),
                             }));
                             return [3 /*break*/, 17];
                         case 17: return [2 /*return*/];
@@ -1177,12 +991,12 @@ function verifyProxy(env) {
                             res.end(text);
                             return [3 /*break*/, 23];
                         case 22:
-                            err_8 = _j.sent();
+                            err_5 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_8 instanceof Error ? err_8.message : String(err_8),
+                                message: err_5 instanceof Error ? err_5.message : String(err_5),
                             }));
                             return [3 /*break*/, 23];
                         case 23: return [2 /*return*/];
@@ -1203,7 +1017,7 @@ function verifyProxy(env) {
             // browser window is the only preview surface, so there is no
             // `/interact` forwarding endpoint any more.
             server.middlewares.use("/api/verify/runs/", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var pathAfterPrefix, qs, runId, writeEvent_1, timer_1, upstream, reader_2, pump, err_9;
+                var pathAfterPrefix, qs, runId, writeEvent_1, timer_1, upstream, reader_1, pump, err_6;
                 var _this = this;
                 var _a, _b, _c, _d, _e;
                 return __generator(this, function (_f) {
@@ -1264,7 +1078,7 @@ function verifyProxy(env) {
                             res.setHeader("cache-control", "no-cache");
                             res.setHeader("connection", "keep-alive");
                             if (upstream.body) {
-                                reader_2 = upstream.body.getReader();
+                                reader_1 = upstream.body.getReader();
                                 pump = function () { return __awaiter(_this, void 0, void 0, function () {
                                     var _a, done, value, _b;
                                     return __generator(this, function (_c) {
@@ -1274,7 +1088,7 @@ function verifyProxy(env) {
                                                 _c.label = 1;
                                             case 1:
                                                 if (!true) return [3 /*break*/, 3];
-                                                return [4 /*yield*/, reader_2.read()];
+                                                return [4 /*yield*/, reader_1.read()];
                                             case 2:
                                                 _a = _c.sent(), done = _a.done, value = _a.value;
                                                 if (done)
@@ -1299,12 +1113,12 @@ function verifyProxy(env) {
                             }
                             return [3 /*break*/, 4];
                         case 3:
-                            err_9 = _f.sent();
+                            err_6 = _f.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_9 instanceof Error ? err_9.message : String(err_9),
+                                message: err_6 instanceof Error ? err_6.message : String(err_6),
                             }));
                             return [3 /*break*/, 4];
                         case 4: return [2 /*return*/];
@@ -1331,7 +1145,7 @@ function verifyProxy(env) {
             //  <img> tag without being re-encoded as JSON.
             // ──────────────────────────────────────────────────────────────────
             server.middlewares.use("/api/evidence", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var upstreamPath, upstream, _a, _b, _c, ct, cc, buf, _d, _e, err_10;
+                var upstreamPath, upstream, _a, _b, _c, ct, cc, buf, _d, _e, err_7;
                 var _f;
                 var _g;
                 return __generator(this, function (_h) {
@@ -1385,12 +1199,12 @@ function verifyProxy(env) {
                             res.end(buf);
                             return [3 /*break*/, 8];
                         case 7:
-                            err_10 = _h.sent();
+                            err_7 = _h.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_10 instanceof Error ? err_10.message : String(err_10),
+                                message: err_7 instanceof Error ? err_7.message : String(err_7),
                             }));
                             return [3 /*break*/, 8];
                         case 8: return [2 /*return*/];
@@ -1398,136 +1212,62 @@ function verifyProxy(env) {
                 });
             }); });
             // ──────────────────────────────────────────────────────────────────
-            //  /api/playwright — bridge to the OFFICIAL Playwright MCP server.
-            //  GET  /api/playwright/tools → tool catalog (spawned via the
-            //                             mcp-server backend on :8787)
+            //  /api/playwright — bridge to the OFFICIAL Playwright MCP server,
+            //  hosted by the LOCAL RUNNER (:9090, mcp-server retired).
+            //  GET  /api/playwright/tools → live tool catalog
             //  POST /api/playwright/call  → forward one browser tool call.
-            //  The catalog is read live from `npx @playwright/mcp@latest`, so
+            //  The catalog is read live from the pinned @playwright/mcp, so
             //  the chatbot's browser tools always match the official server.
             // ──────────────────────────────────────────────────────────────────
             server.middlewares.use("/api/playwright", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var upstreamPath, upstream, _a, _b, _c, _d, _e, err_11;
+                var upstreamPath, upstream, _a, _b, _c, _d, _e, err_8;
                 var _f;
                 var _g, _h;
                 return __generator(this, function (_j) {
                     switch (_j.label) {
                         case 0:
-                            if (!backendUrl) {
-                                res.statusCode = 503;
-                                res.setHeader("content-type", "application/json");
-                                res.end(JSON.stringify({
-                                    error: "verify_not_configured",
-                                    message: "VERIFY_BACKEND_URL is not set — the Playwright MCP bridge is unavailable.",
-                                }));
-                                return [2 /*return*/];
-                            }
-                            _j.label = 1;
-                        case 1:
-                            _j.trys.push([1, 7, , 8]);
+                            _j.trys.push([0, 6, , 7]);
                             upstreamPath = ((_g = req.url) !== null && _g !== void 0 ? _g : "/").replace(/^\/api/, "");
                             _a = fetch;
-                            _b = ["".concat(backendUrl, "/playwright").concat(upstreamPath)];
+                            _b = ["http://localhost:9090/playwright".concat(upstreamPath)];
                             _f = {
                                 method: req.method,
                                 headers: { "content-type": "application/json" }
                             };
-                            if (!(req.method === "POST")) return [3 /*break*/, 3];
+                            if (!(req.method === "POST")) return [3 /*break*/, 2];
                             return [4 /*yield*/, readBody(req)];
-                        case 2:
+                        case 1:
                             _c = _j.sent();
-                            return [3 /*break*/, 4];
-                        case 3:
+                            return [3 /*break*/, 3];
+                        case 2:
                             _c = undefined;
-                            _j.label = 4;
-                        case 4: return [4 /*yield*/, _a.apply(void 0, _b.concat([(_f.body = _c,
+                            _j.label = 3;
+                        case 3: return [4 /*yield*/, _a.apply(void 0, _b.concat([(_f.body = _c,
                                     _f)]))];
-                        case 5:
+                        case 4:
                             upstream = _j.sent();
                             res.statusCode = upstream.status;
                             res.setHeader("content-type", (_h = upstream.headers.get("content-type")) !== null && _h !== void 0 ? _h : "application/json");
                             _e = (_d = res).end;
                             return [4 /*yield*/, upstream.text()];
-                        case 6:
-                            _e.apply(_d, [_j.sent()]);
-                            return [3 /*break*/, 8];
-                        case 7:
-                            err_11 = _j.sent();
-                            res.statusCode = 502;
-                            res.setHeader("content-type", "application/json");
-                            res.end(JSON.stringify({
-                                error: "upstream_failure",
-                                message: err_11 instanceof Error ? err_11.message : String(err_11),
-                            }));
-                            return [3 /*break*/, 8];
-                        case 8: return [2 /*return*/];
-                    }
-                });
-            }); });
-            // /api/tools → mcp-server /tools/*. The Configure drawer installs
-            // arbitrary npm packages into the runner's environment, so user code
-            // can `require()` them. Lives on the same backend (mcp-server on
-            // :8787) as the Playwright bridge — same forward path, distinct
-            // mount prefix so the two never collide.
-            server.middlewares.use("/api/tools", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var upstreamPath, upstream, _a, _b, _c, _d, _e, err_12;
-                var _f;
-                var _g, _h;
-                return __generator(this, function (_j) {
-                    switch (_j.label) {
-                        case 0:
-                            if (!backendUrl) {
-                                res.statusCode = 503;
-                                res.setHeader("content-type", "application/json");
-                                res.end(JSON.stringify({
-                                    error: "verify_not_configured",
-                                    message: "VERIFY_BACKEND_URL is not set — the npm tool installer is unavailable.",
-                                }));
-                                return [2 /*return*/];
-                            }
-                            _j.label = 1;
-                        case 1:
-                            _j.trys.push([1, 7, , 8]);
-                            upstreamPath = ((_g = req.url) !== null && _g !== void 0 ? _g : "/").replace(/^\/api/, "");
-                            _a = fetch;
-                            _b = ["".concat(backendUrl, "/tools").concat(upstreamPath)];
-                            _f = {
-                                method: req.method,
-                                headers: { "content-type": "application/json" }
-                            };
-                            if (!(req.method === "POST")) return [3 /*break*/, 3];
-                            return [4 /*yield*/, readBody(req)];
-                        case 2:
-                            _c = _j.sent();
-                            return [3 /*break*/, 4];
-                        case 3:
-                            _c = undefined;
-                            _j.label = 4;
-                        case 4: return [4 /*yield*/, _a.apply(void 0, _b.concat([(_f.body = _c,
-                                    _f)]))];
                         case 5:
-                            upstream = _j.sent();
-                            res.statusCode = upstream.status;
-                            res.setHeader("content-type", (_h = upstream.headers.get("content-type")) !== null && _h !== void 0 ? _h : "application/json");
-                            _e = (_d = res).end;
-                            return [4 /*yield*/, upstream.text()];
-                        case 6:
                             _e.apply(_d, [_j.sent()]);
-                            return [3 /*break*/, 8];
-                        case 7:
-                            err_12 = _j.sent();
+                            return [3 /*break*/, 7];
+                        case 6:
+                            err_8 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_12 instanceof Error ? err_12.message : String(err_12),
+                                message: err_8 instanceof Error ? err_8.message : String(err_8),
                             }));
-                            return [3 /*break*/, 8];
-                        case 8: return [2 /*return*/];
+                            return [3 /*break*/, 7];
+                        case 7: return [2 /*return*/];
                     }
                 });
             }); });
             server.middlewares.use("/api/secrets", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var isDelete, targetPath, upstream, _a, _b, _c, raw, parsed, stripPassword, _i, _d, s, text, err_13;
+                var isDelete, targetPath, upstream, _a, _b, _c, raw, parsed, stripPassword, _i, _d, s, text, err_9;
                 var _e;
                 var _f, _g, _h;
                 return __generator(this, function (_j) {
@@ -1607,12 +1347,12 @@ function verifyProxy(env) {
                             res.end(text);
                             return [3 /*break*/, 10];
                         case 9:
-                            err_13 = _j.sent();
+                            err_9 = _j.sent();
                             res.statusCode = 502;
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_13 instanceof Error ? err_13.message : String(err_13),
+                                message: err_9 instanceof Error ? err_9.message : String(err_9),
                             }));
                             return [3 /*break*/, 10];
                         case 10: return [2 /*return*/];
@@ -2013,7 +1753,7 @@ function aiAvatarProxy(env) {
             // fits before we cancel and (where applicable) bill-stop.
             var AVATAR_TIMEOUT_MS = 65000;
             server.middlewares.use("/api/ai/avatar", function (req, res) { return __awaiter(_this, void 0, void 0, function () {
-                var declared, imageBase64, style, chunks, received, chunk, e_4_1, raw, parsed, _a, provider, headerValue, userToken, userModelVersion, abort, timer, disconnected, result, err_14;
+                var declared, imageBase64, style, chunks, received, chunk, e_4_1, raw, parsed, _a, provider, headerValue, userToken, userModelVersion, abort, timer, disconnected, result, err_10;
                 var _b, req_4, req_4_1;
                 var _c, e_4, _d, _e;
                 var _f;
@@ -2167,7 +1907,7 @@ function aiAvatarProxy(env) {
                             res.end(JSON.stringify(result));
                             return [3 /*break*/, 19];
                         case 18:
-                            err_14 = _g.sent();
+                            err_10 = _g.sent();
                             clearTimeout(timer);
                             if (disconnected || abort.signal.aborted) {
                                 res.end();
@@ -2177,7 +1917,7 @@ function aiAvatarProxy(env) {
                             res.setHeader("content-type", "application/json");
                             res.end(JSON.stringify({
                                 error: "upstream_failure",
-                                message: err_14 instanceof Error ? err_14.message : String(err_14),
+                                message: err_10 instanceof Error ? err_10.message : String(err_10),
                             }));
                             return [3 /*break*/, 19];
                         case 19: return [2 /*return*/];
@@ -2214,9 +1954,6 @@ export default defineConfig(function (_a) {
             aiChatProxy(env),
             aiAvatarProxy(env),
             verifyProxy(env),
-            devServerProxy(env),
-            agentBridgeProxy(env),
-            terminalProxy(env),
             mailBridgeProxy(env),
             customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
         ],

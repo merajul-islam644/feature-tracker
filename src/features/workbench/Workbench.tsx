@@ -10,11 +10,12 @@
 // This component only wires the three together plus keyboard shortcuts.
 
 import { useEffect, useMemo, useState } from "react";
-import { PanelLeft } from "lucide-react";
+import { Bot, PanelLeft, X } from "lucide-react";
 import { ActivityBar } from "./components/ActivityBar";
 import { BranchBar } from "./components/BranchBar";
 import { ExplorerView } from "./components/ExplorerView";
 import { SearchView } from "./components/SearchView";
+import { AiPanel } from "./components/AiPanel";
 import { SourceControlView } from "./components/SourceControlView";
 import { RunView } from "./components/RunView";
 import { ProblemsView } from "./components/ProblemsView";
@@ -28,7 +29,7 @@ import { StatusBar } from "./components/StatusBar";
 import { useTestWorkspace } from "./data/useTestWorkspace";
 import { useGitBranches } from "./data/useGitBranches";
 import { workbenchStore, useWorkbench } from "./state/workbenchStore";
-import type { SidebarView } from "./state/workbenchStore";
+import type { AiProposal, SidebarView } from "./state/workbenchStore";
 import { basenameOf, buildTree, languageOf } from "./model/treeModel";
 import { isRunnableSpecPath } from "../../lib/workspace/importFiles";
 import type { Project } from "../../lib/demo/data";
@@ -67,6 +68,11 @@ export function Workbench({ project, variant = "tests" }: {
   const panelVisible = useWorkbench((s) => s.panelVisible);
   const panelTab = useWorkbench((s) => s.panelTab);
   const panelMaximized = useWorkbench((s) => s.panelMaximized);
+  const aiProposals = useWorkbench((s) => s.aiProposals);
+  const aiProposal = aiProposals[0];
+  /** Diff-review surface (opened from the AI panel's "Review diffs"). */
+  const [aiReviewOpen, setAiReviewOpen] = useState(false);
+  const [aiReviewIndex, setAiReviewIndex] = useState(0);
   const openTabs = useWorkbench((s) => s.openTabs);
   const activePath = useWorkbench((s) => s.activePath);
   const diffTabs = useWorkbench((s) => s.diffTabs);
@@ -108,6 +114,24 @@ export function Workbench({ project, variant = "tests" }: {
       });
     });
   });
+
+  /** Accept ALL AI proposals: write each proposed file straight to disk
+   *  (the proposals carry their own full content) and mirror them into
+   *  the editor state. */
+  async function acceptAllAiProposals(): Promise<void> {
+    for (const proposal of aiProposals) {
+      await ws.saveFileContent(proposal.path, proposal.content);
+    }
+    workbenchStore.clearAiProposals();
+    setAiReviewOpen(false);
+    setAiReviewIndex(0);
+  }
+
+  function rejectAllAiProposals(): void {
+    workbenchStore.clearAiProposals();
+    setAiReviewOpen(false);
+    setAiReviewIndex(0);
+  }
 
   // A new workspace SESSION (initial load or import): restore the saved
   // session when it matches this file set, else start fresh with every
@@ -341,6 +365,39 @@ export function Workbench({ project, variant = "tests" }: {
                 problemsRunning={ws.problemsRunning}
               />
             ) : null}
+            {sidebarView === "ai" ? (
+              <AiPanel
+                projectId={project.id}
+                activePath={activePath}
+                cursorLine={cursor?.line ?? 0}
+                onClose={() => workbenchStore.setSidebarView("explorer")}
+                onExec={(command) => ws.aiExec(command)}
+                onOpenFile={async (path) => {
+                  workbenchStore.openTab(path);
+                  await ws.ensureLoaded([path]);
+                }}
+                onProposeEdit={(path, content, summary) =>
+                  workbenchStore.pushAiProposal({ path, content, summary })
+                }
+                proposals={aiProposals}
+                onAcceptAll={() => void acceptAllAiProposals()}
+                onRejectAll={rejectAllAiProposals}
+                onReview={() => { setAiReviewOpen(true); setAiReviewIndex(0); }}
+                reviewing={aiReviewOpen}
+                readCurrent={async (path) => {
+                  // ensureLoaded RETURNS the content it fetched — use it
+                  // FIRST. Reading through contentOf alone was a stale
+                  // closure over the `contents` state snapshot: every
+                  // file fetched during the AI turn (i.e. anything not
+                  // already open in an editor tab) silently read back
+                  // as "" and the AI fell back to shell workarounds.
+                  const fetched = await ws.ensureLoaded([path]);
+                  if (path in fetched) return fetched[path];
+                  return ws.contentOf(path);
+                }}
+                root={ws.root}
+              />
+            ) : null}
             {/* First open of the Problems view checks immediately — the
                 empty state asking the user to find a button was a dead
                 end. The hook's `problemsChecked` flag makes this exactly
@@ -358,10 +415,13 @@ export function Workbench({ project, variant = "tests" }: {
                 anymore. ALWAYS rendered with the sidebar (user request):
                 when the open folder is not a git clone (or none is open)
                 it shows a muted placeholder instead of the picker. */}
-            <div className="wb-sidebar-branch">
-              <BranchBar
-                branches={gitBranches.branches}
-                branchesNote={gitBranches.note}
+            {/* Hidden while the AI view is active — the chat needs the
+                vertical space and the branch info is noise mid-conversation. */}
+            {sidebarView !== "ai" ? (
+              <div className="wb-sidebar-branch">
+                <BranchBar
+                  branches={gitBranches.branches}
+                  branchesNote={gitBranches.note}
                 busy={ws.saving || ws.opening || ws.gitBusy}
                 onCheckout={(name) => ws.checkoutBranch(name)}
                 onCreateBranch={(name) => ws.createBranch(name)}
@@ -375,7 +435,8 @@ export function Workbench({ project, variant = "tests" }: {
                 }
                 value={ws.gitBranch ?? ""}
               />
-            </div>
+              </div>
+            ) : null}
             <SidebarSash />
           </aside>
         ) : null}
@@ -393,30 +454,69 @@ export function Workbench({ project, variant = "tests" }: {
             />
           ) : null}
           {activePath ? <Breadcrumbs path={activePath} /> : null}
-          {activePath ? (
-            <EditorHost
-              diff={activeIsDiff}
-              loading={activePath ? !ws.isLoaded(activePath) : false}
-              originalValue={ws.gitContentOf(activePath)}
-              onExitDiff={() => workbenchStore.exitDiff(activePath)}
-              onChange={(content) => ws.setContent(activePath, content)}
-              onCursor={setCursor}
-              path={activePath}
-              root={ws.root}
-              value={ws.contentOf(activePath)}
-            />
-          ) : (
-            <div className="wb-watermark">
-              <p className="wb-watermark-title">{basenameOf(project.name)} — Workspace</p>
-              <div className="wb-watermark-rows">
-                {WATERMARK_ROWS.map(([label, keys]) => (
-                  <div className="wb-watermark-row" key={label}>
-                    <span>{label}</span>
-                    <span className="wb-watermark-keys">{keys}</span>
-                  </div>
-                ))}
+          {aiReviewOpen && aiProposals.length > 0 ? (
+            <>
+              <div className="wb-ai-proposal-bar">
+                <span className="wb-ai-proposal-label">
+                  <Bot size={13} aria-hidden="true" />
+                  Reviewing {aiReviewIndex + 1}/{aiProposals.length}: <b>{aiProposals[aiReviewIndex]?.path}</b>
+                </span>
+                <span className="wb-ai-proposal-nav">
+                  <button className="wb-icon-btn" disabled={aiReviewIndex === 0} onClick={() => setAiReviewIndex((i) => Math.max(0, i - 1))} title="Previous file" type="button">‹</button>
+                  <span className="wb-ai-review-count">{aiReviewIndex + 1}/{aiProposals.length}</span>
+                  <button className="wb-icon-btn" disabled={aiReviewIndex >= aiProposals.length - 1} onClick={() => setAiReviewIndex((i) => Math.min(aiProposals.length - 1, i + 1))} title="Next file" type="button">›</button>
+                  <button className="wb-icon-btn" onClick={() => setAiReviewOpen(false)} title="Close review" type="button"><X size={13} /></button>
+                </span>
               </div>
-            </div>
+              <EditorHost
+                diff
+                loading={false}
+                onChange={() => {
+                  /* proposal review is read-only */
+                }}
+                onCursor={setCursor}
+                path={aiProposals[aiReviewIndex]?.path ?? ""}
+                readOnly
+                root={ws.root}
+                value={aiProposals[aiReviewIndex]?.content ?? ""}
+              />
+            </>
+          ) : (
+            <>
+              {aiProposal ? (
+                <div className="wb-ai-proposal-bar">
+                  <span className="wb-ai-proposal-label">
+                    <Bot size={13} aria-hidden="true" />
+                    {aiProposals.length} AI proposal{aiProposals.length === 1 ? "" : "s"} pending — Review diffs / Accept all in the AI panel
+                  </span>
+                </div>
+              ) : null}
+              {activePath ? (
+                <EditorHost
+                  diff={activeIsDiff}
+                  loading={activePath ? !ws.isLoaded(activePath) : false}
+                  originalValue={ws.gitContentOf(activePath)}
+                  onExitDiff={() => workbenchStore.exitDiff(activePath)}
+                  onChange={(content) => ws.setContent(activePath, content)}
+                  onCursor={setCursor}
+                  path={activePath}
+                  root={ws.root}
+                  value={ws.contentOf(activePath)}
+                />
+              ) : (
+                <div className="wb-watermark">
+                  <p className="wb-watermark-title">{basenameOf(project.name)} — Workspace</p>
+                  <div className="wb-watermark-rows">
+                    {WATERMARK_ROWS.map(([label, keys]) => (
+                      <div className="wb-watermark-row" key={label}>
+                        <span>{label}</span>
+                        <span className="wb-watermark-keys">{keys}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </main>
 

@@ -361,6 +361,50 @@ export function useTestWorkspace(project: Project) {
     if (trimmed) void runScriptCommand("Command", trimmed, "__custom__");
   }
 
+  /** Exec for the WORKBENCH AI panel's workspace_exec_command tool:
+   *  same guards as script runs, output mirrored into the Output panel
+   *  so the user watches what the AI runs. Throws (the model reads the
+   *  error) on refusals instead of toasting — the panel formats it. */
+  async function aiExec(command: string): Promise<{
+    code: number | null;
+    stdout: string;
+    stderr: string;
+    timedOut: boolean;
+    truncated: boolean;
+  }> {
+    if (!root) throw new Error("No workspace folder is open.");
+    if (fsaRoot) throw new Error("Browser-picked workspace — exec needs the runner. Reopen via Open Folder's native dialog.");
+    if (runnerOnline === false) throw new Error("The local runner is offline — start it, then retry.");
+    // Long-lived server guard — refuse commands that START a dev
+    // server. Tested per `;`/`&&`-separated segment against its FIRST
+    // word only: the old substring regex refused `cat vite.config.js`
+    // (the word "vite" after a space) and every command mentioning a
+    // file named like a server, which pushed the AI into shell
+    // workarounds.
+    const SERVER_START_RE =
+      /^(npm\s+(run\s+)?(dev|start|serve|preview)|vite|next\s+(dev|start)|ng\s+serve|yarn\s+(dev|serve)|pnpm\s+(dev|serve))\b/i;
+    const segments = command
+      .split(/(?:&&|;|\|\||\|)/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.some((segment) => SERVER_START_RE.test(segment))) {
+      throw new Error(`"${command}" is a long-lived server — the exec tool is blocking. Ask the user to start it in the terminal tab instead.`);
+    }
+    workbenchStore.showPanel("output");
+    appendOutput(`▶ AI exec: ${command}`);
+    const result = await localFolder.execUserCommand({ root, command, timeoutMs: 300_000 });
+    for (const line of result.stdout.split("\n")) {
+      if (line.trim()) appendOutput(line);
+    }
+    if (result.stderr.trim()) {
+      for (const line of result.stderr.split("\n")) {
+        if (line.trim()) appendOutput(`⚠ ${line}`);
+      }
+    }
+    appendOutput(result.timedOut ? "■ AI exec timed out (5 min cap)" : `✔ Exit ${result.code ?? "?"}`);
+    return result;
+  }
+
   /** Problems check: pick the applicable checkers for the workspace
    *  (tsconfig.json → tsc; any .py in the tree → compileall), run them
    *  through the runner exec, parse their output into rows. */
@@ -1335,6 +1379,16 @@ export function useTestWorkspace(project: Project) {
     await persistFile(path, true);
   }
 
+  /** Write ARBITRARY content straight to disk and mirror it into the
+   *  editor state — the AI proposal Accept flow (the proposal carries
+   *  its own full content, so the editor's in-memory state is bypassed
+   *  as the source of truth). */
+  async function saveFileContent(path: string, content: string): Promise<void> {
+    if (!path) return;
+    setContent(path, content);
+    await persistFile(path, true, content);
+  }
+
   /** Save every dirty file with one summary toast. */
   async function saveAll(): Promise<void> {
     const targets = [...dirtyPaths];
@@ -1943,6 +1997,7 @@ export function useTestWorkspace(project: Project) {
     openFileFromDisk,
     closeFolder,
     saveFile,
+    saveFileContent,
     saveAll,
     createFile,
     createFolder,
@@ -1969,6 +2024,8 @@ export function useTestWorkspace(project: Project) {
     problemsChecked,
     runProblems,
     openProblem,
+    /** Exec for the AI panel's tools — output mirrored to the panel. */
+    aiExec,
     runnerUrl: runnerUrl()
   };
 }

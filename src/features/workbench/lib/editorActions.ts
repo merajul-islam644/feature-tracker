@@ -38,3 +38,21 @@ export function jumpActive(line: number, column: number = 1): void {
   activeEditor.setPosition({ lineNumber: line, column });
   activeEditor.focus();
 }
+
+/** The current selection, if any — the AI panel's editor-aware prompts
+ *  (Explain / Refactor / Fix) read this at send time. */
+export function getSelectionText(): string {
+  if (!activeEditor) return "";
+  const selection = activeEditor.getSelection();
+  if (!selection || selection.isEmpty()) return "";
+  const model = activeEditor.getModel();
+  if (!model) return "";
+  return model.getValueInRange(selection);
+}
+
+/** 1-based cursor line — AI context header ("working on file X, line N"). */
+export function getCursorLine(): number {
+  if (!activeEditor) return 0;
+  return activeEditor.getPosition()?.lineNumber ?? 0;
+}
+

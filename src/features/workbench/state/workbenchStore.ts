@@ -10,8 +10,12 @@
 
 import { useSyncExternalStore } from "react";
 
-export type SidebarView = "explorer" | "search" | "scm" | "run" | "problems";
+export type SidebarView = "explorer" | "search" | "scm" | "run" | "problems" | "ai";
 export type PanelTab = "output" | "results" | "terminal" | "preview";
+/** One AI-proposed file change awaiting the user's Accept/Reject. The
+ *  proposal holds the FULL proposed content — the editor renders it as
+ *  a diff against the current content. */
+export type AiProposal = { path: string; content: string; summary: string };
 export type PaletteMode = "commands" | "files";
 
 /** Sidebar width bounds, matching VS Code's clamped sash drag. */
@@ -41,6 +45,9 @@ export type WorkbenchState = {
   expanded: string[];
   /** Open command palette mode, or null when closed. */
   palette: PaletteMode | null;
+  /** AI-proposed file changes awaiting Accept/Reject (reviewed in
+   *  order — the editor shows proposals[0] as a diff). */
+  aiProposals: AiProposal[];
 };
 
 let state: WorkbenchState = {
@@ -55,7 +62,8 @@ let state: WorkbenchState = {
   activePath: "",
   diffTabs: [],
   expanded: [],
-  palette: null
+  palette: null,
+  aiProposals: []
 };
 
 // --- Per-project session persistence -------------------------------------
@@ -130,6 +138,30 @@ function set(patch: Partial<WorkbenchState>, options?: { persist?: boolean }): v
   for (const listener of listeners) listener();
 }
 
+
+/** Proposal persistence — full page reloads must not lose pending AI
+ *  proposals (keyed per project like every other workbench state). */
+const AI_PROPOSALS_KEY = "wb-ai-proposals.v1:";
+/** The project the proposal cache currently belongs to (set by bindProject). */
+let aiProposalsProject = "";
+function loadAiProposals(projectId: string): AiProposal[] {
+  try {
+    const raw = localStorage.getItem(AI_PROPOSALS_KEY + projectId);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as AiProposal[]) : [];
+  } catch {
+    return [];
+  }
+}
+function saveAiProposals(projectId: string, proposals: AiProposal[]): void {
+  try {
+    localStorage.setItem(AI_PROPOSALS_KEY + projectId, JSON.stringify(proposals));
+  } catch {
+    /* quota — in-memory only */
+  }
+}
+
 export const workbenchStore = {
   getState: (): WorkbenchState => state,
   subscribe(listener: () => void): () => void {
@@ -180,6 +212,23 @@ export const workbenchStore = {
   setPanelTab(tab: PanelTab): void {
     set({ panelTab: tab });
   },
+  /** Queue one AI-proposed file change (reviewed first-in-first-out). */
+  pushAiProposal(proposal: AiProposal): void {
+    const next = [...state.aiProposals, proposal];
+    set({ aiProposals: next });
+    saveAiProposals(aiProposalsProject, next);
+  },
+  /** Remove the front proposal after the user accepted or rejected it. */
+  shiftAiProposal(): void {
+    const next = state.aiProposals.slice(1);
+    set({ aiProposals: next });
+    saveAiProposals(aiProposalsProject, next);
+  },
+  /** Clear every pending proposal (Accept all / Reject all). */
+  clearAiProposals(): void {
+    set({ aiProposals: [] });
+    saveAiProposals(aiProposalsProject, []);
+  },
 
   openTab(path: string): void {
     const openTabs = state.openTabs.includes(path) ? state.openTabs : [...state.openTabs, path];
@@ -201,6 +250,8 @@ export const workbenchStore = {
    *  Tabs pointing at files that no longer exist are pruned by the
    *  workspace once its file list arrives. */
   bindProject(projectId: string): void {
+    aiProposalsProject = projectId || "default";
+    set({ aiProposals: loadAiProposals(aiProposalsProject) });
     const key = projectId || "default";
     if (sessionKey === key) return;
     sessionKey = key;

@@ -51,7 +51,7 @@ const EDITOR_OPTIONS = {
   tabSize: 2
 };
 
-export function EditorHost({ path, value, originalValue, diff, loading, onExitDiff, onChange, onCursor, root }: {
+export function EditorHost({ path, value, originalValue, diff, loading, onExitDiff, onChange, onCursor, root, readOnly }: {
   path: string;
   value: string;
   /** Baseline (loaded / pulled / pushed) content; the left side of the diff view. */
@@ -65,6 +65,8 @@ export function EditorHost({ path, value, originalValue, diff, loading, onExitDi
   onExitDiff?: () => void;
   /** Absolute workspace root — the Python LSP client scopes itself to it. */
   root: string | null;
+  /** Read-only editor (AI proposal review). */
+  readOnly?: boolean;
   onChange: (content: string) => void;
   onCursor: (position: { line: number; col: number }) => void;
 }) {
@@ -140,7 +142,8 @@ export function EditorHost({ path, value, originalValue, diff, loading, onExitDi
               options={{
                 ...EDITOR_OPTIONS,
                 originalEditable: false,
-                renderOverviewRuler: false
+                renderOverviewRuler: false,
+                readOnly
               }}
               original={originalValue ?? ""}
               theme={monacoTheme}
@@ -172,6 +175,7 @@ export function EditorHost({ path, value, originalValue, diff, loading, onExitDi
           height="100%"
           language={path ? languageOf(path) : "javascript"}
           loading={<span className="muted">{t("common.loading")}</span>}
+          options={readOnly ? { readOnly: true } : undefined}
           onMount={(editor, monaco) => {
             setActiveEditor(editor);
             editorRef.current = editor;

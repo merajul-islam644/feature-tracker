@@ -41,11 +41,14 @@ export type ListedTest = {
   line: number | null;
 };
 
-async function postJson<T>(route: string, body: unknown): Promise<T> {
+async function postJson<T>(route: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  // Every runner call is capped — a wedged route can never hang the UI.
+  const cap = signal ? AbortSignal.any([signal, AbortSignal.timeout(320_000)]) : AbortSignal.timeout(120_000);
   const response = await fetch(`${runnerUrl()}${route}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: cap
   });
   if (!response.ok) {
     const data = (await response.json().catch(() => ({}))) as { error?: string };
@@ -189,11 +192,39 @@ export const localFolder = {
     command: string;
     timeoutMs?: number;
   }): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; truncated: boolean }> {
-    return postJson("/api/workbench/exec", {
-      root: opts.root,
-      command: opts.command,
-      ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {})
-    });
+    // The server kills the child at timeoutMs; the client fetch waits a
+    // little longer so the server's final answer always arrives.
+    return postJson(
+      "/api/workbench/exec",
+      { root: opts.root, command: opts.command, ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
+      AbortSignal.timeout((opts.timeoutMs ?? 120_000) + 30_000),
+    );
+  },
+
+  /** Start (or reuse) the project's long-lived dev server on a port —
+   *  runner-side detached spawn with readiness wait. */
+  async devServerStart(opts: { root: string; command: string; port: number }): Promise<{ ok: boolean; url: string; reused?: boolean }> {
+    return postJson("/api/devserver/start", { root: opts.root, command: opts.command, port: opts.port });
+  },
+
+  /** Stop the dev server the runner started on this port. */
+  async devServerStop(port: number): Promise<{ ok: boolean; stopped: boolean }> {
+    return postJson("/api/devserver/stop", { port });
+  },
+
+  /** Forward one Playwright MCP browser tool call (navigate/snapshot/click…). */
+  async playwrightCall(tool: string, args: Record<string, unknown>): Promise<{ tool: string; result: string }> {
+    return postJson("/playwright/call", { tool, arguments: args }, AbortSignal.timeout(90_000));
+  },
+
+  /** Playwright MCP connection status (for the /mcp slash command). */
+  async playwrightStatus(): Promise<{ connected: boolean; package: string }> {
+    return postJson("/playwright/status", {});
+  },
+
+  /** Drop the Playwright MCP connection (kills the official server child). */
+  async playwrightDisconnect(): Promise<{ disconnected: boolean }> {
+    return postJson("/playwright/disconnect", {});
   },
 
   /** One allowlisted git op on the workspace clone (stash, blame,

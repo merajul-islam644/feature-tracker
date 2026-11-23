@@ -1797,3 +1797,439 @@ body.wb-resizing .wb-sash-arrow { opacity: 0; pointer-events: none; }
 .wb-problems-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .wb-problems-src { color: hsl(var(--muted-foreground)); flex-shrink: 0; font-size: 10px; opacity: 0.75; padding-top: 1px; }
 .wb-problems-clean { display: grid; gap: 6px; justify-items: start; margin: 6px 2px; }
+
+/* ---------- Embedded AI panel (Copilot-chat style) ---------- */
+.wb-ai-panel { min-height: 0; }
+.wb-ai-messages { flex: 1; min-height: 0; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.wb-ai-msg { border-radius: 10px; font-size: 12.5px; line-height: 1.6; padding: 8px 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wb-ai-msg.user {
+  align-self: flex-end;
+  background: hsl(var(--primary));
+  border-bottom-right-radius: 4px;
+  color: hsl(var(--primary-foreground));
+  max-width: 88%;
+}
+.wb-ai-msg.assistant {
+  align-self: stretch;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-left: 2px solid hsl(var(--primary) / 0.55);
+}
+.wb-ai-msg-text { margin: 0; }
+/* Markdown blocks inside answers */
+.wb-ai-h { font-weight: 600; margin: 8px 0 3px; }
+.wb-ai-h:first-child { margin-top: 0; }
+.wb-ai-h1 { font-size: 14px; }
+.wb-ai-h2 { font-size: 13.5px; }
+.wb-ai-h3 { font-size: 12.5px; }
+.wb-ai-list { margin: 3px 0; padding-left: 18px; }
+.wb-ai-list li { margin: 2px 0; }
+.wb-ai-list li::marker { color: hsl(var(--muted-foreground)); }
+.wb-ai-table { border-collapse: collapse; font-size: 11.5px; margin: 6px 0; max-width: 100%; }
+.wb-ai-table th, .wb-ai-table td { border: 1px solid hsl(var(--border)); padding: 3px 9px; text-align: left; vertical-align: top; }
+.wb-ai-table th { background: hsl(var(--muted)); font-weight: 600; white-space: nowrap; }
+.wb-ai-link { color: hsl(var(--primary)); text-decoration: none; }
+.wb-ai-link:hover { text-decoration: underline; }
+/* Streaming caret — the answer is still being written */
+.wb-ai-caret {
+  animation: wb-ai-caret-blink 1s steps(2, start) infinite;
+  background: currentColor;
+  display: inline-block;
+  height: 12px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  width: 7px;
+}
+@keyframes wb-ai-caret-blink { to { visibility: hidden; } }
+.wb-ai-activity {
+  align-items: center;
+  border-left: 2px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  gap: 6px;
+  margin: 0;
+  padding: 1px 4px 1px 8px;
+}
+.wb-ai-activity svg { flex-shrink: 0; }
+.wb-ai-quick { display: flex; flex-shrink: 0; gap: 4px; padding: 4px 8px; }
+.wb-ai-quick-btn {
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 10px;
+}
+.wb-ai-quick-btn:hover { background: hsl(var(--accent)); }
+.wb-ai-input-row { border-top: 1px solid hsl(var(--border)); display: flex; flex-shrink: 0; gap: 6px; padding: 8px; }
+.wb-ai-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  flex: 1;
+  font-size: 12.5px;
+  min-width: 0;
+  padding: 7px 9px;
+}
+.wb-ai-input:focus { border-color: hsl(var(--primary)); outline: none; }
+.wb-ai-send { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.wb-ai-send:disabled { opacity: 0.45; }
+
+/* AI proposal review bar + read-only diff */
+.wb-ai-proposal-bar {
+  align-items: center;
+  background: hsl(var(--warning-bg));
+  border-bottom: 1px solid hsl(var(--warning));
+  color: hsl(var(--warning-fg));
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 6px 12px;
+}
+.wb-ai-proposal-label { align-items: center; display: flex; font-size: 12.5px; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-ai-proposal-label b { color: inherit; }
+.wb-ai-proposal-actions { display: flex; flex-shrink: 0; gap: 6px; }
+.wb-ai-proposal-actions .primary-button,
+.wb-ai-proposal-actions .secondary-button { min-height: 28px; padding: 0 12px; }
+
+/* AI panel rich rendering */
+.wb-ai-codebox {
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  margin: 7px 0;
+  overflow: hidden;
+}
+.wb-ai-codebox-head {
+  align-items: center;
+  background: hsl(var(--muted));
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 4px 3px 9px;
+}
+.wb-ai-codebox-lang {
+  color: hsl(var(--muted-foreground));
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.wb-ai-codebox-copy {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font-size: 10.5px;
+  padding: 2px 7px;
+}
+.wb-ai-codebox-copy:hover { background: hsl(var(--accent)); color: hsl(var(--foreground)); }
+.wb-ai-code {
+  background: hsl(var(--background));
+  border: none;
+  border-radius: 0;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-x: auto;
+  padding: 8px 10px;
+  white-space: pre;
+}
+.wb-ai-code code { background: transparent; }
+.wb-ai-inline-code {
+  background: hsl(var(--muted));
+  border-radius: 4px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11.5px;
+  padding: 1px 4px;
+}
+.wb-ai-copy { height: 20px; margin-top: 4px; opacity: 0.6; width: 20px; }
+.wb-ai-copy:hover { opacity: 1; }
+.wb-ai-suggestions { display: flex; flex-direction: column; gap: 4px; padding: 8px 4px; }
+.wb-ai-quick-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  padding: 3px 2px;
+}
+.wb-ai-quick-btn { cursor: pointer; }
+
+/* ---------- AI panel three-dot menu + sections ---------- */
+.wb-ai-head { position: relative; }
+.wb-ai-menu-shield {
+  cursor: default;
+  inset: 0;
+  position: fixed;
+  z-index: 29;
+}
+.wb-ai-menu {
+  background: hsl(var(--popover, var(--card)));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: var(--shadow-pop);
+  display: grid;
+  gap: 1px;
+  min-width: 210px;
+  padding: 4px;
+  position: absolute;
+  right: 8px;
+  top: 30px;
+  /* Stacking: shield(29) < sections(30) < menu(40) — the dropdown always
+     paints above the open section, sections always above the shield. */
+  z-index: 40;
+}
+.wb-ai-menu-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  padding: 6px 8px;
+  text-align: left;
+  width: 100%;
+}
+.wb-ai-menu-item:hover:not(:disabled) { background: hsl(var(--muted)); }
+.wb-ai-menu-item:disabled { color: hsl(var(--muted-foreground)); cursor: default; opacity: 0.6; }
+.wb-ai-menu-item.active { background: hsl(var(--muted)); font-weight: 600; }
+.wb-ai-menu-sep { border-top: 1px solid hsl(var(--border)); margin: 2px 4px; }
+.wb-ai-section {
+  border-bottom: 1px solid hsl(var(--border));
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px 8px 8px;
+  /* Float above the open menu's click-away shield (z 29) so section
+     content — session rows, skill form, memory deletes — stays
+     interactive while the menu is open. Clicks anywhere else still hit
+     the shield and close the menu. */
+  position: relative;
+  z-index: 30;
+}
+.wb-ai-section-title {
+  color: hsl(var(--muted-foreground));
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+.wb-ai-section-empty { color: hsl(var(--muted-foreground)); font-size: 11.5px; margin: 4px 2px; }
+/* Memory rows are non-clickable text — no pointer/hover affordance. */
+.wb-ai-memory-text { cursor: default; white-space: normal; }
+.wb-ai-memory-text:hover { background: transparent; color: inherit; }
+/* Skill authoring form (Skills menu section) */
+.wb-ai-skill-form { border-top: 1px dashed hsl(var(--border)); display: grid; gap: 5px; margin-top: 6px; padding-top: 8px; }
+.wb-ai-skill-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  font-size: 11.5px;
+  padding: 5px 8px;
+  resize: vertical;
+  width: 100%;
+}
+.wb-ai-skill-input:focus { border-color: hsl(var(--primary)); outline: none; }
+.wb-ai-skill-add {
+  align-items: center;
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  font-size: 11.5px;
+  gap: 5px;
+  justify-content: center;
+  padding: 5px 8px;
+}
+.wb-ai-skill-add:hover:not(:disabled) { background: hsl(var(--accent)); }
+.wb-ai-skill-add:disabled { cursor: default; opacity: 0.45; }
+
+/* Plan approval card — plan mode's user gate. Accent-tinted so it reads
+   as a decision point, not another chat bubble. */
+.wb-ai-plan-card {
+  background: hsl(var(--primary) / 0.06);
+  border: 1px solid hsl(var(--primary) / 0.35);
+  border-radius: 10px;
+  flex-shrink: 0;
+  margin: 0 8px 6px;
+  padding: 8px 10px;
+}
+.wb-ai-plan-head {
+  align-items: center;
+  color: hsl(var(--foreground));
+  display: flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+}
+.wb-ai-plan-head svg { color: hsl(var(--primary)); flex-shrink: 0; }
+.wb-ai-plan-hint {
+  color: hsl(var(--muted-foreground));
+  font-size: 10.5px;
+  font-weight: 400;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-ai-plan-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+.wb-ai-plan-execute {
+  align-items: center;
+  background: hsl(var(--primary));
+  border: none;
+  border-radius: 6px;
+  color: hsl(var(--primary-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 11.5px;
+  font-weight: 600;
+  gap: 5px;
+  padding: 4px 12px;
+}
+.wb-ai-plan-execute:hover { filter: brightness(1.08); }
+.wb-ai-plan-discard {
+  background: transparent;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 4px 10px;
+}
+.wb-ai-plan-discard:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.wb-ai-section-row {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground) / 0.85);
+  cursor: pointer;
+  display: block;
+  font-size: 12px;
+  overflow: hidden;
+  padding: 5px 8px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+.wb-ai-section-row:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.wb-ai-capability { border-top: 1px dashed hsl(var(--border)); font-size: 11.5px; line-height: 1.6; margin: 0; padding: 10px 6px 2px; }
+
+/* Sessions list + menu extras */
+.wb-ai-menu-info {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  font-size: 11px;
+  gap: 6px;
+  padding: 4px 8px;
+}
+.wb-ai-menu-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-ai-menu-check {
+  color: hsl(var(--primary));
+  font-weight: 700;
+  margin-left: auto;
+  min-width: 12px;
+  text-align: right;
+}
+.wb-ai-menu-check:not(.on) { opacity: 0.35; }
+.wb-ai-session-row { align-items: center; display: flex; gap: 2px; }
+.wb-ai-session-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+.wb-ai-session-row .grow.current { font-weight: 600; }
+.wb-ai-session-date {
+  color: hsl(var(--muted-foreground));
+  flex-shrink: 0;
+  font-size: 10px;
+  margin-left: 6px;
+}
+
+/* ---------- AI proposal cards (inside the chat panel) ---------- */
+.wb-ai-proposals { border-top: 1px solid hsl(var(--warning)); display: flex; flex-direction: column; flex-shrink: 0; gap: 6px; max-height: 45%; overflow: auto; padding: 8px; }
+.wb-ai-proposal-card {
+  background: hsl(var(--warning-bg));
+  border: 1px solid hsl(var(--warning));
+  border-radius: 8px;
+  padding: 8px;
+}
+.wb-ai-proposal-card-path {
+  align-items: center;
+  color: hsl(var(--warning-fg));
+  display: flex;
+  font-size: 11.5px;
+  gap: 5px;
+  margin: 0 0 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-ai-proposal-card-queued {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  margin: 0;
+}
+.wb-ai-proposal-card-actions { display: flex; gap: 6px; }
+.wb-ai-proposal-accept {
+  background: hsl(var(--success));
+  border: 0;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 0;
+}
+.wb-ai-proposal-accept:hover { filter: brightness(1.06); }
+.wb-ai-proposal-reject {
+  background: hsl(var(--destructive-muted, var(--muted)));
+  border: 1px solid hsl(var(--destructive));
+  border-radius: 6px;
+  color: hsl(var(--destructive));
+  cursor: pointer;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 0;
+}
+.wb-ai-proposal-reject:hover { filter: brightness(1.06); }
+.wb-ai-stop { background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground)); }
+
+/* ---------- Thought collapsibles (the model's interim thinking) ---------- */
+.wb-ai-thought {
+  border-left: 2px solid hsl(var(--primary) / 0.4);
+  font-size: 11.5px;
+  margin: 2px 0;
+}
+.wb-ai-thought summary {
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  list-style: none;
+}
+.wb-ai-thought summary::-webkit-details-marker { display: none; }
+.wb-ai-thought summary:hover { color: hsl(var(--foreground)); }
+.wb-ai-thought-text {
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 2px 0 4px;
+  padding-left: 10px;
+  white-space: pre-wrap;
+}

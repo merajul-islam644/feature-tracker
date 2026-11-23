@@ -3,7 +3,7 @@
 // own order. The Source Control icon carries the same changes badge
 // VS Code shows: the dirty-file count, capped at "99+".
 
-import { FlaskConical, FolderTree, GitBranch, Search, TriangleAlert, type LucideIcon } from "lucide-react";
+import { Bot, FlaskConical, FolderTree, GitBranch, Search, TriangleAlert, type LucideIcon } from "lucide-react";
 import type { SidebarView } from "../state/workbenchStore";
 
 const ITEMS: { id: SidebarView; label: string; icon: LucideIcon }[] = [
@@ -11,7 +11,10 @@ const ITEMS: { id: SidebarView; label: string; icon: LucideIcon }[] = [
   { id: "search", label: "Search", icon: Search },
   { id: "scm", label: "Source Control", icon: GitBranch },
   { id: "run", label: "Run", icon: FlaskConical },
-  { id: "problems", label: "Problems", icon: TriangleAlert }
+  { id: "problems", label: "Problems", icon: TriangleAlert },
+  // The embedded AI — pinned to the BOTTOM of the rail, VS Code's
+  // Copilot placement (user request).
+  { id: "ai", label: "AI", icon: Bot }
 ];
 
 /** VS Code caps activity-bar badge text at "99+". */

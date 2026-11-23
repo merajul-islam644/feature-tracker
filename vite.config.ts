@@ -80,6 +80,91 @@ interface ChatProvider {
     content: AnthropicResponseContent[];
     stop_reason: string;
   }>;
+  /**
+   * Stream the same chat turn to `res` as Anthropic-format SSE events —
+   * the single downstream wire shape (body.stream is true here). Native
+   * Anthropic gateways are relayed byte-for-byte; OpenAI gateways are
+   * translated live by `translateOpenAiStreamToAnthropic`. Resolves when
+   * the response is fully written; throws only on pre-response failures
+   * (headers not yet sent — the caller's 502 catch is safe).
+   */
+  streamChat: (
+    cfg: { url: string; token: string; model: string },
+    body: AnthropicRequestBody & { stream: true },
+    res: ServerResponse,
+    signal: AbortSignal,
+  ) => Promise<void>;
+}
+
+// ── SSE plumbing shared by both providers' streamChat ───────────────────
+
+/** SSE response envelope — every header tuned against proxy buffering so
+ *  deltas reach the browser the moment the gateway emits them. */
+function beginSse(res: ServerResponse): void {
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/event-stream");
+  res.setHeader("cache-control", "no-cache");
+  res.setHeader("connection", "keep-alive");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders?.();
+}
+
+/** Write one Anthropic-format SSE event frame. */
+function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/** Strict user/assistant alternation for the upstream `messages` array.
+ *  The workbench ledger can carry back-to-back same-role rows (e.g. a
+ *  "[tool results]" user entry followed by the next user text), and
+ *  Anthropic's Messages API rejects non-alternating messages outright —
+ *  merge consecutive same-role entries and lead with a user row so any
+ *  provider accepts the shape. */
+function normalizeTurns(
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const merged: Array<{ role: "user" | "assistant"; content: string }> = [];
+  for (const message of messages) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === message.role) {
+      last.content = `${last.content}\n\n${message.content}`;
+    } else {
+      merged.push({ ...message });
+    }
+  }
+  if (merged.length > 0 && merged[0].role !== "user") {
+    merged.unshift({ role: "user", content: "(conversation context)" });
+  }
+  return merged;
+}
+
+/** Pump a byte stream to the client verbatim — the passthrough core. */
+async function pipeToRes(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<void> {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch {
+    // Upstream died / client disconnected mid-stream — close cleanly;
+    // the client's reader just sees stream end.
+    res.end();
+  }
+}
+
+/** Non-OK upstream in stream mode: pass status + error body through
+ *  verbatim — the client's !response.ok branch parses the message out of
+ *  it, so the user sees "401 unauthorized" / "404 model not found". */
+async function writeStreamError(res: ServerResponse, upstream: Response): Promise<void> {
+  res.statusCode = upstream.status;
+  res.setHeader(
+    "content-type",
+    upstream.headers.get("content-type") ?? "application/json",
+  );
+  res.end(await upstream.text().catch(() => ""));
 }
 
 function createAnthropicChatProvider(): ChatProvider {
@@ -111,6 +196,56 @@ function createAnthropicChatProvider(): ChatProvider {
       }
       return (await upstream.json()) as Awaited<ReturnType<ChatProvider["sendChat"]>>;
     },
+    async streamChat(cfg, body, res, signal) {
+      const upstream = await fetch(`${cfg.url.replace(/\/+$/, "")}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${cfg.token}`,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!upstream.ok || !upstream.body) {
+        await writeStreamError(res, upstream);
+        return;
+      }
+      // Native Anthropic SSE — relay byte-for-byte, no parsing here; the
+      // client (workbenchAi.ts → streamAnthropicResponse) reads the
+      // events itself.
+      beginSse(res);
+      await pipeToRes(upstream.body, res);
+    },
+  };
+}
+
+// Anthropic → OpenAI request translation, shared by sendChat (single
+// JSON) and streamChat (SSE):
+//   • Anthropic `system` → OpenAI system message at the head.
+//   • Anthropic `tools[]` → OpenAI `tools[].function.parameters` (we
+//     pass through `input_schema` unchanged — both APIs use JSON
+//     Schema for the function parameter shape).
+function toOpenAiRequest(
+  cfg: { url: string; token: string; model: string },
+  body: AnthropicRequestBody,
+): { model: string; max_tokens: number; messages: Array<{ role: string; content: string }>; tools?: unknown[] } {
+  const openaiMessages = body.system
+    ? [{ role: "system", content: body.system }, ...body.messages]
+    : [...body.messages];
+  const openaiTools = body.tools?.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description ?? "",
+      parameters: t.input_schema,
+    },
+  }));
+  return {
+    model: cfg.model,
+    max_tokens: body.max_tokens,
+    messages: openaiMessages,
+    ...(openaiTools ? { tools: openaiTools } : {}),
   };
 }
 
@@ -121,23 +256,6 @@ function createOpenAIChatProvider(): ChatProvider {
     notConfiguredMessage: () =>
       "OpenAI provider is not configured. Open Settings → AI Gateway, pick OpenAI, and enter the Base URL + API key.",
     async sendChat(cfg, body, signal) {
-      // Anthropic → OpenAI request translation.
-      //   • Anthropic `system` → OpenAI system message at the head.
-      //   • Anthropic `tools[]` → OpenAI `tools[].function.parameters` (we
-      //     pass through `input_schema` unchanged — both APIs use JSON
-      //     Schema for the function parameter shape).
-      const openaiMessages = body.system
-        ? [{ role: "system", content: body.system }, ...body.messages]
-        : [...body.messages];
-      const openaiTools = body.tools?.map((t) => ({
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description ?? "",
-          parameters: t.input_schema,
-        },
-      }));
-
       const upstream = await fetch(
         `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
         {
@@ -146,12 +264,7 @@ function createOpenAIChatProvider(): ChatProvider {
             "content-type": "application/json",
             authorization: `Bearer ${cfg.token}`,
           },
-          body: JSON.stringify({
-            model: cfg.model,
-            max_tokens: body.max_tokens,
-            messages: openaiMessages,
-            ...(openaiTools ? { tools: openaiTools } : {}),
-          }),
+          body: JSON.stringify(toOpenAiRequest(cfg, body)),
           signal,
         },
       );
@@ -222,7 +335,145 @@ function createOpenAIChatProvider(): ChatProvider {
         stop_reason: stopReason,
       };
     },
+    async streamChat(cfg, body, res, signal) {
+      const upstream = await fetch(
+        `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${cfg.token}`,
+          },
+          body: JSON.stringify({ ...toOpenAiRequest(cfg, body), stream: true }),
+          signal,
+        },
+      );
+      if (!upstream.ok || !upstream.body) {
+        await writeStreamError(res, upstream);
+        return;
+      }
+      // OpenAI's chunk stream is NOT the downstream wire — translate it
+      // into Anthropic SSE events live so the client keeps parsing one
+      // shape (this file's declared design).
+      beginSse(res);
+      await translateOpenAiStreamToAnthropic(upstream.body, res);
+    },
   };
+}
+
+// Translate an OpenAI chat-completions SSE stream into the Anthropic SSE
+// event shapes the client parses. Mappings:
+//   delta.content                        → content_block_delta {text_delta}
+//   delta.tool_calls[i] with id          → content_block_start {tool_use}
+//   delta.tool_calls[i].arguments fragment → content_block_delta {input_json_delta}
+//   finish_reason / data: [DONE]         → message_stop
+//   {"error": …} mid-stream              → {"type":"error"} event
+async function translateOpenAiStreamToAnthropic(
+  body: ReadableStream<Uint8Array>,
+  res: ServerResponse,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  // Anthropic block indexes are allocated in arrival order — the client
+  // appends blocks to its content array in the same order.
+  let nextIndex = 0;
+  let textIndex: number | null = null;
+  const toolIndexes = new Map<number, number>(); // OpenAI tool idx → Anthropic idx
+  let stopped = false;
+  const emitStop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    sseEvent(res, { type: "message_stop" });
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith("data:")) continue;
+        const dataStr = line.slice(5).trim();
+        if (!dataStr) continue;
+        if (dataStr === "[DONE]") {
+          emitStop();
+          res.end();
+          return;
+        }
+        let chunk: {
+          choices?: Array<{
+            delta?: {
+              content?: string | null;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+            finish_reason?: string | null;
+          }>;
+          error?: { message?: string };
+        };
+        try {
+          chunk = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
+        if (chunk.error) {
+          sseEvent(res, { type: "error", error: { message: chunk.error.message ?? "stream error" } });
+          res.end();
+          return;
+        }
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta;
+        if (!delta && !choice?.finish_reason) continue;
+        const text = delta?.content;
+        if (typeof text === "string" && text.length > 0) {
+          if (textIndex === null) {
+            textIndex = nextIndex;
+            nextIndex += 1;
+            sseEvent(res, { type: "content_block_start", index: textIndex, content_block: { type: "text" } });
+          }
+          sseEvent(res, { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text } });
+        }
+        for (const tc of delta?.tool_calls ?? []) {
+          const openaiIdx = typeof tc.index === "number" ? tc.index : 0;
+          let blockIndex = toolIndexes.get(openaiIdx);
+          if (blockIndex === undefined && (tc.id || tc.function?.name)) {
+            blockIndex = nextIndex;
+            nextIndex += 1;
+            toolIndexes.set(openaiIdx, blockIndex);
+            sseEvent(res, {
+              type: "content_block_start",
+              index: blockIndex,
+              content_block: {
+                type: "tool_use",
+                id: tc.id ?? `toolu_${openaiIdx}`,
+                name: tc.function?.name ?? "",
+              },
+            });
+          }
+          if (blockIndex !== undefined && tc.function?.arguments) {
+            sseEvent(res, {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+            });
+          }
+        }
+        if (choice?.finish_reason) emitStop();
+      }
+    }
+    emitStop();
+    res.end();
+  } catch {
+    // Upstream died mid-stream — close cleanly (partial answer stands).
+    res.end();
+  }
 }
 
 const CHAT_PROVIDERS: Record<string, () => ChatProvider> = {
@@ -370,6 +621,30 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
                   }))
               : [];
 
+          // ── SSE streaming passthrough ──
+          // When the client asks (stream:true), the selected provider
+          // streams the answer as Anthropic-format SSE: Anthropic
+          // gateways are relayed byte-for-byte, OpenAI gateways are
+          // translated live (see each provider's streamChat). The client
+          // parses the SSE events itself — one wire shape downstream.
+          if (parsed?.stream === true) {
+            await provider.streamChat(
+              cfg,
+              {
+                model: cfg.model,
+                max_tokens: 16384,
+                system: systemPrompt,
+                messages: normalizeTurns([...history, { role: "user", content: userText }]),
+                ...(tools ? { tools } : {}),
+                ...(toolChoice ? { tool_choice: toolChoice } : {}),
+                stream: true,
+              },
+              res,
+              abort.signal,
+            );
+            return;
+          }
+
           // Provider receives an Anthropic-format body; each provider
           // factory translates to its native wire (or passes through for
           // Anthropic) and returns Anthropic-format JSON.
@@ -382,7 +657,7 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
               // mid-thought, returning content:null with stop max_tokens.
               max_tokens: 16384,
               system: systemPrompt,
-              messages: [...history, { role: "user", content: userText }],
+              messages: normalizeTurns([...history, { role: "user", content: userText }]),
               ...(tools ? { tools } : {}),
               ...(toolChoice ? { tool_choice: toolChoice } : {}),
             },
