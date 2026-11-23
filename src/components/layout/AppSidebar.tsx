@@ -202,10 +202,10 @@ export function AppSidebar() {
     },
     {
       kind: "link",
-      // The `/panel` route now hosts the VS Code-style workspace
-      // (see `components/workspace/WorkspacePage.tsx`). Sidebar
-      // gets a dedicated `menuLabel` key so translators don't have
-      // to re-translate the page's H1 to change the menu text.
+      // The `/panel` route hosts the SAME workbench feature as /tests
+      // (`features/workbench` — one engine everywhere), wrapped in the
+      // Workspace page's own heading design. This is the app's single
+      // code editor — general software development, not only specs.
       to: `${issueTrackerBase}/panel`,
       label: t("issueTracker.workspace.menuLabel", "Workspace"),
       icon: Activity,
@@ -557,23 +557,15 @@ export function AppSidebar() {
         </SidebarGroup>
 
         {/* IAM admin group — the three identity surfaces (Users /
-            Organizations / Roles & Permissions) under one labeled
-            group, mirroring how the "Navigation" label scopes the
-            global nav (user directive 2026-11-20). Every row is
-            manager-only, so the whole group — label included — is
-            gated on `isManager`; rendering an empty labeled group for
-            other roles would just be noise. In the collapsed state
-            the label hides entirely (there's no toggle living in this
-            row to keep visible, unlike the Navigation group). */}
+            Organizations / Roles & Permissions), mirroring how the
+            "Navigation" label scopes the global nav. Every row is
+            manager-only, so the whole group is gated on `isManager`.
+            The visible "IAM" group label was removed (user request —
+            the rows speak for themselves); the group keeps its
+            spacing. In the collapsed state the rows shrink to icons
+            like the rest of the rail. */}
         {isManager && (
           <SidebarGroup>
-            <SidebarGroupLabel
-              className={cn(
-                "group-data-[collapsible=icon]:hidden",
-              )}
-            >
-              {t("nav.iam", "IAM")}
-            </SidebarGroupLabel>
             <SidebarMenu>
               {renderNavItems(filterNavItems(iamNavItems))}
             </SidebarMenu>

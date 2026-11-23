@@ -93,9 +93,53 @@ import {
   getWorkspaceOpenFile,
   getWorkspaceSetRoot,
 } from "@/lib/workspaceChatContext";
-import { devServerApi } from "@/services/devServerApi";
-import type { FileNode } from "@/types/dev-server";
-import type { GitStatus } from "@/types/git";
+import { localFolder, type FolderNode } from "@/lib/workspace/localFolder";
+
+/** Chat-side git status, parsed from the runner's `git status -b
+ *  --porcelain` output (the retired dev-server's parsed shape, kept so
+ *  the formatter below survives the transport swap unchanged). */
+type ChatGitStatus = {
+  isRepo: boolean;
+  reason?: string;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: { path: string; x: string; y: string; untracked: boolean }[];
+};
+
+function parseGitStatus(res: { code: number; stdout: string; stderr: string }): ChatGitStatus {
+  if (res.code !== 0) {
+    return {
+      isRepo: false,
+      reason: ((res.stderr || res.stdout).trim() || `git exited ${res.code}`).slice(0, 160),
+      branch: null,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      files: [],
+    };
+  }
+  let branch: string | null = null;
+  let upstream: string | null = null;
+  let ahead = 0;
+  let behind = 0;
+  const files: ChatGitStatus["files"] = [];
+  for (const line of res.stdout.split("\n")) {
+    if (line.startsWith("## ")) {
+      const m = line.slice(3).match(/^(\S+?)(?:\.{3}(\S+))?(?:\s*\[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?\s*$/);
+      if (m) {
+        branch = m[1];
+        upstream = m[2] ?? null;
+        ahead = Number(m[3] ?? 0);
+        behind = Number(m[4] ?? 0);
+      }
+    } else if (line.trim().length > 3) {
+      files.push({ x: line[0], y: line[1], path: line.slice(3), untracked: line[0] === "?" });
+    }
+  }
+  return { isRepo: true, branch, upstream, ahead, behind, files };
+}
 import type {
   AnthropicTool,
   ChatAction,
@@ -181,7 +225,7 @@ function clip(text: string, max = 6000): string {
   return `${text.slice(0, max)}\n… (truncated, ${text.length - max} more chars)`;
 }
 
-function formatWorkspaceTree(nodes: FileNode[], indent = 0): string[] {
+function formatWorkspaceTree(nodes: FolderNode[], indent = 0): string[] {
   const lines: string[] = [];
   for (const node of nodes) {
     lines.push(
@@ -208,7 +252,7 @@ function formatGitFile(f: {
   return `${f.x === " " ? "_" : f.x}${f.y === " " ? "_" : f.y} ${f.path}`;
 }
 
-function formatGitStatus(s: GitStatus): string {
+function formatGitStatus(s: ChatGitStatus): string {
   if (!s.isRepo) {
     return `Not a git repo${s.reason ? ` (${s.reason})` : ""}.`;
   }
@@ -3838,12 +3882,11 @@ export function useIssueTracker() {
               (typeof tool.input.maxDepth === "number"
                 ? Math.min(8, Math.max(1, Math.round(tool.input.maxDepth)))
                 : 2) + segs.length;
-            const tree = await devServerApi.listTree({
-              workspaceId: ws.workspaceId,
+            const { tree } = await localFolder.listTree({
               root: ws.root,
               maxDepth: Math.min(12, depth),
             });
-            let scoped: FileNode[] = tree;
+            let scoped: FolderNode[] = tree;
             for (const seg of segs) {
               const dir = scoped.find((n) => n.kind === "dir" && n.name === seg);
               if (!dir) {
@@ -3867,8 +3910,7 @@ export function useIssueTracker() {
           const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
           if (bad) return bad;
           try {
-            const content = await devServerApi.readUserFile({
-              workspaceId: ws.workspaceId,
+            const content = await localFolder.readUserFile({
               root: ws.root,
               path: path!,
             });
@@ -3918,8 +3960,7 @@ export function useIssueTracker() {
             return "Skipped — content exceeds the 1MB server cap. Split the file or reduce it.";
           }
           try {
-            await devServerApi.writeUserFile({
-              workspaceId: ws.workspaceId,
+            await localFolder.writeUserFile({
               root: ws.root,
               path: path!,
               content,
@@ -3946,8 +3987,7 @@ export function useIssueTracker() {
           const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
           if (bad) return bad;
           try {
-            const res = await devServerApi.editUserFile({
-              workspaceId: ws.workspaceId,
+            const res = await localFolder.editUserFile({
               root: ws.root,
               path: path!,
               oldStr,
@@ -3974,8 +4014,7 @@ export function useIssueTracker() {
           const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
           if (bad) return bad;
           try {
-            await devServerApi.mkdirUserPath({
-              workspaceId: ws.workspaceId,
+            await localFolder.mkdirUserPath({
               root: ws.root,
               path: path!,
             });
@@ -3995,8 +4034,7 @@ export function useIssueTracker() {
           const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
           if (bad) return bad;
           try {
-            await devServerApi.deleteUserPath({
-              workspaceId: ws.workspaceId,
+            await localFolder.deleteUserPath({
               root: ws.root,
               path: path!,
             });
@@ -4023,8 +4061,7 @@ export function useIssueTracker() {
             : "Skipped — missing newPath.";
           if (badNew) return badNew;
           try {
-            await devServerApi.renameUserPath({
-              workspaceId: ws.workspaceId,
+            await localFolder.renameUserPath({
               root: ws.root,
               oldPath: oldPath!,
               newPath: newPath!,
@@ -4044,36 +4081,27 @@ export function useIssueTracker() {
           const query = tool.input.query as string | undefined;
           if (!query) return "Skipped — missing query.";
           try {
-            const res = await devServerApi.search({
-              workspaceId: ws.workspaceId,
+            const res = await localFolder.search({
               root: ws.root,
               query,
-              caseSensitive: tool.input.caseSensitive === true,
-              wholeWord: tool.input.wholeWord === true,
-              regex: tool.input.regex === true,
-              includeGlobs: Array.isArray(tool.input.includeGlobs)
-                ? (tool.input.includeGlobs as string[])
-                : undefined,
-              excludeGlobs: Array.isArray(tool.input.excludeGlobs)
-                ? (tool.input.excludeGlobs as string[])
-                : undefined,
-              maxResults:
-                typeof tool.input.maxResults === "number"
-                  ? Math.min(5000, Math.round(tool.input.maxResults))
-                  : undefined,
             });
             if (res.results.length === 0) return "No matches.";
+            const matchCount = res.results.reduce(
+              (n, group) => n + group.lines.length,
+              0,
+            );
             const lines = res.results
               .slice(0, 40)
-              .map(
-                (r) =>
-                  `${r.path}:${r.line}:${r.column}: ${r.preview.trim()}`,
+              .flatMap((group) =>
+                group.lines
+                  .slice(0, 8)
+                  .map((l) => `${group.path}:${l.number}: ${l.text.trim()}`),
               );
             const more =
               res.results.length > 40
-                ? `\n… and ${res.results.length - 40} more matches`
+                ? `\n… and ${res.results.length - 40} more files`
                 : "";
-            return `${res.count} match(es)${res.truncated ? " (truncated — refine the query)" : ""}:\n${lines.join("\n")}${more}`;
+            return `${matchCount} match(es)${res.truncated ? " (truncated — refine the query)" : ""}:\n${lines.join("\n")}${more}`;
           } catch (err) {
             return `Search failed — ${
               err instanceof Error ? err.message : String(err)
@@ -4102,11 +4130,10 @@ export function useIssueTracker() {
               command ?? "",
             )
           ) {
-            return `Refused — \`${command}\` is a long-lived server and workspace_exec_command is BLOCKING: it would be killed at the timeout and orphan its child process on Windows. Use \`workspace_dev_server\` (action=start) instead — it spawns via the dev-server manager, waits for readiness, and returns the URL.`;
+            return `Refused — \`${command}\` is a long-lived server and workspace_exec_command is BLOCKING: it would be killed at the timeout and orphan its child process on Windows. Ask the user to run it in the workbench's terminal tab instead.`;
           }
           try {
-            const result = await devServerApi.execUserCommand({
-              workspaceId: ws.workspaceId,
+            const result = await localFolder.execUserCommand({
               root: ws.root,
               command: command!,
               timeoutMs:
@@ -4124,148 +4151,6 @@ export function useIssueTracker() {
             }`;
           }
         }
-        case "workspace_dev_server": {
-          // Start/stop/status for the workspace's long-lived dev
-          // server — the chat-side twin of the Dev-servers panel.
-          // Start waits for HTTP readiness so the model can immediately
-          // hand the preview URL to the browser_* walkthrough tools.
-          const ws = getWorkspaceChatState();
-          if (!ws) {
-            return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
-          }
-          const action = (tool.input.action as string) ?? "status";
-          if (action === "stop") {
-            const port =
-              typeof tool.input.port === "number"
-                ? Math.round(tool.input.port)
-                : undefined;
-            if (!port) {
-              return "Skipped — action=stop needs the `port` you started the server on.";
-            }
-            try {
-              await devServerApi.stopDevServer({
-                workspaceId: ws.workspaceId,
-                port,
-              });
-              return `Stopped the dev server on port ${port}.`;
-            } catch (err) {
-              return `Stop failed — ${err instanceof Error ? err.message : String(err)}`;
-            }
-          }
-          if (action === "status") {
-            const port =
-              typeof tool.input.port === "number"
-                ? Math.round(tool.input.port)
-                : 5173;
-            try {
-              const rec = await devServerApi.getStatus({
-                workspaceId: ws.workspaceId,
-                port,
-              });
-              if (!rec) {
-                return `No dev server record for port ${port} — nothing has been started there in this workspace.`;
-              }
-              return `Dev server on port ${rec.port}: status=${rec.status}, command=\`${rec.command} ${rec.args.join(" ")}\`${rec.status === "ready" || rec.status === "running" ? `, URL=http://localhost:${rec.port}` : ""}${rec.lastExitCode != null ? `, lastExitCode=${rec.lastExitCode}` : ""}`;
-            } catch (err) {
-              return `Status check failed — ${err instanceof Error ? err.message : String(err)}`;
-            }
-          }
-          // action === "start"
-          const script =
-            typeof tool.input.script === "string" && tool.input.script.trim()
-              ? tool.input.script.trim()
-              : "dev";
-          const port =
-            typeof tool.input.port === "number"
-              ? Math.round(tool.input.port)
-              : 5173;
-          try {
-            await devServerApi.startDevServer({
-              workspaceId: ws.workspaceId,
-              port,
-              command: "npm",
-              args: ["run", script],
-              // Run in the user's real folder — without this the
-              // backend spawns in its sandbox dir (no package.json
-              // there; observed live 2026-10-09: the wrong app's dev
-              // script ran entirely).
-              root: ws.root,
-            });
-            // Tell the Dev-servers panel so the row + SSE tail appear
-            // without a remount. Decoupled via a window event — the
-            // chat store can't reach the DevServerProvider from here.
-            window.dispatchEvent(
-              new CustomEvent("lattice:dev-server-started", {
-                detail: {
-                  workspaceId: ws.workspaceId,
-                  port,
-                  command: "npm",
-                  args: ["run", script],
-                },
-              }),
-            );
-            // Poll for readiness — the backend flips starting→ready
-            // when the port answers HTTP, or →failed when the child
-            // dies. 30s cap mirrors the panel's readiness budget.
-            // `actualPort` rides along when the server bumped ports
-            // (vite: "Port X is in use, trying another one") — the
-            // report below points the model at the REAL URL.
-            const deadline = Date.now() + 30_000;
-            let status: string = "starting";
-            let actualPort: number | null = null;
-            while (Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, 500));
-              const rec = await devServerApi.getStatus({
-                workspaceId: ws.workspaceId,
-                port,
-              });
-              if (!rec) break;
-              status = rec.status;
-              if (rec.actualPort) actualPort = rec.actualPort;
-              if (status === "ready" || status === "running" || status === "failed") break;
-            }
-            if (status === "failed") {
-              // Pull the boot log tail so the model can self-diagnose
-              // WITHOUT falling back to a blocking `npm run dev` exec
-              // (which orphans its child on this Windows setup).
-              let boot = "";
-              try {
-                const res = await fetch(
-                  `/api/dev-server/${encodeURIComponent(ws.workspaceId)}/${port}/events`,
-                );
-                const text = await res.text();
-                const msgs = [
-                  ...text.matchAll(
-                    /"kind":"(?:devserver_log|devserver_error)","(?:level":"\w+",")?message":"((?:[^"\\]|\\.)*)"/g,
-                  ),
-                ].map((m) => m[1]);
-                boot = msgs
-                  .slice(-4)
-                  .map((s) =>
-                    s
-                      .replace(/\\n/g, "\n")
-                      .replace(/\\"/g, '"')
-                      .replace(/\\\\/g, "\\"),
-                  )
-                  .join("\n")
-                  .slice(0, 800);
-              } catch {
-                // Events tail is best-effort — the hint below suffices.
-              }
-              return `Dev server FAILED to start (npm run ${script} on port ${port}).${boot ? `\nBoot output:\n${boot}\n` : ""}\nCommon causes: the script doesn't exist in package.json (check with workspace_npm_scripts), the port is taken (retry with a different port), or the app crashed at boot (see the output above). NEVER diagnose with \`npm run ${script}\` via workspace_exec_command — that's blocking and orphans its child process; use action=start on a different port instead.`;
-            }
-            if (status !== "ready" && status !== "running") {
-              return `Dev server is still starting after 30s (status=${status}). It may just be slow — check again with action=status, or try a different port.`;
-            }
-            const urlPort = actualPort ?? port;
-            const bumped = actualPort && actualPort !== port
-              ? ` NOTE: the server bumped ports — it actually serves on http://localhost:${actualPort} (the requested ${port} was busy); use THAT URL, and remember it for action=stop (stop still takes ${port}, the requested one).`
-              : "";
-            return `Dev server READY — \`npm run ${script}\` on http://localhost:${urlPort}.${bumped} Open that URL with browser_navigate to walk the app's UI.`;
-          } catch (err) {
-            return `Start failed — ${err instanceof Error ? err.message : String(err)}`;
-          }
-        }
         case "workspace_npm_scripts": {
           const ws = getWorkspaceChatState();
           if (!ws) {
@@ -4275,8 +4160,7 @@ export function useIssueTracker() {
             // Read package.json directly (NOT inspectPackage — that
             // summary doesn't carry scripts). A missing/malformed
             // package.json is the normal "not a Node project" state.
-            const raw = await devServerApi.readUserFile({
-              workspaceId: ws.workspaceId,
+            const raw = await localFolder.readUserFile({
               root: ws.root,
               path: "package.json",
             });
@@ -4357,10 +4241,9 @@ export function useIssueTracker() {
             return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
           }
           try {
-            const status = await devServerApi.gitStatus({
-              workspaceId: ws.workspaceId,
-              root: ws.root,
-            });
+            const status = parseGitStatus(
+              await localFolder.runGit({ root: ws.root, op: "status" }),
+            );
             return formatGitStatus(status);
           } catch (err) {
             return `git status failed — ${
@@ -4374,12 +4257,23 @@ export function useIssueTracker() {
             return "Skipped — no workspace folder is open. Ask the user to open the /panel workspace and pick a folder first.";
           }
           try {
-            const branches = await devServerApi.gitBranches({
-              workspaceId: ws.workspaceId,
-              root: ws.root,
-            });
-            return branches
-              .map((b) => `${b.current ? "→ " : "  "}${b.name}`)
+            const [branchList, current] = await Promise.all([
+              localFolder.runGit({ root: ws.root, op: "branch-list" }),
+              localFolder.runGit({ root: ws.root, op: "current-branch" }),
+            ]);
+            if (branchList.code !== 0 || current.code !== 0) {
+              return `Not a git repo${
+                (branchList.stderr || branchList.stdout).trim()
+                  ? ` (${(branchList.stderr || branchList.stdout).trim().slice(0, 120)})`
+                  : ""
+              }.`;
+            }
+            const currentName = current.stdout.trim();
+            return branchList.stdout
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((name) => `${name === currentName ? "→ " : "  "}${name}`)
               .join("\n");
           } catch (err) {
             return `git branches failed — ${
@@ -4396,14 +4290,15 @@ export function useIssueTracker() {
           const bad = path ? guardWorkspacePath(path) : "Skipped — missing path.";
           if (bad) return bad;
           try {
-            const diff = await devServerApi.gitDiff({
-              workspaceId: ws.workspaceId,
+            const diff = await localFolder.runGit({
               root: ws.root,
-              path: path!,
+              op: "diff",
+              ...(typeof tool.input.path === "string" ? { path: tool.input.path } : {}),
               staged: tool.input.staged === true,
             });
-            return diff
-              ? `Diff of ${path}:\n${clip(diff, 8000)}`
+            const text = (diff.stdout || diff.stderr).trim();
+            return diff.code === 0 && text
+              ? `Diff of ${path}:\n${clip(text, 8000)}`
               : "(no diff — untracked or unchanged)";
           } catch (err) {
             return `git diff failed — ${
@@ -4430,18 +4325,18 @@ export function useIssueTracker() {
           }
           try {
             if (staging) {
-              await devServerApi.gitStage({
-                workspaceId: ws.workspaceId,
+              await localFolder.runGit({
                 root: ws.root,
-                paths,
+                op: "stage",
+                ...(paths.length ? { paths } : {}),
               });
               return paths.length
                 ? `Staged: ${paths.join(", ")}`
                 : "Staged all changes (git add -A).";
             }
-            await devServerApi.gitUnstage({
-              workspaceId: ws.workspaceId,
+            await localFolder.runGit({
               root: ws.root,
+              op: "unstage",
               paths,
             });
             return `Unstaged: ${paths.join(", ")}`;
@@ -4467,9 +4362,9 @@ export function useIssueTracker() {
             if (bad) return `${bad} (path: ${p})`;
           }
           try {
-            await devServerApi.gitDiscard({
-              workspaceId: ws.workspaceId,
+            await localFolder.runGit({
               root: ws.root,
+              op: "discard",
               paths,
             });
             return `Discarded uncommitted changes in: ${paths.join(", ")}`;
@@ -4489,11 +4384,15 @@ export function useIssueTracker() {
             return "Skipped — missing commit message.";
           }
           try {
-            const summary = await devServerApi.gitCommit({
-              workspaceId: ws.workspaceId,
+            const res = await localFolder.runGit({
               root: ws.root,
+              op: "commit",
               message,
             });
+            if (res.code !== 0) {
+              return `Commit failed — ${(res.stderr || res.stdout).trim().slice(0, 300)}`;
+            }
+            const summary = res.stdout.trim().split("\n")[0] ?? "";
             return summary
               ? `Committed — ${summary}`
               : `Committed: "${message}"`;
@@ -4512,17 +4411,17 @@ export function useIssueTracker() {
           try {
             const output =
               tool.name === "workspace_git_push"
-                ? await devServerApi.gitPush({
-                    workspaceId: ws.workspaceId,
-                    root: ws.root,
-                  })
-                : await devServerApi.gitPull({
-                    workspaceId: ws.workspaceId,
-                    root: ws.root,
-                  });
+                ? await localFolder.runGit({ root: ws.root, op: "push" })
+                : await localFolder.runGit({ root: ws.root, op: "pull" });
+            const text = (output.stdout || output.stderr).trim();
+            if (output.code !== 0) {
+              return `${
+                tool.name === "workspace_git_push" ? "Push" : "Pull"
+              } failed — ${text.slice(0, 400)}`;
+            }
             return `${
               tool.name === "workspace_git_push" ? "Push" : "Pull"
-            } output:\n${clip(output || "(done, no output)", 3000)}`;
+            } output:\n${clip(text || "(done, no output)", 3000)}`;
           } catch (err) {
             return `${
               tool.name === "workspace_git_push" ? "git push" : "git pull"
@@ -4539,11 +4438,14 @@ export function useIssueTracker() {
           const branch = tool.input.branch as string | undefined;
           if (!branch) return "Skipped — missing branch.";
           try {
-            await devServerApi.gitCheckout({
-              workspaceId: ws.workspaceId,
+            const res = await localFolder.runGit({
               root: ws.root,
-              branch,
+              op: "checkout",
+              name: branch,
             });
+            if (res.code !== 0) {
+              return `Checkout failed — ${(res.stderr || res.stdout).trim().slice(0, 300)}`;
+            }
             return `Switched to branch ${branch}.`;
           } catch (err) {
             return `git checkout failed — ${

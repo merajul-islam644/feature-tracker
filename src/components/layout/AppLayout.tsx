@@ -1,5 +1,7 @@
-import { useEffect } from "react";
-import { Outlet } from "react-router-dom";
+import { useEffect, useMemo } from "react";
+import type { ReactNode } from "react";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { RouteContext, type RouteState } from "@/app/router/routeContext";
 import { SidebarProvider, SidebarInset, useSidebar } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "./AppSidebar";
@@ -7,7 +9,6 @@ import { Topbar } from "./Topbar";
 import { Toaster } from "@/components/ui/sonner";
 import { IssueTrackerStoreProvider } from "@/hooks/issueTrackerStore";
 import { ActiveEnvProvider } from "@/contexts/ActiveEnvContext";
-import { ExtensionsProvider } from "@/contexts/ExtensionsContext";
 import { GlobalChatAssistant } from "@/components/issue-tracker/GlobalChatAssistant";
 import { IncomingCallDialog } from "@/components/team-chat/IncomingCallDialog";
 import { TestConfirmationDialog } from "@/components/dashboard/TestConfirmationDialog";
@@ -36,7 +37,6 @@ export function AppLayout() {
     // only requires anything-renders-inside, so placing it outermost
     // here at the layout root works for the whole authenticated tree.
     <ActiveEnvProvider>
-    <ExtensionsProvider>
     <IssueTrackerStoreProvider>
       {/* URL → ActiveEnv sync. Renders no UI — just stamps the URL's
           (projectId, envSlug) pair into the ActiveEnv context on every
@@ -56,8 +56,17 @@ export function AppLayout() {
           <SidebarInset>
             <Topbar />
             <div className="flex-1 bg-background">
-              <div className="mx-auto max-w-6xl px-4 py-6 md:px-8 md:py-8">
-                <Outlet />
+              {/* The 6xl cap fits laptops; from 2xl (≥1536px — external
+                  monitors) the page fills the width so the workbench and
+                  every other page don't float in wide empty gutters. */}
+              <div className="mx-auto max-w-6xl 2xl:max-w-none px-4 py-6 md:px-8 md:py-8">
+                {/* The ported workbench subtree (features/workbench) reads
+                    navigation through the shared `useRoute()` context it
+                    came with, not react-router's hooks — this bridge keeps
+                    that seam working without touching the ported files. */}
+                <RouteBridge>
+                  <Outlet />
+                </RouteBridge>
               </div>
             </div>
           </SidebarInset>
@@ -86,13 +95,33 @@ export function AppLayout() {
         </SidebarProvider>
       </TooltipProvider>
     </IssueTrackerStoreProvider>
-    </ExtensionsProvider>
     </ActiveEnvProvider>
   );
 }
 
 // --- Sidebar collapsed-state persistence -------------------------------------
 //
+
+// Adapts react-router's navigation state to the shape the ported
+// workbench expects (`useRoute()` from TestPilot's router seam). Only
+// `navigate` is consumed today (BottomPanel's "go to run" links), but
+// the full RouteState is provided so other ported consumers resolve
+// too. Params stay empty — no ported surface reads them react-router
+// style; pages use useParams directly.
+function RouteBridge({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const value = useMemo<RouteState>(
+    () => ({
+      navigate: (to: string) => navigate(to),
+      params: {},
+      path: location.pathname,
+      search: location.search.replace(/^\?/, ""),
+    }),
+    [navigate, location.pathname, location.search],
+  );
+  return <RouteContext.Provider value={value}>{children}</RouteContext.Provider>;
+}
 // `SidebarProvider` starts every mount from `defaultOpen`, so a refresh
 // after minimizing always re-expanded the sidebar. Two pieces fix it:
 //

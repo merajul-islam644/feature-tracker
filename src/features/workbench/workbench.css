@@ -1,0 +1,1799 @@
+/* TestPilot Workbench -- the Tests tab's VS Code shell.
+   Everything is prefixed wb- and styled from the app's HSL tokens
+   (see :root in styles.css), so the workbench follows light/dark
+   automatically instead of shipping its own palette. */
+
+.wb-root {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-card);
+  display: flex;
+  flex-direction: column;
+  height: clamp(560px, calc(100vh - 240px), 920px);
+  overflow: hidden;
+}
+
+/* activity bar | sidebar | main, with the bottom panel stacked under
+   the main area (VS Code layout). Hidden sidebar/panel collapse their
+   auto tracks/rows to zero. */
+.wb-frame {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 48px auto minmax(0, 1fr);
+  /* The editor row never shrinks below its chrome (tab strip + crumbs):
+     a floor of `auto` keeps them intact on short windows where the
+     maximized panel's 62vh used to crush them into a clipped sliver. */
+  grid-template-rows: minmax(auto, 1fr) auto;
+  min-height: 0;
+}
+.wb-activity { grid-area: 1 / 1 / 3 / 2; }
+.wb-sidebar { grid-area: 1 / 2 / 3 / 3; }
+.wb-main {
+  display: flex;
+  flex-direction: column;
+  grid-area: 1 / 3 / 2 / 4;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.wb-panel { grid-area: 2 / 3 / 3 / 4; }
+/* Maximized panel: VS Code collapses the editor row to nothing and lets
+   the panel fill the whole frame — set on the grid, since the panel's
+   own height can't move the row split by itself. The editor area goes
+   fully display:none: a 0fr track alone still leaves the element at its
+   content height in Chrome, painting clipped tab-strip slivers over the
+   panel head on short windows. */
+.wb-frame.panel-max { grid-template-rows: minmax(0, 0fr) minmax(0, 1fr); }
+.wb-frame.panel-max .wb-main { display: none; }
+.wb-frame.panel-max .wb-panel.maximized { height: 100%; }
+
+/* ---------- activity bar ---------- */
+
+.wb-activity {
+  align-items: center;
+  background: hsl(var(--accent));
+  border-right: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+}
+.wb-activity-btn {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: flex;
+  height: 40px;
+  justify-content: center;
+  opacity: 0.75;
+  position: relative;
+  width: 100%;
+}
+.wb-activity-btn:hover { color: hsl(var(--foreground)); opacity: 1; }
+.wb-activity-btn.active {
+  border-left-color: hsl(var(--primary));
+  color: hsl(var(--primary));
+  opacity: 1;
+}
+/* VS Code's SCM changes badge: small filled pill pinned to the
+   icon's lower-right corner, capped at "99+" upstream. */
+.wb-activity-badge {
+  align-items: center;
+  background: hsl(var(--primary));
+  border-radius: 999px;
+  bottom: 3px;
+  box-sizing: content-box;
+  color: hsl(var(--primary-foreground));
+  display: flex;
+  font-size: 9px;
+  font-weight: 600;
+  height: 14px;
+  justify-content: center;
+  letter-spacing: 0;
+  line-height: 1;
+  min-width: 14px;
+  padding: 0 4px;
+  position: absolute;
+  right: 6px;
+}
+
+/* ---------- sidebar views ---------- */
+
+.wb-sidebar {
+  background: hsl(var(--card));
+  border-right: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+  transition: width 0.16s ease;
+}
+/* Live sash drag must track the pointer 1:1 -- no easing. */
+body.wb-resizing .wb-sidebar { transition: none; }
+.wb-view { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.wb-view-head {
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+.wb-view-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
+}
+.wb-view-actions { display: flex; gap: 2px; }
+.wb-icon-btn {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  width: 24px;
+}
+.wb-icon-btn:hover { background: hsl(var(--accent)); color: hsl(var(--foreground)); }
+.wb-icon-btn:disabled { cursor: default; opacity: 0.45; }
+
+/* ---------- explorer tree ---------- */
+
+.wb-tree { flex: 1; min-height: 0; overflow: auto; padding: 6px 4px 10px; }
+.wb-tree-row {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  height: 26px;
+  padding: 0 6px 0 0;
+  text-align: left;
+  width: 100%;
+}
+.wb-tree-row:hover { background: hsl(var(--accent)); }
+.wb-tree-row.active {
+  background: hsl(var(--accent));
+  color: hsl(var(--primary));
+  font-weight: 600;
+}
+.wb-tree-chevron {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  flex: none;
+  height: 16px;
+  justify-content: center;
+  width: 16px;
+}
+.wb-tree-icon {
+  align-items: center;
+  display: flex;
+  flex: none;
+  height: 16px;
+  justify-content: center;
+  margin-right: 6px;
+  width: 16px;
+}
+.wb-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-svg { display: block; height: 16px; width: 16px; }
+.wb-tree-icon .codicon { font-size: 16px; }
+.wb-run-badge {
+  background: hsl(var(--success-bg));
+  border-radius: 4px;
+  color: hsl(var(--success-fg));
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-left: 6px;
+  padding: 1px 4px;
+}
+.wb-dirty-dot {
+  background: hsl(var(--warning));
+  border-radius: 999px;
+  flex: none;
+  height: 7px;
+  margin-left: 6px;
+  width: 7px;
+}
+.wb-tree-empty { font-size: 12.5px; line-height: 1.6; padding: 14px 12px; }
+/* The reconnect card is the one state that must NOT read as a quiet
+   empty prompt — after a sign-out the user thinks the workspace is
+   gone, so it gets warning tint + icon + headline. */
+.wb-tree-reconnect {
+  align-items: flex-start;
+  background: color-mix(in srgb, hsl(var(--warning-fg)) 10%, transparent);
+  border: 1px solid color-mix(in srgb, hsl(var(--warning-fg)) 45%, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  gap: 9px;
+  margin: 10px 8px 4px;
+  padding: 10px;
+  text-align: left;
+  width: calc(100% - 16px);
+}
+.wb-tree-reconnect:hover { background: color-mix(in srgb, hsl(var(--warning-fg)) 16%, transparent); }
+.wb-tree-reconnect-icon { color: hsl(var(--warning-fg)); flex: none; margin-top: 1px; }
+.wb-tree-reconnect-text { display: block; font-size: 12px; line-height: 1.5; }
+.wb-tree-reconnect-text strong { color: hsl(var(--warning-fg)); display: block; font-size: 12.5px; margin-bottom: 2px; }
+/* No-folder empty state: a centered welcome card instead of a bare
+   sentence — the explorer's first impression when nothing is open. */
+.wb-tree-empty-state {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  padding: 34px 16px 22px;
+  text-align: center;
+}
+.wb-tree-empty-icon { color: hsl(var(--muted-foreground)); margin-bottom: 10px; opacity: 0.75; }
+.wb-tree-empty-title { font-size: 12.5px; font-weight: 600; margin: 0 0 4px; }
+.wb-tree-empty-body { color: hsl(var(--muted-foreground)); font-size: 11.5px; line-height: 1.5; margin: 0 0 14px; }
+.wb-empty-open {
+  align-items: center;
+  background: hsl(var(--primary));
+  border: 1px solid hsl(var(--primary-strong));
+  border-radius: 6px;
+  color: hsl(var(--primary-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 6px 14px;
+}
+.wb-empty-open:hover:not(:disabled) { filter: brightness(1.08); }
+.wb-empty-open:disabled { cursor: default; opacity: 0.5; }
+.wb-empty-secondary {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 11.5px;
+  gap: 5px;
+  margin-top: 10px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.wb-empty-secondary:hover:not(:disabled) { color: hsl(var(--foreground)); }
+.wb-tree-empty-hint { color: hsl(var(--muted-foreground)); font-size: 10.5px; margin: 14px 0 0; opacity: 0.8; }
+
+/* Connect card: the terminal tab's offline state is onboarding, not an
+   error — one command starts the agent on the user's machine and the
+   panel pairs with it automatically. */
+.wb-connect { align-items: center; display: flex; flex-direction: column; padding: 40px 24px; text-align: center; }
+.wb-connect-icon { color: hsl(var(--muted-foreground)); margin-bottom: 10px; }
+.wb-connect-title { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
+.wb-connect-start {
+  align-items: center;
+  background: hsl(var(--primary));
+  border: 1px solid hsl(var(--primary-strong));
+  border-radius: 6px;
+  color: hsl(var(--primary-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 7px 18px;
+}
+.wb-connect-start:hover:not(:disabled) { filter: brightness(1.08); }
+.wb-connect-start:disabled { cursor: default; opacity: 0.55; }
+.wb-connect-body { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.55; margin: 0 0 14px; max-width: 470px; }
+.wb-connect-cmd { align-items: center; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 6px; display: flex; gap: 8px; max-width: 540px; padding: 6px 6px 6px 12px; width: 100%; }
+.wb-connect-cmd code { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-connect-copy { flex: none; }
+.wb-connect-note { color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.5; margin: 12px 0 0; }
+.wb-connect-note code, .wb-connect-body code { background: hsl(var(--muted)); border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 10.5px; padding: 1px 5px; }
+
+/* ---------- import progress ---------- */
+
+/* Live import state above the tree: label + thin determinate bar, themed
+   from the same tokens as the rest of the pane. */
+.wb-import-progress {
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+}
+.wb-import-progress-label { font-size: 12px; font-weight: 600; }
+.wb-import-progress-track {
+  background: hsl(var(--muted));
+  border-radius: 999px;
+  display: block;
+  height: 4px;
+  overflow: hidden;
+}
+.wb-import-progress-fill {
+  background: hsl(var(--primary));
+  border-radius: 999px;
+  display: block;
+  height: 100%;
+  transition: width 240ms ease;
+}
+
+/* ---------- search view ---------- */
+
+.wb-search-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+.wb-search-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  padding: 7px 10px;
+  width: 100%;
+}
+.wb-search-input:focus {
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.15);
+  outline: none;
+}
+.wb-search-hint { font-size: 12px; margin: 0; }
+.wb-search-summary { font-size: 11.5px; margin: 0; }
+.wb-search-results { display: flex; flex-direction: column; gap: 10px; }
+.wb-search-file { border: 1px solid hsl(var(--border)); border-radius: 8px; overflow: hidden; }
+.wb-search-file-head {
+  align-items: center;
+  background: hsl(var(--accent));
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  gap: 6px;
+  padding: 5px 8px;
+}
+.wb-search-file-path {
+  flex: 1;
+  font-size: 11.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-search-count { color: hsl(var(--muted-foreground)); font-size: 10.5px; }
+.wb-search-line {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  gap: 8px;
+  padding: 3px 8px;
+  text-align: left;
+  width: 100%;
+}
+.wb-search-line:hover { background: hsl(var(--accent)); }
+.wb-search-line-no {
+  color: hsl(var(--muted-foreground));
+  flex: none;
+  font-size: 10.5px;
+  text-align: right;
+  width: 26px;
+}
+.wb-search-line-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+.wb-search-line-text mark {
+  background: hsl(var(--warning-bg));
+  border-radius: 2px;
+  color: hsl(var(--warning-fg));
+  padding: 0 1px;
+}
+
+/* ---------- run view ---------- */
+
+.wb-run-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 10px;
+}
+.wb-run-subtitle { font-size: 12.5px; line-height: 1.5; margin: 0; }
+.wb-run-url { width: 100%; }
+.wb-run-btn { justify-content: center; width: 100%; }
+/* Configuration card: subtitle + Base URL + the run action read as one
+   bordered unit instead of a loose stack of texts. */
+.wb-run-config {
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+/* Workspace shape as count tiles — the numbers read at a glance. */
+.wb-run-stats { display: flex; gap: 8px; }
+.wb-run-stat {
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+}
+.wb-run-stat-num { font-size: 16px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.wb-run-stat-label { color: hsl(var(--muted-foreground)); font-size: 11px; margin-top: 2px; }
+/* Runner liveness row: dot + state + the URL it answers on. */
+.wb-run-status {
+  align-items: center;
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  display: flex;
+  gap: 9px;
+  padding: 9px 10px;
+}
+.wb-run-status-text { display: flex; flex-direction: column; font-size: 12.5px; gap: 1px; min-width: 0; }
+.wb-run-status-url {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-run-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  gap: 6px;
+  margin: 0;
+}
+.wb-run-result { border: 1px solid hsl(var(--border)); border-radius: 8px; padding: 10px; }
+.wb-run-result-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+}
+.wb-run-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.wb-run-error {
+  background: hsl(var(--error-bg));
+  border-radius: 8px;
+  color: hsl(var(--error-fg));
+  font-size: 12px;
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- editor tabs ---------- */
+
+.wb-tabs {
+  align-items: stretch;
+  background: hsl(var(--accent));
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  min-height: 36px;
+  overflow-x: auto;
+}
+/* Editor title actions at the strip's RIGHT end (VS Code's toolbar
+   position): the active file's auto-save status + undo/redo. Sticky so
+   they stay pinned even when many tabs scroll under them. */
+.wb-tabs-actions {
+  align-items: center;
+  background: hsl(var(--accent));
+  border-left: 1px solid hsl(var(--border));
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  margin-left: auto;
+  padding: 0 6px 0 10px;
+  position: sticky;
+  right: 0;
+  z-index: 1;
+}
+.wb-editor-save {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  justify-content: flex-end;
+  min-width: 72px;
+  padding-right: 6px;
+}
+.wb-editor-save.is-saved { color: hsl(var(--success-fg)); font-weight: 600; }
+.wb-editor-save.is-error { color: hsl(var(--error-fg)); font-weight: 600; }
+.wb-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid hsl(var(--border));
+  border-top: 2px solid transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  max-width: 220px;
+  padding: 0 8px 0 10px;
+}
+.wb-tab:hover { color: hsl(var(--foreground)); }
+.wb-tab.active {
+  background: hsl(var(--card));
+  border-top-color: hsl(var(--primary));
+  color: hsl(var(--foreground));
+}
+.wb-tab-name {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-tab-close {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  opacity: 0;
+  width: 18px;
+}
+.wb-tab:hover .wb-tab-close,
+.wb-tab.active .wb-tab-close { opacity: 0.7; }
+.wb-tab-close:hover {
+  background: hsl(var(--border) / 0.6);
+  opacity: 1;
+}
+.wb-spin { animation: tp-spin 0.9s linear infinite; }
+
+/* ---------- breadcrumbs ---------- */
+
+.wb-breadcrumbs {
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 2px;
+  padding: 6px 12px;
+}
+.wb-crumb {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: inline-flex;
+  gap: 2px;
+}
+.wb-crumb:last-child {
+  color: hsl(var(--foreground));
+  font-weight: 600;
+}
+
+/* ---------- editor area ---------- */
+
+.wb-editor { flex: 1; min-height: 0; position: relative; }
+/* While a tab's text streams from disk Monaco is not mounted at all
+   (see EditorHost) — this spacer fills the area under the veil. */
+.wb-editor-placeholder { height: 100%; }
+/* Lazy load veil: while a tab's text streams from disk the editor area
+   is covered under a soft veil. */
+.wb-editor-loading {
+  align-items: center;
+  background: hsl(var(--background) / 0.55);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  z-index: 5;
+}
+
+/* ---------- SCM diff editor ---------- */
+
+/* The editor host stacks the diff toolbar above the DiffEditor. */
+.wb-editor:has(.wb-diff-host) {
+  display: flex;
+  flex-direction: column;
+}
+.wb-diff-bar {
+  align-items: center;
+  background: hsl(var(--muted) / 0.4);
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 10px;
+}
+.wb-diff-label {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+}
+.wb-diff-side:first-of-type { color: hsl(var(--foreground)); }
+.wb-diff-arrow { opacity: 0.7; }
+.wb-diff-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+.wb-diff-open {
+  align-items: center;
+  background: transparent;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: flex;
+  font-size: 11px;
+  gap: 5px;
+  padding: 3px 8px;
+}
+.wb-diff-open:hover {
+  color: hsl(var(--foreground));
+  border-color: hsl(var(--muted-foreground));
+}
+.wb-diff-host { flex: 1; min-height: 0; }
+.wb-watermark {
+  align-items: flex-start;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  opacity: 0.85;
+  padding: 48px 56px;
+}
+.wb-watermark-title {
+  color: hsl(var(--foreground));
+  font-size: 22px;
+  font-weight: 300;
+  margin: 0 0 24px;
+  opacity: 0.6;
+}
+.wb-watermark-rows {
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  gap: 8px;
+}
+.wb-watermark-row {
+  align-items: center;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  min-width: 300px;
+}
+.wb-watermark-keys {
+  background: hsl(var(--accent));
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  color: hsl(var(--foreground));
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+/* ---------- bottom panel ---------- */
+
+.wb-panel {
+  background: hsl(var(--card));
+  border-top: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  height: 240px;
+  min-height: 0;
+}
+.wb-panel-head {
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  justify-content: space-between;
+  padding: 0 8px 0 12px;
+}
+.wb-panel-tabs { display: flex; gap: 14px; }
+.wb-panel-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  gap: 5px;
+  letter-spacing: 0.06em;
+  padding: 8px 2px 6px;
+  text-transform: uppercase;
+}
+.wb-panel-tab.active {
+  border-bottom-color: hsl(var(--primary));
+  color: hsl(var(--foreground));
+}
+.wb-panel-side { align-items: center; display: flex; gap: 8px; }
+.wb-panel-body { flex: 1; min-height: 0; overflow: auto; }
+.wb-panel.maximized { height: min(62vh, 640px); }
+.wb-panel-tab-count {
+  background: hsl(var(--muted-foreground) / 0.25);
+  border-radius: 999px;
+  font-size: 10px;
+  margin-left: 6px;
+  padding: 1px 6px;
+}
+.wb-output { height: 100%; overflow: auto; padding: 10px 14px; }
+.wb-output-log,
+.wb-output-error {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wb-output-line.ok { color: hsl(var(--success-fg)); }
+.wb-output-line.error { color: hsl(var(--error-fg)); }
+.wb-output-hint { font-size: 12.5px; margin: 0; }
+.wb-results { display: flex; flex-direction: column; min-height: 0; }
+.wb-results-summary {
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  gap: 8px;
+  padding: 8px 14px;
+}
+.wb-results-pill {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+}
+.wb-results-pill.pass {
+  background: hsl(var(--success-bg));
+  color: hsl(var(--success-fg));
+}
+.wb-results-pill.fail {
+  background: hsl(var(--error-bg));
+  color: hsl(var(--error-fg));
+}
+.wb-results-pill.neutral {
+  background: hsl(var(--accent));
+  color: hsl(var(--muted-foreground));
+}
+
+/* ---------- terminal tab ---------- */
+
+/* Icon inside a panel tab: inline-flex centers the SVG on the text line. */
+.wb-panel-tab-ico {
+  display: inline-flex;
+  margin: 0;
+}
+
+.wb-panel-tab-ico svg { display: block; }
+/* Terminal tab: xterm.js owns the canvas (its own CSS ships with the
+   package); we only size the host and inset it from the panel borders. */
+.wb-term {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+/* The per-terminal tab strip (VS Code): one pill per shell instance,
+   ✕ to close, [+] at the end to open another. Sits above the pane. */
+/* Browser-picked (FSA) workspace notice: the shell can't cd into a
+   folder whose real path Chrome hides, so it starts at the app root —
+   this says why, instead of leaving a mysterious prompt. */
+.wb-term-notice {
+  align-items: flex-start;
+  background: hsl(var(--muted) / 0.35);
+  border-bottom: 1px solid hsl(var(--border) / 0.5);
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  flex: none;
+  font-size: 11px;
+  gap: 6px;
+  line-height: 1.45;
+  padding: 5px 12px;
+}
+.wb-term-notice svg { flex: none; margin-top: 2px; }
+.wb-term-tabs {
+  align-items: stretch;
+  border-bottom: 1px solid hsl(var(--border) / 0.6);
+  display: flex;
+  flex: none;
+  gap: 2px;
+  min-height: 28px;
+  overflow-x: auto;
+  padding: 0 8px;
+}
+.wb-term-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  gap: 6px;
+  padding: 4px 4px 4px 9px;
+  user-select: none;
+}
+.wb-term-tab:hover { color: hsl(var(--foreground)); }
+.wb-term-tab.active {
+  border-bottom-color: hsl(var(--primary));
+  color: hsl(var(--foreground));
+}
+.wb-term-tab-label { white-space: nowrap; }
+.wb-term-tab-close {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  height: 16px;
+  justify-content: center;
+  opacity: 0;
+  padding: 0;
+  width: 16px;
+}
+.wb-term-tab:hover .wb-term-tab-close,
+.wb-term-tab.active .wb-term-tab-close { opacity: 0.75; }
+.wb-term-tab-close:hover { background: hsl(var(--muted)); opacity: 1; }
+.wb-term-add {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  height: 24px;
+  justify-content: center;
+  margin-left: auto;
+  width: 24px;
+}
+.wb-term-add:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+/* All instances stack in the same slot; inactive ones keep visibility
+   (never display:none) so xterm's CharSizeService keeps valid dims and
+   a tab switch needs no re-fit. */
+.wb-term-hosts { flex: 1; min-height: 0; position: relative; }
+.wb-term-slot { inset: 0; position: absolute; }
+.wb-term-empty {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  font-size: 12px;
+  height: 100%;
+  justify-content: center;
+  padding: 0 12px;
+}
+.wb-term-host {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  padding: 6px 12px 8px;
+}
+
+/* ---------- status bar ---------- */
+
+.wb-status {
+  align-items: center;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  display: flex;
+  font-size: 11.5px;
+  gap: 16px;
+  height: 26px;
+  justify-content: space-between;
+  padding: 0 12px;
+}
+.wb-status-left,
+.wb-status-right {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+  min-width: 0;
+}
+.wb-status-item {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
+}
+.wb-status-url {
+  max-width: 220px;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-status-lang { letter-spacing: 0.04em; text-transform: uppercase; }
+.wb-status-import { color: hsl(var(--primary)); font-weight: 600; }
+.wb-status-root {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* the git branch chip (VS Code status bar) -- sits on the primary bar */
+.wb-status-git {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 2px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-status-git:hover { background: rgba(255, 255, 255, 0.18); }
+/* "Stop server" — the panel-header counterpart of the ConnectCard's
+   "Start server" button. Danger-tinted outline so it reads as a real
+   action, not a status label; armed state fills in further. */
+.wb-panel-stop {
+  align-items: center;
+  background: color-mix(in srgb, hsl(var(--error-fg)) 10%, transparent);
+  border: 1px solid color-mix(in srgb, hsl(var(--error-fg)) 40%, transparent);
+  border-radius: 5px;
+  color: hsl(var(--error-fg));
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 5px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.wb-panel-stop:hover:not(.armed) { background: color-mix(in srgb, hsl(var(--error-fg)) 22%, transparent); }
+.wb-panel-stop.armed { background: color-mix(in srgb, hsl(var(--error-fg)) 28%, transparent); }
+.wb-status-git-count {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  flex: none;
+  font-size: 10px;
+  padding: 0 5px;
+}
+
+/* ---------- command palette ---------- */
+
+.wb-palette-overlay {
+  align-items: flex-start;
+  backdrop-filter: blur(2px);
+  background: rgba(15, 17, 23, 0.35);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding-top: 12vh;
+  position: fixed;
+  z-index: 80;
+}
+.wb-palette {
+  animation: modal-in 0.12s ease-out;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  width: min(560px, 92vw);
+}
+.wb-palette-input {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground));
+  font-size: 14px;
+  outline: none;
+  padding: 12px 14px;
+  width: 100%;
+}
+.wb-palette-list { max-height: 320px; overflow: auto; padding: 6px; }
+.wb-palette-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  padding: 7px 10px;
+  text-align: left;
+  width: 100%;
+}
+.wb-palette-item.active { background: hsl(var(--accent)); }
+.wb-palette-label { flex: none; font-size: 13px; }
+.wb-palette-hint {
+  color: hsl(var(--muted-foreground));
+  flex: 1;
+  font-size: 11.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-palette-empty { font-size: 12.5px; margin: 0; padding: 10px 12px; }
+
+/* ---------- sidebar sash (drag to resize / minimize / expand) ---------- */
+
+/* Invisible 7px grab strip centered on the sidebar's right border; the
+   3px overhang reaches into the editor like VS Code's sash. Lives inside
+   .wb-sidebar, so hiding the sidebar removes the sash with it. */
+.wb-sash {
+  cursor: col-resize;
+  position: absolute;
+  bottom: 0;
+  right: -3px;
+  top: 0;
+  touch-action: none;
+  width: 7px;
+  z-index: 20;
+}
+/* Hover/drag highlight drawn exactly over the sidebar's border line. */
+.wb-sash::before {
+  background: transparent;
+  content: "";
+  left: 3px;
+  position: absolute;
+  bottom: 0;
+  top: 0;
+  transition: background 0.12s ease;
+  width: 1px;
+}
+.wb-sash:hover::before,
+.wb-sash:focus-visible::before { background: hsl(var(--primary) / 0.65); }
+body.wb-resizing { cursor: col-resize; user-select: none; }
+body.wb-resizing .wb-sash::before { background: hsl(var(--primary)); }
+.wb-sash:focus-visible { outline: none; }
+body.wb-resizing .wb-sash-arrow { opacity: 0; pointer-events: none; }
+.wb-sash-arrow {
+  align-items: center;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 5px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  left: 50%;
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  top: 50%;
+  transition: color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  width: 15px;
+}
+.wb-sash-arrow:nth-of-type(1) { transform: translate(-50%, calc(-50% - 11px)); }
+.wb-sash-arrow:nth-of-type(2) { transform: translate(-50%, calc(-50% + 11px)); }
+.wb-sash:hover .wb-sash-arrow,
+.wb-sash:focus-within .wb-sash-arrow { opacity: 1; }
+.wb-sash-arrow:hover {
+  border-color: hsl(var(--primary));
+  color: hsl(var(--foreground));
+}
+
+/* ---------- sidebar hide / restore ---------- */
+
+.wb-root { position: relative; }
+.wb-sidebar-restore {
+  align-items: center;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  height: 26px;
+  justify-content: center;
+  left: 56px;
+  position: absolute;
+  top: 8px;
+  width: 26px;
+  z-index: 30;
+}
+.wb-sidebar-restore:hover {
+  border-color: hsl(var(--primary));
+  color: hsl(var(--foreground));
+}
+
+/* ---------- explorer: new file + per-row delete ---------- */
+
+.wb-tree-newfile { padding: 2px 8px 6px; }
+.wb-tree-newfile-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--primary));
+  border-radius: 4px;
+  color: hsl(var(--foreground));
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+  padding: 3px 8px;
+  width: 100%;
+}
+.wb-tree-row { position: relative; }
+.wb-tree-acts {
+  align-items: center;
+  background: hsl(var(--card));
+  border-radius: 4px;
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  transition: opacity 0.12s ease;
+}
+.wb-tree-row:hover .wb-tree-acts,
+.wb-tree-act:focus-visible { opacity: 1; }
+.wb-tree-act {
+  align-items: center;
+  border-radius: 4px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  width: 18px;
+}
+.wb-tree-act:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+}
+.wb-tree-act.danger:hover {
+  background: hsl(var(--error-bg));
+  color: hsl(var(--error-fg));
+}
+
+/* ---------- source control view ---------- */
+
+.wb-scm-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px 14px;
+}
+.wb-scm-section { display: flex; flex-direction: column; min-width: 0; }
+.wb-scm-heading {
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 6px;
+  letter-spacing: 0.06em;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+}
+.wb-scm-count {
+  background: hsl(var(--primary));
+  border-radius: 999px;
+  color: hsl(var(--primary-foreground));
+  font-size: 10px;
+  letter-spacing: 0;
+  padding: 1px 7px;
+}
+.wb-scm-empty {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+.wb-scm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.wb-scm-row {
+  align-items: center;
+  border-radius: 6px;
+  display: flex;
+  gap: 2px;
+  padding: 2px 2px 2px 4px;
+}
+.wb-scm-row:hover { background: hsl(var(--accent)); }
+.wb-scm-file {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  flex: 1;
+  font: inherit;
+  font-size: 12px;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px;
+  text-align: left;
+}
+.wb-scm-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-scm-field {
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+.wb-scm-opt { color: hsl(var(--muted-foreground)); font-style: normal; opacity: 0.75; }
+.wb-scm-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 5px 8px;
+  width: 100%;
+}
+.wb-scm-input:focus { border-color: hsl(var(--primary)); }
+.wb-scm-hint {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 0 0 10px;
+}
+.wb-scm-btn {
+  align-items: center;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 12px;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 2px;
+  padding: 6px 10px;
+  width: 100%;
+}
+.wb-scm-btn:hover:not(:disabled) { border-color: hsl(var(--primary)); }
+.wb-scm-btn:disabled { cursor: default; opacity: 0.5; }
+.wb-scm-btn.primary {
+  background: hsl(var(--primary));
+  border-color: hsl(var(--primary-strong));
+  color: hsl(var(--primary-foreground));
+}
+.wb-scm-error {
+  color: hsl(var(--error-fg));
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+/* Merge-conflict banner: the one section that must interrupt the scan —
+   amber accent on the heading, the conflicted files under it. */
+.wb-scm-conflicts {
+  border: 1px solid hsl(var(--warning-fg) / 0.35);
+  border-radius: 6px;
+  padding: 8px;
+}
+.wb-scm-conflicts .wb-scm-heading {
+  align-items: center;
+  color: hsl(var(--warning-fg));
+  display: flex;
+  gap: 6px;
+}
+.wb-scm-conflicts .wb-scm-status { color: hsl(var(--warning-fg)); }
+.wb-scm-result {
+  color: hsl(var(--success-fg));
+  font-size: 11.5px;
+  margin: 8px 0 0;
+}
+.wb-scm-result a { color: inherit; font-weight: 600; }
+
+/* commit box -- VS Code puts the message + commit button on TOP */
+.wb-scm-commit { display: flex; flex-direction: column; gap: 8px; }
+.wb-scm-message {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  min-height: 52px;
+  outline: none;
+  padding: 7px 9px;
+  resize: none;
+  width: 100%;
+}
+.wb-scm-message:focus { border-color: hsl(var(--primary)); }
+.wb-scm-message::placeholder { color: hsl(var(--muted-foreground)); }
+
+/* collapsible section headings with hover-revealed actions */
+.wb-scm-collapsible { border-radius: 6px; cursor: pointer; margin: 0 0 8px; padding: 2px 4px 2px 0; user-select: none; }
+.wb-scm-collapsible:hover { color: hsl(var(--foreground)); }
+.wb-scm-collapsible:focus-visible { outline: 1px solid hsl(var(--primary)); }
+.wb-scm-chev { align-items: center; color: hsl(var(--muted-foreground)); display: inline-flex; }
+.wb-scm-heading-actions { align-items: center; display: inline-flex; gap: 2px; margin-left: auto; opacity: 0; transition: opacity 0.12s ease; }
+.wb-scm-heading:hover .wb-scm-heading-actions,
+.wb-scm-heading:focus-within .wb-scm-heading-actions { opacity: 1; }
+.wb-scm-spin { animation: wb-spin 0.9s linear infinite; }
+@keyframes wb-spin { to { transform: rotate(360deg); } }
+
+/* per-file stage/unstage -- row actions appear on hover, VS Code style */
+.wb-scm-status { color: hsl(var(--warning-fg)); flex: none; font-size: 11px; font-weight: 700; padding: 0 4px; }
+.wb-scm-row-actions { align-items: center; display: inline-flex; gap: 2px; opacity: 0; }
+.wb-scm-row:hover .wb-scm-row-actions,
+.wb-scm-row:focus-within .wb-scm-row-actions { opacity: 1; }
+
+/* (the SCM pane's own branch row is gone — switching/creating/reloading
+   live in the pinned BranchBar at the sidebar's foot, below) */
+
+/* Branch picker: trigger + searchable fixed-position popover (VS Code's
+   branch quick-pick). The popover escapes any overflow clip — the bar's
+   foot position included. */
+.wb-branch-picker { flex: 1; min-width: 0; position: relative; }
+.wb-branch-picker .wb-branch-trigger { align-items: center; cursor: pointer; display: flex; gap: 6px; justify-content: space-between; width: 100%; }
+
+/* ---------- sidebar branch bar ---------- */
+/* The whole branch section (switcher + new-branch + reload) lives HERE,
+   pinned to the sidebar's foot so it is visible — and usable — from
+   every view (explorer, search, SCM, run), like VS Code's status bar.
+   Column so a branch-list failure note can stack under the picker row. */
+.wb-sidebar-branch {
+  border-top: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.wb-sidebar-branch-row { align-items: center; display: flex; gap: 4px; min-width: 0; }
+.wb-sidebar-branch .wb-branch-picker { color: hsl(var(--foreground)); }
+.wb-sidebar-branch .wb-scm-note { margin: 0; }
+/* The branch glyph rides INSIDE the trigger, left of the name — both the
+   SCM row and the pinned sidebar bar get it from the same component. */
+.wb-branch-trigger .wb-branch-icon { color: hsl(var(--muted-foreground)); flex: none; }
+.wb-branch-trigger:disabled { cursor: not-allowed; opacity: 0.5; }
+.wb-branch-value { align-items: center; display: inline-flex; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-branch-pop {
+  background: hsl(var(--popover));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: 0 10px 28px hsl(var(--foreground) / 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  position: fixed;
+  z-index: 90;
+}
+.wb-branch-list { display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
+.wb-branch-empty { color: hsl(var(--muted-foreground)); font-size: 11px; margin: 4px 2px; }
+.wb-branch-item {
+  align-items: center;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  font-size: 12px;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 5px 8px;
+  text-align: left;
+}
+.wb-branch-item:hover, .wb-branch-item.active { background: hsl(var(--secondary)); }
+.wb-branch-name { font-family: ui-monospace, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Inline create-branch form (BranchBar's create state). min-width:0 is
+   the load-bearing bit: a flex item's default min-width:auto holds the
+   input at its intrinsic ~20-char width, shoving Create + the cancel ✕
+   out past the narrow sidebar's edge. */
+.wb-scm-branch-create { align-items: center; display: flex; gap: 4px; }
+.wb-scm-branch-create .wb-scm-input { flex: 1; min-width: 0; width: auto; }
+.wb-scm-btn-inline { flex: none; margin-top: 0; white-space: nowrap; width: auto; }
+.wb-scm-note { color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.45; margin: 5px 0 0; overflow-wrap: anywhere; }
+
+/* token field with show/hide + the signed-in chip */
+.wb-scm-token { align-items: center; display: flex; gap: 4px; }
+.wb-scm-token .wb-scm-input { flex: 1; width: auto; }
+.wb-scm-verified { align-items: center; color: hsl(var(--success-fg)); display: inline-flex; font-size: 11px; font-weight: 600; gap: 4px; margin-top: 5px; }
+
+/* Branch commit history — one branch, so an honest straight graph rail:
+   a vertical line threading a node per commit (the first node is HEAD,
+   highlighted). The line runs li-edge to li-edge, trimmed to the node
+   center at both ends, so the rows can sit flush with no gaps. */
+.wb-scm-history { display: flex; flex-direction: column; list-style: none; margin: 0; padding: 2px 0; }
+.wb-scm-commit { position: relative; }
+.wb-scm-commit::before {
+  background: hsl(var(--border));
+  bottom: 0;
+  content: "";
+  left: 9px;
+  position: absolute;
+  top: 0;
+  width: 1px;
+}
+.wb-scm-commit:first-child::before { top: 13px; }
+.wb-scm-commit:last-child::before { bottom: calc(100% - 13px); }
+.wb-scm-commit::after {
+  background: hsl(var(--muted-foreground));
+  border-radius: 50%;
+  content: "";
+  height: 7px;
+  left: 6px;
+  position: absolute;
+  top: 10px;
+  width: 7px;
+}
+.wb-scm-commit:first-child::after {
+  background: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.18);
+}
+.wb-scm-commit-row {
+  align-items: center;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  column-gap: 8px;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 5px 6px 5px 22px;
+  row-gap: 1px;
+  text-align: left;
+  width: 100%;
+}
+.wb-scm-commit-row:hover { background: hsl(var(--accent)); }
+.wb-scm-commit-row:disabled { cursor: default; opacity: 0.5; }
+.wb-scm-commit-msg { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-scm-commit-sha {
+  background: hsl(var(--secondary));
+  border-radius: 4px;
+  color: hsl(var(--muted-foreground));
+  flex: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+}
+.wb-scm-commit-meta,
+.wb-scm-commit-author,
+.wb-scm-commit-when { color: hsl(var(--muted-foreground)); font-size: 11px; }
+.wb-scm-commit-author { display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-scm-commit-when { flex: none; text-align: right; }
+
+/* ---------- small screens ---------- */
+
+@media (max-width: 960px) {
+  .wb-panel { height: 200px; }
+  .wb-watermark { display: none; }
+  .wb-status-url { display: none; }
+}
+
+/* ============================================================
+   Ported shared UI (Modal / ConfirmDialog) — TestPilot styles.css
+   classes the ported components reference. Tokens missing from
+   Lattice's index.css are aliased onto Lattice's own theme-aware
+   tokens so light/dark follow the app automatically.
+   ============================================================ */
+:root {
+  --primary-strong: var(--primary);
+  --radius-card: var(--radius);
+  --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.22);
+  --success-bg: var(--success-muted);
+  --success-fg: var(--success-foreground);
+  --warning-bg: var(--warning-muted);
+  --warning-fg: var(--warning-foreground);
+  --error-bg: var(--destructive-muted);
+  --error-fg: var(--destructive);
+}
+
+.primary-button, .secondary-button, .tertiary-button, .icon-button, .danger-button {
+  align-items: center; border: 0; border-radius: var(--radius); display: inline-flex; font-size: 13.5px; font-weight: 600; gap: 8px; min-height: 38px; padding: 0 14px; transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease; white-space: nowrap;
+}
+.primary-button { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.primary-button:hover:not(:disabled) { background: hsl(var(--primary-strong)); }
+.primary-button:active:not(:disabled) { transform: translateY(1px); }
+.secondary-button { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); color: hsl(var(--high-emphasis)); }
+.secondary-button:hover:not(:disabled) { background: hsl(var(--secondary)); }
+.tertiary-button { background: transparent; color: hsl(var(--muted-foreground)); }
+.tertiary-button:hover:not(:disabled) { background: hsl(var(--secondary)); color: hsl(var(--high-emphasis)); }
+.danger-button { background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground)); }
+.danger-button:hover:not(:disabled) { filter: brightness(1.06); }
+.primary-button:disabled, .secondary-button:disabled, .tertiary-button:disabled, .danger-button:disabled { cursor: not-allowed; opacity: 0.55; }
+.icon-button { align-items: center; background: transparent; border: 1px solid transparent; color: hsl(var(--muted-foreground)); display: inline-flex; justify-content: center; min-height: 34px; padding: 0; width: 34px; }
+.icon-button:hover:not(:disabled) { background: hsl(var(--secondary)); color: hsl(var(--high-emphasis)); }
+.icon-button:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.modal-backdrop { align-items: center; background: rgba(16, 18, 22, 0.4); bottom: 0; display: flex; justify-content: center; left: 0; padding: 24px; position: fixed; right: 0; top: 0; z-index: 80; }
+.modal { animation: modal-in 0.16s ease; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: var(--radius-card); box-shadow: var(--shadow-pop); display: grid; gap: 14px; max-height: min(640px, calc(100vh - 48px)); max-width: 520px; overflow-y: auto; padding: 22px; width: 100%; }
+.modal-wide { max-width: 640px; }
+@keyframes modal-in { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+.modal-header { align-items: center; display: flex; justify-content: space-between; }
+.modal h3 { font-size: 16px; }
+.modal > p, .modal-sub { color: hsl(var(--muted-foreground)); font-size: 13.5px; margin: -6px 0 0; }
+.modal-actions { align-items: center; display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Status badges + health dot (TestPilot styles.css) — the bottom panel's
+   "Runner online/off" chip and run-status pills render through these.
+   Missing tokens aliased onto Lattice's theme-aware tokens. */
+:root {
+  --low-emphasis: var(--muted-foreground);
+  --info: var(--primary);
+  --info-bg: var(--primary-muted);
+  --info-fg: var(--primary);
+  --neutral-bg: var(--muted);
+  --neutral-fg: var(--muted-foreground);
+}
+.health-dot { border-radius: 999px; display: inline-block; flex-shrink: 0; height: 8px; width: 8px; }
+.health-dot.ok { background: hsl(var(--success)); }
+.health-dot.warn { background: hsl(var(--warning)); }
+.health-dot.bad { background: hsl(var(--destructive)); }
+.badge { align-items: center; border-radius: 999px; display: inline-flex; font-size: 12px; font-weight: 600; gap: 5px; padding: 3px 9px; white-space: nowrap; }
+.badge svg { flex-shrink: 0; }
+.badge-passed { background: hsl(var(--success-bg)); color: hsl(var(--success-fg)); }
+.badge-failed { background: hsl(var(--error-bg)); color: hsl(var(--error-fg)); }
+.badge-running { background: hsl(var(--info-bg)); color: hsl(var(--info-fg)); }
+.badge-pending { background: hsl(var(--neutral-bg)); color: hsl(var(--neutral-fg)); }
+.badge-cancelled { background: hsl(var(--neutral-bg)); color: hsl(var(--low-emphasis)); }
+.badge-critical { background: hsl(var(--error-bg)); color: hsl(var(--error-fg)); }
+.badge-high { background: hsl(var(--error-bg)); color: hsl(var(--error-fg)); }
+.badge-medium { background: hsl(var(--warning-bg)); color: hsl(var(--warning-fg)); }
+.badge-low { background: hsl(var(--info-bg)); color: hsl(var(--info-fg)); }
+.badge-neutral { background: hsl(var(--neutral-bg)); color: hsl(var(--neutral-fg)); }
+.badge-accent { background: hsl(var(--primary) / 0.1); color: hsl(var(--primary)); }
+.spin { animation: tp-spin 0.9s linear infinite; }
+/* Empty state of the always-pinned branch bar (no folder open, or the
+   folder is not a git clone) — muted single row in the picker's place. */
+.wb-sidebar-branch-empty { align-items: center; color: hsl(var(--muted-foreground)); display: flex; font-size: 11.5px; gap: 6px; min-width: 0; padding: 2px 0; }
+.wb-sidebar-branch-empty span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ============================================================
+   Workspace variant (wb-variant-workspace) — /panel's sidebar
+   menus wear the retired CodeMirror workspace's design, recovered
+   from git history (SidebarActivityBar / ExplorerSidebar):
+   muted panels, inset pill activity buttons, compact tree rows.
+   Scoped under the variant class so /tests keeps the TestPilot
+   chrome untouched.
+   ============================================================ */
+.wb-root.wb-variant-workspace .wb-activity {
+  background: hsl(var(--muted) / 0.3);
+}
+.wb-root.wb-variant-workspace .wb-activity-btn {
+  border-radius: 6px;
+  color: hsl(var(--muted-foreground));
+  height: 36px;
+  margin: 0 4px;
+  opacity: 1;
+  width: 36px;
+}
+.wb-root.wb-variant-workspace .wb-activity-btn:hover {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+.wb-root.wb-variant-workspace .wb-activity-btn.active {
+  background: hsl(var(--muted));
+  border-left: 2px solid hsl(var(--primary));
+  color: hsl(var(--foreground));
+}
+.wb-root.wb-variant-workspace .wb-activity-badge { right: 2px; }
+.wb-root.wb-variant-workspace .wb-sidebar {
+  background: hsl(var(--muted) / 0.3);
+}
+.wb-root.wb-variant-workspace .wb-view-head {
+  height: 36px;
+  padding: 0 12px;
+}
+.wb-root.wb-variant-workspace .wb-view-title {
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.wb-root.wb-variant-workspace .wb-view-actions .wb-icon-btn {
+  background: transparent;
+}
+.wb-root.wb-variant-workspace .wb-view-actions .wb-icon-btn:hover {
+  background: transparent;
+  color: hsl(var(--foreground));
+}
+.wb-root.wb-variant-workspace .wb-tree-row {
+  color: hsl(var(--foreground) / 0.8);
+  font-size: 12px;
+  height: 24px;
+}
+.wb-root.wb-variant-workspace .wb-tree-row:hover {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+.wb-root.wb-variant-workspace .wb-tree-row.active {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+
+/* ---------- Run Anything (scripts + custom command) ---------- */
+.wb-run-scripts { display: grid; gap: 2px; margin-bottom: 8px; }
+.wb-run-script-row {
+  align-items: center;
+  border-radius: 6px;
+  display: flex;
+  gap: 8px;
+  padding: 3px 6px;
+}
+.wb-run-script-row:hover { background: hsl(var(--accent)); }
+.wb-run-script-name {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 0;
+}
+.wb-run-script-cmd {
+  color: hsl(var(--muted-foreground));
+  flex: 1;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-run-custom {
+  display: flex;
+  gap: 6px;
+}
+.wb-run-custom-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+.wb-run-custom-input:focus {
+  border-color: hsl(var(--primary));
+  outline: none;
+}
+
+/* ---------- Live preview tab ---------- */
+.wb-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.wb-preview-bar {
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 4px 8px;
+}
+.wb-preview-url {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  min-width: 0;
+  padding: 4px 8px;
+}
+.wb-preview-url:focus { border-color: hsl(var(--primary)); outline: none; }
+.wb-preview-frame {
+  background: white;
+  border: 0;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+.wb-preview-hint {
+  border-top: 1px solid hsl(var(--border));
+  flex-shrink: 0;
+  font-size: 11px;
+  margin: 0;
+  padding: 4px 10px;
+}
+
+/* ---------- Problems view (language support v1) ---------- */
+.wb-problems-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px 10px; }
+.wb-problems-note { font-size: 12px; line-height: 1.55; margin: 6px 2px; }
+.wb-problems-summary { display: flex; gap: 6px; margin: 2px 2px 8px; }
+.wb-problems-file { margin-bottom: 8px; }
+.wb-problems-file-path {
+  align-items: center;
+  color: hsl(var(--foreground));
+  display: flex;
+  font-size: 11.5px;
+  font-weight: 600;
+  gap: 5px;
+  margin: 0 2px 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-problems-row {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground) / 0.8);
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 3px 6px;
+  text-align: left;
+  width: 100%;
+}
+.wb-problems-row:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.wb-problems-sev { flex-shrink: 0; }
+.wb-problems-sev.error { color: hsl(var(--destructive)); }
+.wb-problems-sev.warning { color: hsl(var(--warning)); }
+.wb-problems-loc { color: hsl(var(--muted-foreground)); flex-shrink: 0; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11px; padding-top: 1px; }
+.wb-problems-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.wb-problems-src { color: hsl(var(--muted-foreground)); flex-shrink: 0; font-size: 10px; opacity: 0.75; padding-top: 1px; }
+.wb-problems-clean { display: grid; gap: 6px; justify-items: start; margin: 6px 2px; }

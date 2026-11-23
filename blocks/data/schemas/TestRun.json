@@ -1,0 +1,139 @@
+{
+  "collectionName": "blx_TestRuns",
+  "fields": [
+    {
+      "name": "key",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Logical run id (run-<ts>-<seq>) — the app-facing id; ItemId is the gateway's physical key and key->ItemId is resolved on read.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Lattice project this run belongs to (projectsCollection id).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "name",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Run label — defaults to the project name when the caller doesn't name it.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "running | passed | failed | cancelled.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "environment",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "baseURL / environment label the suite ran against.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "total",
+      "type": "Double",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Total cases in the finished run.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "passed",
+      "type": "Double",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Passed case count.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "failed",
+      "type": "Double",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Failed case count.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "durationSec",
+      "type": "Double",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Wall-clock duration in seconds.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "startedAt",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "ISO timestamp when the run was dispatched.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "triggeredBy",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Who/what dispatched the run (user name or 'Playwright runner').",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "browser",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Playwright browser used (chromium default).",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "TestRun",
+  "schemaType": 1
+}
