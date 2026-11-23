@@ -32,6 +32,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Bot,
   BrainCircuit,
+  ChevronLeft,
   ClipboardList,
   Copy,
   Square,
@@ -320,6 +321,8 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
    *  approval card IS the user's pending decision. */
   const [planMode, setPlanMode] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
+  /** Memory page quick-add box. */
+  const [newMemoryText, setNewMemoryText] = useState("");
   useEffect(() => {
     if (!projectId) return;
     savePlanState(projectId, { planMode, pendingPlan });
@@ -905,21 +908,21 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
             </button>
             <button
               className={`wb-ai-menu-item${openSection === "sessions" ? " active" : ""}`}
-              onClick={() => setOpenSection((section) => (section === "sessions" ? null : "sessions"))}
+              onClick={() => { setOpenSection("sessions"); setMenuOpen(false); }}
               type="button"
             >
               <History size={13} /> Sessions
             </button>
             <button
               className={`wb-ai-menu-item${openSection === "skills" ? " active" : ""}`}
-              onClick={() => setOpenSection((section) => (section === "skills" ? null : "skills"))}
+              onClick={() => { setOpenSection("skills"); setMenuOpen(false); }}
               type="button"
             >
               <Zap size={13} /> Skills
             </button>
             <button
               className={`wb-ai-menu-item${openSection === "memory" ? " active" : ""}`}
-              onClick={() => setOpenSection((section) => (section === "memory" ? null : "memory"))}
+              onClick={() => { setOpenSection("memory"); setMenuOpen(false); }}
               type="button"
             >
               <BrainCircuit size={13} /> Memory
@@ -978,145 +981,231 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         </>
       ) : null}
 
-      {openSection === "sessions" ? (
-        <div className="wb-ai-section">
-          <p className="wb-ai-section-title">Saved sessions — click to restore</p>
-          {sessions.length === 0 ? (
-            <p className="wb-ai-section-empty">No saved sessions yet — chats save automatically.</p>
-          ) : (
-            sessions.map((session) => (
-              <div className="wb-ai-session-row" key={session.id}>
-                <button
-                  className={`wb-ai-section-row grow${session.id === sessionId ? " current" : ""}`}
-                  onClick={() => restoreSession(session)}
-                  title={session.title}
-                  type="button"
-                >
-                  {session.id === sessionId ? "▸ " : ""}
-                  {session.title}
-                  <span className="wb-ai-session-date">
-                    {new Date(session.updatedAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </button>
-                <button
-                  aria-label={`Delete session: ${session.title}`}
-                  className="wb-icon-btn"
-                  onClick={() => removeSession(session.id)}
-                  title="Delete this session"
-                  type="button"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      ) : null}
-
-      {openSection === "memory" ? (
-        <div className="wb-ai-section">
-          <p className="wb-ai-section-title">Project memory — injected into every chat</p>
-          {memory.length === 0 ? (
-            <p className="wb-ai-section-empty">
-              Empty — tell the AI &quot;মনে রাখো: …&quot;, use /remember, or let it save facts on its own.
-            </p>
-          ) : (
-            memory.map((entry) => (
-              <div className="wb-ai-session-row" key={entry.id}>
-                <span className="wb-ai-section-row wb-ai-memory-text" title={entry.text}>
-                  {entry.text}
-                </span>
-                <button
-                  aria-label="Forget this"
-                  className="wb-icon-btn"
-                  onClick={() => setMemory(removeMemory(projectId, entry.id))}
-                  title="Forget this fact"
-                  type="button"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      ) : null}
-
-      {openSection === "skills" ? (
-        <div className="wb-ai-section">
-          <p className="wb-ai-section-title">Your skills — click to run</p>
-          {skills.length === 0 ? (
-            <p className="wb-ai-section-empty">No saved skills yet — create one below.</p>
-          ) : (
-            skills.map((skill) => (
-              <div className="wb-ai-session-row" key={skill.id}>
-                <button
-                  className="wb-ai-section-row grow"
-                  onClick={() => {
-                    setOpenSection(null);
-                    void send(skill.prompt);
-                  }}
-                  title={skill.prompt}
-                  type="button"
-                >
-                  {skill.name}
-                </button>
-                <button
-                  aria-label={`Delete skill: ${skill.name}`}
-                  className="wb-icon-btn"
-                  onClick={() => setSkills(removeSkill(projectId, skill.id))}
-                  title="Delete this skill"
-                  type="button"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))
-          )}
-          {/* Author a skill: name + the prompt it sends as a user message. */}
-          <div className="wb-ai-skill-form">
-            <input
-              aria-label="Skill name"
-              className="wb-ai-skill-input"
-              onChange={(event) => setNewSkillName(event.target.value)}
-              placeholder="Name — e.g. Fix tests"
-              value={newSkillName}
-            />
-            <textarea
-              aria-label="Skill prompt"
-              className="wb-ai-skill-input wb-ai-skill-prompt"
-              onChange={(event) => setNewSkillPrompt(event.target.value)}
-              placeholder="The prompt this skill sends when clicked…"
-              rows={3}
-              value={newSkillPrompt}
-            />
+      {openSection ? (
+        <div className="wb-ai-page">
+          <div className="wb-ai-page-head">
             <button
-              className="wb-ai-skill-add"
-              disabled={!newSkillName.trim() || !newSkillPrompt.trim()}
-              onClick={() => {
-                setSkills(addSkill(projectId, newSkillName, newSkillPrompt));
-                setNewSkillName("");
-                setNewSkillPrompt("");
-              }}
+              aria-label="Back to chat"
+              className="wb-icon-btn"
+              onClick={() => setOpenSection(null)}
+              title="Back to chat"
               type="button"
             >
-              <Plus size={12} /> Save skill
+              <ChevronLeft size={15} />
             </button>
+            <span className="wb-ai-page-title">
+              {openSection === "sessions" ? "Sessions" : openSection === "skills" ? "Skills" : "Memory"}
+            </span>
+            <span className="wb-ai-page-count">
+              {openSection === "sessions"
+                ? sessions.length
+                : openSection === "skills"
+                  ? skills.length
+                  : memory.length}
+            </span>
           </div>
-          <p className="wb-ai-section-title">Built-in skills</p>
-          {SKILLS.map((skill) => (
-            <button
-              className="wb-ai-section-row"
-              key={skill.label}
-              onClick={() => void send(skill.prompt)}
-              type="button"
-            >
-              {skill.label}
-            </button>
-          ))}
+          <div className="wb-ai-page-body">
+            {openSection === "sessions" ? (
+              sessions.length === 0 ? (
+                <div className="wb-ai-page-empty">
+                  <History size={20} aria-hidden="true" />
+                  <p>No saved sessions yet — chats save automatically.</p>
+                </div>
+              ) : (
+                <div className="wb-ai-card-list">
+                  {sessions.map((session) => (
+                    <div className={`wb-ai-item${session.id === sessionId ? " current" : ""}`} key={session.id}>
+                      <button
+                        className="wb-ai-item-main"
+                        onClick={() => {
+                          restoreSession(session);
+                          setOpenSection(null);
+                        }}
+                        title={session.title}
+                        type="button"
+                      >
+                        <span className="wb-ai-item-title">{session.title}</span>
+                        <span className="wb-ai-item-meta">
+                          {new Date(session.updatedAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {session.entries.length} messages
+                        </span>
+                      </button>
+                      <button
+                        aria-label={`Delete session: ${session.title}`}
+                        className="wb-icon-btn"
+                        onClick={() => removeSession(session.id)}
+                        title="Delete this session"
+                        type="button"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : openSection === "memory" ? (
+              <>
+                <p className="wb-ai-page-note">
+                  These facts are injected into every chat — the AI reads them before answering. Tell the AI
+                  &quot;মনে রাখো: …&quot;, use /remember, or add one here.
+                </p>
+                {memory.length === 0 ? (
+                  <div className="wb-ai-page-empty">
+                    <BrainCircuit size={20} aria-hidden="true" />
+                    <p>Memory is empty.</p>
+                  </div>
+                ) : (
+                  <div className="wb-ai-card-list">
+                    {memory.map((entry) => (
+                      <div className="wb-ai-item" key={entry.id}>
+                        <div className="wb-ai-item-main static">
+                          <span className="wb-ai-item-text">{entry.text}</span>
+                          <span className="wb-ai-item-meta">
+                            {new Date(entry.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
+                          </span>
+                        </div>
+                        <button
+                          aria-label="Forget this fact"
+                          className="wb-icon-btn"
+                          onClick={() => setMemory(removeMemory(projectId, entry.id))}
+                          title="Forget this fact"
+                          type="button"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="wb-ai-group-label">Add a fact</p>
+                <div className="wb-ai-form">
+                  <textarea
+                    aria-label="New memory fact"
+                    className="wb-ai-form-input wb-ai-form-area"
+                    onChange={(event) => setNewMemoryText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey && newMemoryText.trim()) {
+                        event.preventDefault();
+                        setMemory(addMemory(projectId, newMemoryText));
+                        setNewMemoryText("");
+                      }
+                    }}
+                    placeholder="e.g. Deploy target is Vercel"
+                    rows={2}
+                    value={newMemoryText}
+                  />
+                  <button
+                    className="wb-ai-form-save"
+                    disabled={!newMemoryText.trim()}
+                    onClick={() => {
+                      setMemory(addMemory(projectId, newMemoryText));
+                      setNewMemoryText("");
+                    }}
+                    type="button"
+                  >
+                    <Plus size={13} /> Add to memory
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="wb-ai-group-label">Your skills — click to run</p>
+                {skills.length === 0 ? (
+                  <div className="wb-ai-page-empty">
+                    <Zap size={20} aria-hidden="true" />
+                    <p>No saved skills yet — create one below.</p>
+                  </div>
+                ) : (
+                  <div className="wb-ai-card-list">
+                    {skills.map((skill) => (
+                      <div className="wb-ai-item" key={skill.id}>
+                        <button
+                          className="wb-ai-item-main"
+                          onClick={() => {
+                            setOpenSection(null);
+                            void send(skill.prompt);
+                          }}
+                          title={skill.prompt}
+                          type="button"
+                        >
+                          <span className="wb-ai-item-title">{skill.name}</span>
+                          <span className="wb-ai-item-meta">
+                            {skill.prompt.length > 90 ? `${skill.prompt.slice(0, 90)}…` : skill.prompt}
+                          </span>
+                        </button>
+                        <button
+                          aria-label={`Delete skill: ${skill.name}`}
+                          className="wb-icon-btn"
+                          onClick={() => setSkills(removeSkill(projectId, skill.id))}
+                          title="Delete this skill"
+                          type="button"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="wb-ai-group-label">Create a skill</p>
+                <div className="wb-ai-form">
+                  <label className="wb-ai-form-label" htmlFor="wb-skill-name">
+                    Name
+                  </label>
+                  <input
+                    className="wb-ai-form-input"
+                    id="wb-skill-name"
+                    onChange={(event) => setNewSkillName(event.target.value)}
+                    placeholder="e.g. Fix tests"
+                    value={newSkillName}
+                  />
+                  <label className="wb-ai-form-label" htmlFor="wb-skill-prompt">
+                    Prompt
+                  </label>
+                  <textarea
+                    className="wb-ai-form-input wb-ai-form-area"
+                    id="wb-skill-prompt"
+                    onChange={(event) => setNewSkillPrompt(event.target.value)}
+                    placeholder="What the AI should do when this skill runs…"
+                    rows={4}
+                    value={newSkillPrompt}
+                  />
+                  <button
+                    className="wb-ai-form-save"
+                    disabled={!newSkillName.trim() || !newSkillPrompt.trim()}
+                    onClick={() => {
+                      setSkills(addSkill(projectId, newSkillName, newSkillPrompt));
+                      setNewSkillName("");
+                      setNewSkillPrompt("");
+                    }}
+                    type="button"
+                  >
+                    <Plus size={13} /> Save skill
+                  </button>
+                </div>
+                <p className="wb-ai-group-label">Built-in skills</p>
+                <div className="wb-ai-card-list">
+                  {SKILLS.map((skill) => (
+                    <button
+                      className="wb-ai-item"
+                      key={skill.label}
+                      onClick={() => {
+                        setOpenSection(null);
+                        void send(skill.prompt);
+                      }}
+                      type="button"
+                    >
+                      <span className="wb-ai-item-main">
+                        <span className="wb-ai-item-title">{skill.label}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </div>
-      ) : null}
-
-      <div className="wb-ai-messages" ref={listRef}>
+      ) : (
+        <>
+        <div className="wb-ai-messages" ref={listRef}>
         {isFreshChat ? (
           <div className="wb-ai-welcome">
             <Sparkles aria-hidden="true" className="wb-ai-welcome-icon" size={24} />
@@ -1228,6 +1317,8 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         </div>
       ) : null}
 
+      {/* Composer — chat-only. Page views (sessions / skills / memory)
+          replace the ENTIRE area below the header, composer included. */}
       {attachments.length > 0 ? (
         <div className="wb-ai-attachments">
           {attachments.map((file, index) => (
@@ -1317,6 +1408,8 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         style={{ display: "none" }}
         type="file"
       />
+        </>
+      )}
     </div>
   );
 }
