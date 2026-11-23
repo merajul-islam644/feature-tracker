@@ -487,7 +487,15 @@ export function Workbench({ project, variant = "tests" }: {
                 <div className="wb-ai-proposal-bar">
                   <span className="wb-ai-proposal-label">
                     <Bot size={13} aria-hidden="true" />
-                    {aiProposals.length} AI proposal{aiProposals.length === 1 ? "" : "s"} pending — Review diffs / Accept all in the AI panel
+                    {aiProposals.length} AI proposal{aiProposals.length === 1 ? "" : "s"} pending
+                  </span>
+                  <span className="wb-ai-proposal-actions">
+                    <button className="wb-banner-btn" onClick={() => setAiReviewOpen(true)} title="Open the diff review in the editor" type="button">
+                      Review diffs
+                    </button>
+                    <button className="wb-banner-btn wb-banner-accept" onClick={() => void acceptAllAiProposals()} title="Write every proposed file to disk" type="button">
+                      ✓ Accept all
+                    </button>
                   </span>
                 </div>
               ) : null}

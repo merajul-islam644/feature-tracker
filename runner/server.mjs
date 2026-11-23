@@ -1672,6 +1672,18 @@ app.post("/api/workbench/exec", async (req, res) => {
     res.status(400).json({ error: "root and command are required" });
     return;
   }
+  // Destructive-process guard (mirror of useTestWorkspace → aiExec):
+  // one AI run executed `taskkill /F /PID …` on THIS app's own dev
+  // server thinking it was a zombie. Process management belongs to the
+  // human (Terminal tab); dev-server lifecycle has /api/workbench/dev-server.
+  if (/\b(taskkill|tskill|stop-process|pkill|killall|kill-port|kill(?=\s))/i.test(command)) {
+    res.status(403).json({
+      error: "process_kill_refused",
+      message:
+        "Commands that kill processes are refused on this endpoint. Use /api/workbench/dev-server for dev-server lifecycle; anything else that needs a process killed is the user's call.",
+    });
+    return;
+  }
   const safe = safeResolveUserFolder(root, ".");
   if (!safe) {
     res.status(403).json({ error: "bad root" });

@@ -375,6 +375,18 @@ export function useTestWorkspace(project: Project) {
     if (!root) throw new Error("No workspace folder is open.");
     if (fsaRoot) throw new Error("Browser-picked workspace — exec needs the runner. Reopen via Open Folder's native dialog.");
     if (runnerOnline === false) throw new Error("The local runner is offline — start it, then retry.");
+    // Destructive-process guard — the AI must never kill processes. A
+    // past run executed `taskkill /F /PID …` on what it judged "zombie
+    // vite processes" — those were THIS app's own dev server, and the
+    // session died with the machine's UI on it. Server lifecycle
+    // belongs to the workspace_dev_server tool; process management
+    // belongs to the human (who has the Terminal tab).
+    const KILL_PROCESS_RE = /\b(taskkill|tskill|stop-process|pkill|killall|kill-port|kill(?=\s))/i;
+    if (KILL_PROCESS_RE.test(command)) {
+      throw new Error(
+        `"${command.slice(0, 80)}${command.length > 80 ? "…" : ""}" tries to kill processes — the exec tool refuses that. To manage the project's dev server, use the workspace_dev_server tool (start/stop). If something else truly needs a process killed, ask the user to do it in the Terminal.`,
+      );
+    }
     // Long-lived server guard — refuse commands that START a dev
     // server. Tested per `;`/`&&`-separated segment against its FIRST
     // word only: the old substring regex refused `cat vite.config.js`

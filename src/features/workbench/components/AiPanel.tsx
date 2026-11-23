@@ -327,7 +327,11 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   /** The session restored on mount — once true, saves start flowing. */
   const restoredRef = useRef(false);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  /** Text files attached via the paperclip — their content joins the
+   *  next message as fenced blocks (capped; binary files are refused). */
+  const [attachments, setAttachments] = useState<{ name: string; content: string }[]>([]);
   /** Aborts the in-flight AI turn — the Stop control. */
   const abortRef = useRef<AbortController | null>(null);
   // The Settings-saved AI gateway config — attached to every model call.
@@ -531,8 +535,9 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         push({ role: "assistant", text: "Commands: /help — this list | /new — new chat | /clear | /sessions — saved sessions | /skills — preset skills | /memory — project memory | /remember <fact> — save a memory | /plan — toggle plan mode | /export — download session | /context — toggle file context | /mcp — toggle Playwright tools | /git — git status | /settings — AI settings" });
         return;
       case "new":
+        // No activity line here — the fresh-chat hero IS the "new" state;
+        // an extra entry would break the fresh-chat rendering.
         newChat();
-        push({ role: "activity", text: "New chat session started." });
         return;
       case "clear":
         clearChat();
@@ -609,28 +614,64 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
     return text.trim().slice(0, 600) || "(clean)";
   }
 
+  /** Read the picked files and attach them to the next message. Text
+   *  only — NUL bytes mean binary, and binary content would dump
+   *  garbage into the model's context (refused with a readable line). */
+  async function pickAttachments(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+    const picked: { name: string; content: string }[] = [];
+    for (const file of files) {
+      if (file.size > 100_000) {
+        push({ role: "activity", text: `Skipped ${file.name} — over 100 KB (attach smaller text files).` });
+        continue;
+      }
+      const content = await file.text();
+      if (content.includes("\u0000")) {
+        push({ role: "activity", text: `Skipped ${file.name} — binary files can't be attached (text files only).` });
+        continue;
+      }
+      picked.push({ name: file.name, content });
+    }
+    if (picked.length > 0) {
+      setAttachments((prev) => [...prev, ...picked].slice(0, 5));
+      setOpenSection(null);
+    }
+  }
+
   async function send(prompt: string, opts?: { executingPlan?: boolean }): Promise<void> {
     const text = prompt.trim();
     if (!text || busy) return;
-    if (text.startsWith("/")) {
-      push({ role: "user", text });
-      await handleSlashCommand(text);
-      return;
-    }
     if (!root) {
       push({ role: "assistant", text: "Open a folder first (Explorer → Open Folder) — I work inside it." });
       return;
     }
-    const selected = includeFileContext ? selection() : "";
     setInput("");
     setMenuOpen(false);
+    if (text.startsWith("/")) {
+      // Slash commands drive the UI themselves — no user bubble needed
+      // (a /new bubble would be wiped by the reset anyway, and the old
+      // code left the command text stuck in the input here).
+      await handleSlashCommand(text);
+      return;
+    }
+    const selected = includeFileContext ? selection() : "";
+    // Attachments ride with THIS message only — captured, then cleared.
+    const attached = attachments;
+    if (attached.length > 0) setAttachments([]);
+    const fence = "```";
+    const attachBlock = attached
+      .map((file) => `Attached file: ${file.name}\n${fence}\n${file.content}\n${fence}`)
+      .join("\n\n");
+    const fullPrompt = attachBlock ? `${text}\n\n${attachBlock}` : text;
     push({
       role: "user",
       text: opts?.executingPlan
         ? "▶ Plan approved — execute it"
         : selected
           ? `${text} (on the selected code)`
-          : text,
+          : attached.length > 0
+            ? `${text}\n📎 ${attached.map((file) => file.name).join(", ")}`
+            : text,
     });
     const controller = new AbortController();
     abortRef.current = controller;
@@ -691,7 +732,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
       // AUTO MODE: the AI keeps working across turn bounds — the loop
       // auto-continues until the task reports completion (bounded by a
       // continuation guard so a confused model can't spin forever).
-      let turnPrompt = text;
+      let turnPrompt = fullPrompt;
       let combinedHistory = history.slice(-40);
       let continuation = 0;
       const MAX_CONTINUATIONS = 8;
@@ -800,7 +841,12 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
     push({ role: "activity", text: "Plan discarded — nothing was executed." });
   }
 
-  const showSuggestions = entries.length === 1 && !busy && Boolean(root);
+  /** Fresh chat = only the welcome husk (or nothing at all) — the
+   *  messages area then shows a centered hero instead of a first card. */
+  const isFreshChat =
+    !busy &&
+    (entries.length === 0 ||
+      (entries.length === 1 && entries[0].role === "assistant" && entries[0].text === WELCOME));
   const gatewayReady = Boolean(gatewayConfig?.token);
 
   return (
@@ -1071,7 +1117,18 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
       ) : null}
 
       <div className="wb-ai-messages" ref={listRef}>
-        {entries.map((entry, index) =>
+        {isFreshChat ? (
+          <div className="wb-ai-welcome">
+            <Sparkles aria-hidden="true" className="wb-ai-welcome-icon" size={24} />
+            <p className="wb-ai-welcome-title">What should we work on?</p>
+            <p className="wb-ai-welcome-sub">
+              {root
+                ? "I can read, edit, run and use git across your open folder — just ask in plain language."
+                : "Open a folder first — then I can read, edit and run things in it."}
+            </p>
+          </div>
+        ) : (
+          entries.map((entry, index) =>
           entry.role === "thought" ? (
             // Legacy renderer — saved sessions from before real SSE
             // streaming may carry collapsible thought rows; new turns
@@ -1092,9 +1149,9 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
               {entry.role === "assistant" && entry.streaming ? (
                 <span aria-hidden="true" className="wb-ai-caret" />
               ) : null}
-              {entry.role === "assistant" && entry.text ? (
+              {(entry.role === "assistant" || entry.role === "user") && entry.text ? (
                 <button
-                  aria-label="Copy answer"
+                  aria-label={entry.role === "user" ? "Copy your message" : "Copy answer"}
                   className="wb-icon-btn wb-ai-copy"
                   onClick={() => copyEntry(entry.text)}
                   title="Copy"
@@ -1105,17 +1162,13 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
               ) : null}
             </div>
           ),
-        )}
+          ))
+        }
         {busy ? (
           <p className="wb-ai-activity muted">
             <Bot size={11} className="wb-spin" style={{ verticalAlign: -2 }} />
             {phase === "thinking" ? `Thinking… ${elapsed}s` : `Working… ${elapsed}s`}
             {currentStep ? ` — ${currentStep}` : ""}
-          </p>
-        ) : null}
-        {showSuggestions ? (
-          <p className="wb-ai-capability muted">
-            Ask anything in plain language — I work across your whole folder: reading, editing, running commands, git.
           </p>
         ) : null}
       </div>
@@ -1175,17 +1228,56 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         </div>
       ) : null}
 
+      {attachments.length > 0 ? (
+        <div className="wb-ai-attachments">
+          {attachments.map((file, index) => (
+            <span className="wb-ai-attach-chip" key={`${file.name}-${index}`}>
+              <Paperclip size={11} aria-hidden="true" />
+              {file.name}
+              <button
+                aria-label={`Remove attachment: ${file.name}`}
+                className="wb-icon-btn"
+                onClick={() => setAttachments((prev) => prev.filter((_, entryIndex) => entryIndex !== index))}
+                title="Remove this attachment"
+                type="button"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className="wb-ai-input-row">
-        <input
-          aria-label="Ask the AI"
-          className="wb-ai-input"
+        <button
+          aria-label="Attach a text file"
+          className="wb-icon-btn wb-ai-attach"
           disabled={busy || !root}
-          onChange={(event) => setInput(event.target.value)}
+          onClick={() => fileInputRef.current?.click()}
+          title="Attach a text file — its content joins your message"
+          type="button"
+        >
+          <Paperclip size={14} />
+        </button>
+        <textarea
+          aria-label="Ask the AI"
+          className="wb-ai-input wb-ai-input-area"
+          disabled={busy || !root}
+          onChange={(event) => {
+            setInput(event.target.value);
+            const el = event.target;
+            el.style.height = "auto";
+            el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+          }}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && input.trim()) void send(input);
+            // Enter sends; Shift+Enter is a newline (chat convention).
+            if (event.key === "Enter" && !event.shiftKey && input.trim()) {
+              event.preventDefault();
+              void send(input);
+            }
           }}
           placeholder={root ? "Ask, edit, run — scoped to your open folder…" : "Open a folder to enable the AI…"}
           ref={inputRef}
+          rows={2}
           value={input}
         />
         {busy ? (
@@ -1211,6 +1303,20 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
           </button>
         )}
       </div>
+      <input
+        aria-hidden="true"
+        multiple
+        onChange={(event) => {
+          // Materialize the FileList FIRST — input.value = "" empties the
+          // live list, and the async reader would get nothing.
+          const pickedFiles = Array.from(event.target.files ?? []);
+          event.target.value = "";
+          void pickAttachments(pickedFiles);
+        }}
+        ref={fileInputRef}
+        style={{ display: "none" }}
+        type="file"
+      />
     </div>
   );
 }
