@@ -1,17 +1,17 @@
-// Issues list grouped by verification date, then application (spec
-// section 24): date ▸ application ▸ issues. Every day a verification
-// sees issues gets its own collapsible row named after that date, so a
-// run tomorrow automatically appears under tomorrow's date while older
-// days stay as history above/below it.
+// Issues list grouped by verification date only (user request
+// 2026-11-24 — the application parent rows AND the group-level user
+// picker are gone): every day a verification sees issues gets its own
+// collapsible row named after that date, with the issue cards directly
+// inside it. The application layer used to sit between the two (date ▸
+// application ▸ issues), but issues are already project-scoped, so the
+// app-name rows repeated the scope the user is sitting in. Assignment
+// still exists per-issue through the details drawer — the batch picker
+// that lived on the group headers was removed by the same request.
 
 import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import { Bug, Inbox } from "lucide-react";
 import { IssueCard } from "./IssueCard";
-import { IssueGroup, type MemberOption } from "./IssueGroup";
-import { useUsersByRole } from "@/lib/blocks/users";
-import { useActiveEnv } from "@/contexts/ActiveEnvContext";
-import { groupByApplication } from "@/hooks/useIssueTracker";
+import { IssueGroup } from "./IssueGroup";
 import type { Issue } from "@/types/issue-tracker";
 
 interface Props {
@@ -19,12 +19,6 @@ interface Props {
   selectedIssueId: string | null;
   onSelect: (id: string) => void;
   loading: boolean;
-  /** Adds/removes a member on a batch of issues (useIssueTracker). */
-  onToggleDeveloper?: (
-    issues: Pick<Issue, "id" | "assignedDeveloperIds">[],
-    developerId: string,
-    assigned: boolean,
-  ) => Promise<boolean>;
   /** True when the signed-in user holds the tester role — gates the
    *  per-card Approve button (manual re-test flow). */
   canApprove?: boolean;
@@ -32,25 +26,13 @@ interface Props {
   onApprove?: (id: string) => Promise<boolean>;
 }
 
-// A group's ticked members: those assigned to EVERY issue in the group.
-// A member on only some issues shows unticked — the tick reflects the
-// group as a whole, and toggling re-aligns every issue in it.
-function groupAssignees(list: Issue[]): string[] | undefined {
-  const first = list[0]?.assignedDeveloperIds;
-  if (!first || first.length === 0) return undefined;
-  const shared = first.filter((id) =>
-    list.every((i) => (i.assignedDeveloperIds ?? []).includes(id)),
-  );
-  return shared.length > 0 ? shared : undefined;
-}
-
-// One date row: the calendar day, its display label, the total issue
-// count across applications, and the per-application groups inside.
+// One date row: the calendar day, its display label, and the issues
+// that belong to it.
 interface DateBucket {
   key: string;
   label: string;
   count: number;
-  groups: Map<string, Issue[]>;
+  issues: Issue[];
 }
 
 // The day an issue belongs to: the LAST day a verification saw it
@@ -85,7 +67,7 @@ function bucketByDate(issues: Issue[]): DateBucket[] {
         year: "numeric",
       }),
       count: list.length,
-      groups: groupByApplication(list),
+      issues: list,
     }));
 }
 
@@ -94,62 +76,13 @@ export function IssueList({
   selectedIssueId,
   onSelect,
   loading,
-  onToggleDeveloper,
   canApprove = false,
   onApprove,
 }: Props) {
-  const navigate = useNavigate();
-  const activeEnv = useActiveEnv();
   const totalCount = useMemo(() => issues.length, [issues]);
-  // Member roster for the per-group header dropdown: developers AND
-  // testers, each tagged with their role so same-named members stay
-  // distinguishable. Fetched here once (TanStack caches per role across
-  // the session) so every group shares two calls; `[]` while loading
-  // just hides the dropdown trigger.
-  const developers = useUsersByRole("developer").data ?? [];
-  const testers = useUsersByRole("tester").data ?? [];
-  const members = useMemo<MemberOption[]>(
-    () => [
-      ...developers.map((d) => ({ ...d, role: "developer" })),
-      ...testers.map((t) => ({ ...t, role: "tester" })),
-    ],
-    [developers, testers],
-  );
 
-  // Ticking a member on a group adds them to that group's issues;
-  // unticking removes them. Navigation is NOT done here — the menu stays
-  // open so several members can be ticked, and the scoped view opens on
-  // menu close (last member ticked) via handleNavigateDeveloper. Ticks
-  // land when the (invalidated) issues query refetches.
-  const handleToggleDeveloper = (
-    list: Issue[],
-    member: MemberOption,
-    assigned: boolean,
-  ) => onToggleDeveloper?.(list, member.id, assigned);
-
-  const handleNavigateDeveloper = (member: MemberOption) => {
-    // Issue Tracker is project-scoped — the navigate target carries
-    // the (projectId, envSlug) pair the route needs.
-    // `useActiveEnv()` is the canonical source: it's pushed into the
-    // ActiveEnv context by `ProjectDetailPage` /
-    // `useActiveEnvSelection`, and the Issue Tracker pages read the
-    // same context, so navigating to the same (projectId, envSlug)
-    // keeps the user on the same env they were already viewing.
-    // Off-env (no `activeEnv`), this branch is unreachable — the
-    // Issue Tracker rows are hidden by the sidebar's env-context
-    // gate, and the Issues page itself reads from `useIssueTracker`
-    // which no-ops without an env. Note: the `/issue-tracker`
-    // segment was dropped from the URL on 2026-09-29 per user
-    // request — Issues now lives at `/projects/:id/:env/issues`.
-    const env = activeEnv;
-    if (!env) return;
-    navigate(
-      `/projects/${env.projectId}/${env.envSlug}/issues?developer=${encodeURIComponent(member.id)}`,
-    );
-  };
-
-  // date ▸ application ▸ issues. Each verification day gets its own
-  // collapsible row; applications group inside it as before.
+  // date ▸ issues — one collapsible row per verification day, cards
+  // directly inside (no application layer, no group user picker).
   const dateBuckets = useMemo(() => bucketByDate(issues), [issues]);
 
   if (loading && issues.length === 0) {
@@ -176,11 +109,10 @@ export function IssueList({
     );
   }
 
-  // One collapsible row per verification date (chevron + date + count —
-  // the same header idiom as the application groups), applications
-  // nested inside. Only the most recent day starts expanded: it's what
-  // the user just ran; older days read as folded history. No members
-  // dropdown on date rows — assignment stays a per-application action.
+  // One collapsible row per verification date (chevron + date + count),
+  // issue cards nested directly. Only the most recent day starts
+  // expanded: it's what the user just ran; older days read as folded
+  // history.
   return (
     <div className="space-y-3">
       {dateBuckets.map((day, dayIndex) => (
@@ -190,32 +122,17 @@ export function IssueList({
           count={day.count}
           defaultOpen={dayIndex === 0}
         >
-          {Array.from(day.groups.entries()).map(([appName, list]) => (
-            <li key={appName}>
-              <IssueGroup
-                title={appName}
-                count={list.length}
-                members={members}
-                assignedDeveloperIds={groupAssignees(list)}
-                onToggleDeveloper={(member, assigned) =>
-                  void handleToggleDeveloper(list, member, assigned)
+          {day.issues.map((issue) => (
+            <li key={issue.id}>
+              <IssueCard
+                issue={issue}
+                onOpen={onSelect}
+                selected={selectedIssueId === issue.id}
+                canApprove={canApprove}
+                onApprove={
+                  onApprove ? (id) => void onApprove(id) : undefined
                 }
-                onNavigateDeveloper={handleNavigateDeveloper}
-              >
-                {list.map((issue) => (
-                  <li key={issue.id}>
-                    <IssueCard
-                      issue={issue}
-                      onOpen={onSelect}
-                      selected={selectedIssueId === issue.id}
-                      canApprove={canApprove}
-                      onApprove={
-                        onApprove ? (id) => void onApprove(id) : undefined
-                      }
-                    />
-                  </li>
-                ))}
-              </IssueGroup>
+              />
             </li>
           ))}
         </IssueGroup>

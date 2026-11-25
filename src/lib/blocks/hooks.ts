@@ -9,6 +9,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -6168,22 +6169,36 @@ export function useIssueTrackerIssues(opts?: {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   const roles = currentUser?.roles ?? [];
-  const isTester = roles.includes("tester");
-  const isDeveloper = roles.includes("developer");
-  // Only these two roles need the cross-user fetch; manager keeps the
-  // tight wire filter.
-  const fetchUnscoped = isTester || isDeveloper;
+  const isManager = roles.includes("manager");
   // Env scoping — same shape as targets / secrets: an Issue row carries
   // its own projectId / envSlug, so the filter sits on top of the wire
-  // fetch whether it's scoped by CreatedBy or unscoped. Disabled
-  // outside an env context.
+  // fetch. Disabled outside an env context.
   const activeEnv = useActiveEnv();
+  // Assignment visibility (user request 2026-11-25): a member sees a
+  // project's issues only when that project sits on their Members-page
+  // card; managers bypass — they're the ones doing the assigning.
+  // While the assignment lookup is still loading we fail OPEN so the
+  // surface isn't flashed empty before the settled state arrives. The
+  // flag rides the queryKey so a resolved lookup (or a Members-page
+  // edit) swaps the cached variant and refetches.
+  const assignmentsQuery = useMemberProjectAssignments();
+  const assignedProjectIds = useMemo(
+    () =>
+      assignmentsQuery.data?.find((a) => a.userId === userId)?.projectIds ??
+      [],
+    [assignmentsQuery.data, userId],
+  );
+  const canSeeEnvIssues =
+    isManager ||
+    assignmentsQuery.isLoading ||
+    Boolean(activeEnv && assignedProjectIds.includes(activeEnv.projectId));
   return useQuery({
     queryKey: [
       ...queryKeys.issueTrackerIssues(userId),
       roles.join(","),
       activeEnv?.projectId ?? "",
       activeEnv?.envSlug ?? "",
+      canSeeEnvIssues ? "assigned" : "unassigned",
     ],
     enabled: Boolean(userId && activeEnv) && (opts?.enabled ?? true),
     // See `useIssueTrackerTargets` — same rationale. The IssueTracker
@@ -6194,33 +6209,29 @@ export function useIssueTrackerIssues(opts?: {
     // the moment a row is added or a status changes.
     staleTime: 30_000,
     queryFn: async () => {
-      const envFilter = {
-        projectId: activeEnv!.projectId,
-        envSlug: activeEnv!.envSlug,
-      };
-      const raw = fetchUnscoped
-        ? await issuesCollection.list({
-            filter: envFilter,
-            pageNo: 1,
-            pageSize: 200,
-            sort: { detectedAt: -1 },
-          })
-        : await issuesCollection.list({
-            filter: { ...createdByFilter(userId), ...envFilter },
-            pageNo: 1,
-            pageSize: 200,
-            sort: { detectedAt: -1 },
-          });
-      const rows = unwrapPaged<unknown>(raw).items.map((i) =>
+      if (!canSeeEnvIssues) {
+        // Not assigned (non-manager): the Issues page shows its own
+        // "not assigned" card — the query contributes nothing.
+        return [];
+      }
+      // Assigned members and managers see EVERY issue in the env. The
+      // pre-assignment layers — the `CreatedBy: me` wire filter for
+      // roles outside tester/developer, and the assignedToMe +
+      // approvedById post-filter for tester/developer (the old
+      // work-queue triage model) — are superseded by the
+      // project-assignment rule above and deliberately gone.
+      const raw = await issuesCollection.list({
+        filter: {
+          projectId: activeEnv!.projectId,
+          envSlug: activeEnv!.envSlug,
+        },
+        pageNo: 1,
+        pageSize: 200,
+        sort: { detectedAt: -1 },
+      });
+      return unwrapPaged<unknown>(raw).items.map((i) =>
         toIssue(i as Parameters<typeof toIssue>[0]),
       );
-      if (!fetchUnscoped) return rows;
-      const assignedToMe = rows.filter((i) =>
-        (i.assignedDeveloperIds ?? []).includes(userId),
-      );
-      return isTester
-        ? assignedToMe
-        : assignedToMe.filter((i) => !!i.approvedById);
     },
   });
 }
