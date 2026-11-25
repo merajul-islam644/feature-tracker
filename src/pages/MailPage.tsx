@@ -51,6 +51,26 @@ function fullDate(iso: string) {
   return isValid(d) ? d.toLocaleString() : "";
 }
 
+// Emailer-convention list time: today shows the clock time, this year
+// shows the short date, anything older shows the numeric date. Long
+// form stays available via the `title` tooltip (fullDate).
+function listTime(iso: string) {
+  const d = new Date(iso);
+  if (!isValid(d)) return "";
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString([], { day: "numeric", month: "short" });
+  }
+  return d.toLocaleDateString([], {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+  });
+}
+
 // The person the row/reader is "about": the sender in the inbox, the
 // recipient in Sent. Drives both the avatar and the name label.
 //
@@ -391,12 +411,14 @@ export function MailPage() {
   const [bridgeAddress, setBridgeAddress] = useState<string | null>(null);
   const registerAddress = useRegisterMailAddress();
 
-  // Register the mailbox the first time the dialog opens — the bridge
-  // creates (or reuses) a real routable account and mirrors it into
-  // blx_MailAddresses. The "idle" guard means an error waits for the
-  // Retry button instead of loop-firing.
+  // Register the mailbox on page mount — not only when the dialog
+  // opens — so the sidebar can surface the address immediately; the
+  // dialog reuses the same state. The bridge creates (or reuses) a
+  // real routable account and mirrors it into blx_MailAddresses. The
+  // "idle" guard means an error waits for the Retry button instead of
+  // loop-firing.
   useEffect(() => {
-    if (!emailOpen || registerState !== "idle" || !currentUser) {
+    if (registerState !== "idle" || !currentUser) {
       return;
     }
     setRegisterState("pending");
@@ -411,7 +433,7 @@ export function MailPage() {
       },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [emailOpen, registerState, currentUser]);
+  }, [registerState, currentUser]);
 
   const allRows = folder === "inbox" ? inbox.data ?? [] : sent.data ?? [];
   const loading = folder === "inbox" ? inbox.isLoading : sent.isLoading;
@@ -460,6 +482,19 @@ export function MailPage() {
   function removeMail(mail: MailMessage) {
     if (selectedId === mail.id) setSelectedId(null);
     deleteMail.mutate(mail);
+  }
+
+  // Reply prefills the compose dialog with the thread's counterpart and
+  // a Re:-stemmed subject (existing Re: stays single). Body starts empty
+  // — quoting the original is the reader's job, not an assumption.
+  function openReply() {
+    if (!selected) return;
+    const peer = counterpart(selected, folder);
+    setToIds(peer.id ? [peer.id] : []);
+    const base = selected.subject?.trim() ?? "";
+    setSubject(/^re\s*:/i.test(base) ? base : `Re: ${base}`);
+    setBody("");
+    setComposeOpen(true);
   }
 
   async function handleSend() {
@@ -537,9 +572,16 @@ export function MailPage() {
             <Mail className="h-[18px] w-[18px]" aria-hidden="true" />
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-[17px] font-bold tracking-tight text-foreground">
-              {t("mail.title", "Mail")}
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="truncate text-[17px] font-bold tracking-tight text-foreground">
+                {t("mail.title", "Mail")}
+              </h1>
+              {unreadCount > 0 && (
+                <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-400">
+                  {unreadCount} {t("mail.unread", "unread")}
+                </span>
+              )}
+            </div>
             <p className="hidden text-[11px] text-muted-foreground sm:block">
               {t("mail.subtitle", "Messages between you and your teammates.")}
             </p>
@@ -576,8 +618,11 @@ export function MailPage() {
       </div>
 
       {/* Three-pane body: folders | list | reader. On phones only one of
-          list/reader is shown — the back button toggles between them. */}
-      <div className="grid min-h-0 flex-1 md:grid-cols-[200px_minmax(320px,400px)_1fr]">
+          list/reader is shown — the back button toggles between them.
+          border-b + border-r close the frame so the panes don't visually
+          bleed into whatever sits around the page — same light edge on
+          all four sides. */}
+      <div className="grid min-h-0 flex-1 border-b border-r border-border-subtle md:grid-cols-[200px_minmax(320px,400px)_1fr]">
         {/* Sidebar — folders. */}
         <aside className="hidden min-h-0 border-r border-border-subtle bg-surface-subtle/40 p-3 md:block">
           <Button
@@ -611,32 +656,67 @@ export function MailPage() {
                 >
                   <Icon className="h-4 w-4" aria-hidden="true" />
                   <span className="flex-1">{f.label}</span>
-                  {f.count > 0 && (
-                    <span
-                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none ${
-                        active
-                          ? "bg-indigo-500 text-white"
-                          : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      {f.count}
-                    </span>
-                  )}
+                  {/* Inbox counts what matters — unread. Sent shows its
+                      total when one exists. Gmail-style: the badge is
+                      the thing you act on, not bookkeeping. */}
+                  {(() => {
+                    const n = f.id === "inbox" ? unreadCount : f.count;
+                    if (n <= 0) return null;
+                    return (
+                      <span className="rounded-full bg-indigo-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+                        {n}
+                      </span>
+                    );
+                  })()}
                 </button>
               );
             })}
           </nav>
-          <p className="mt-6 flex items-center gap-1.5 px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            <span className="inline-block h-1 w-1 rounded-full bg-indigo-400" aria-hidden="true" />
-            {t("mail.labels", "Tips")}
-          </p>
-          <div className="mx-2 mt-1 rounded-lg border border-dashed border-border-subtle bg-background/40 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
-            <p className="line-clamp-2">
-              {t(
-                "mail.tips",
-                "Get Your Email is your real address. Outsiders can mail you there — it lands here.",
-              )}
+          {/* Address card — the user's real, routable inbound address.
+              Replaces the old tips box: this is the one fact that makes
+              the page an emailer rather than an internal form. Click to
+              copy; unregistered / offline states degrade to one link. */}
+          <div className="mx-2 mt-4 rounded-lg border border-border-subtle bg-background/60 px-3 py-2.5">
+            <p className="flex items-center gap-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <AtSign
+                className="h-3 w-3 text-indigo-400"
+                aria-hidden="true"
+              />
+              {t("mail.yourAddress", "Your address")}
             </p>
+            {bridgeAddress ? (
+              <button
+                type="button"
+                onClick={() => void copyAddress()}
+                title={bridgeAddress}
+                className="mt-1 flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-surface-subtle"
+              >
+                <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
+                  {bridgeAddress}
+                </code>
+                {copied ? (
+                  <Check
+                    className="h-3 w-3 shrink-0 text-success"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Copy
+                    className="h-3 w-3 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setEmailOpen(true)}
+                className="mt-1 block w-full text-left text-[11px] text-indigo-600 hover:underline dark:text-indigo-400"
+              >
+                {registerState === "error"
+                  ? t("mail.getEmail.offline", "Bridge offline — retry")
+                  : t("mail.getEmail.get", "Get your email")}
+              </button>
+            )}
           </div>
         </aside>
 
@@ -738,12 +818,20 @@ export function MailPage() {
                     <button
                       type="button"
                       onClick={() => openMail(m)}
-                      className={`flex h-[5.5rem] w-full items-start gap-3 overflow-hidden rounded-lg px-3 py-2.5 text-left transition-colors ${
+                      className={`relative flex h-[5.5rem] w-full items-start gap-3 overflow-hidden rounded-lg px-3 py-2.5 text-left transition-colors ${
                         isSelected
                           ? "bg-indigo-50/70 ring-1 ring-indigo-200/60 dark:bg-indigo-500/10 dark:ring-indigo-400/30"
                           : "hover:bg-surface-subtle"
                       }`}
                     >
+                      {/* Unread accent bar — the classic emailer affordance;
+                          readable peripherally, no badge squinting. */}
+                      {isUnread && (
+                        <span
+                          aria-hidden="true"
+                          className="absolute inset-y-2.5 left-0 w-[3px] rounded-full bg-indigo-500"
+                        />
+                      )}
                       <UserAvatar
                         userId={peer.id || undefined}
                         name={peer.name}
@@ -762,13 +850,14 @@ export function MailPage() {
                             {peer.name}
                           </span>
                           <span
-                            className={`shrink-0 text-[11px] transition-opacity ${
+                            title={fullDate(m.createdAt)}
+                            className={`shrink-0 text-[11px] tabular-nums transition-opacity ${
                               isUnread
-                                ? "font-medium text-indigo-600 dark:text-indigo-400"
+                                ? "font-semibold text-indigo-600 dark:text-indigo-400"
                                 : "text-muted-foreground"
                             } group-hover:opacity-0`}
                           >
-                            {relativeTime(m.createdAt)}
+                            {listTime(m.createdAt)}
                           </span>
                         </span>
                         <span
@@ -897,18 +986,32 @@ export function MailPage() {
                             : t("mail.to", "To")}
                         </span>
                       </div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {(() => {
-                          if (folder === "inbox" && selected.fromEmail) {
-                            return selected.fromEmail;
-                          }
-                          if (selected.toName && selected.toName.includes("@")) {
-                            const m = /<([^>]+)>/.exec(selected.toName);
-                            if (m) return m[1];
-                            return selected.toName;
-                          }
-                          return t("mail.peerSubtitle", "Workspace member");
-                        })()}
+                      <div className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+                        <span className="truncate">
+                          {(() => {
+                            if (folder === "inbox" && selected.fromEmail) {
+                              return selected.fromEmail;
+                            }
+                            if (selected.toName && selected.toName.includes("@")) {
+                              const m = /<([^>]+)>/.exec(selected.toName);
+                              if (m) return m[1];
+                              return selected.toName;
+                            }
+                            return t("mail.peerSubtitle", "Workspace member");
+                          })()}
+                        </span>
+                        {/* "to me" — the Gmail-style second line that
+                            confirms whose copy this is without opening
+                            the address book. */}
+                        {folder === "inbox" && (
+                          <span className="shrink-0">
+                            ·{" "}
+                            {selected.userId === currentUser?.id
+                              ? t("mail.toMe", "to me")
+                              : cleanDisplayName(selected.toName) ||
+                                t("mail.peerSubtitle", "recipient")}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -940,15 +1043,10 @@ export function MailPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setComposeOpen(true)}
-                  disabled={folder !== "inbox"}
-                  title={
-                    folder === "inbox"
-                      ? t("mail.reply", "Reply")
-                      : t("mail.replyHint", "Open a new message to reply")
-                  }
+                  onClick={openReply}
+                  title={t("mail.reply", "Reply")}
                 >
-                  <SendHorizontal className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                  <SendHorizontal className="mr-1.5 h-3.5 w-3.5 rotate-180" aria-hidden="true" />
                   {t("mail.reply", "Reply")}
                 </Button>
                 <Button

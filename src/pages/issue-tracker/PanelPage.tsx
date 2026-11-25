@@ -1,55 +1,80 @@
 // Workspace surface — the body of the `/panel` route.
 //
-// What used to live here was the Playwright authoring surface (see
-// git history for `PlaywrightEditorPanel.tsx`). The user replaced
-// that with a VS Code-style file/folder management system: pick a
-// local folder, browse its tree, edit files, save back to disk.
-// All the actual workspace primitives (folder picker, file CRUD,
-// tree refresh) live in `useDevServer()`; this page is the page-
-// level wrapper that ties the heading row to the workspace body.
+// What used to live here was a custom CodeMirror workspace backed by
+// the local dev-server (see git history for `WorkspacePage.tsx`). The
+// user retired that: this page now hosts the SAME workbench feature the
+// `/tests` route hosts (`features/workbench` — one engine everywhere),
+// while keeping the Workspace page's own design: the FolderTree icon
+// badge + title + env chip + subtitle header, in the app's tokens. The
+// folder pick, editing, terminal, git and runs all come from the
+// workbench's runner/FSA transports — no local dev-server involved.
 
-import type { ReactNode } from "react";
-import { useAuth } from "@/hooks/useAuth";
 import { useActiveEnv } from "@/contexts/ActiveEnvContext";
-import { DevServerProvider, useDevServer } from "@/contexts/DevServerContext";
-import { WorkspacePage } from "@/components/workspace/WorkspacePage";
+import { useWorkbenchProject } from "@/shared/useWorkbenchProject";
 import { BackToProjectsLink } from "@/components/layout/BackToProjectsLink";
+import { EnvHeaderChip } from "@/components/project/EnvHeaderChip";
+import { ErrorState } from "@/components/ui/error-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useT } from "@/lib/blocks/i18n";
+import { Workbench } from "@/features/workbench/Workbench";
 
-// Mount the dev-server sandbox context unconditionally so the
-// workspace primitives are available regardless of active-env
-// status. The provider returns a null workspace when the
-// `(user, project, env)` triple is empty, and the workspace page
-// renders an "Open folder" empty-state in that case.
-function DevServerWrapper({ children }: { children: ReactNode }) {
-  const { currentUser } = useAuth();
+export function PanelPage() {
+  const t = useT();
   const activeEnv = useActiveEnv();
-  return (
-    <DevServerProvider
-      userId={currentUser?.id ?? ""}
-      projectId={activeEnv?.projectId ?? ""}
-      envSlug={activeEnv?.envSlug ?? ""}
-    >
-      {children}
-    </DevServerProvider>
-  );
-}
+  const resolution = useWorkbenchProject();
 
-function PanelBody() {
-  // Workspace editor is always-on now (the previous VITE_USE_DEV_SERVER
-  // build-time flag was removed in src/services/devServerApi.ts).
-  void useDevServer();
+  if (!activeEnv || resolution.state === "no-env") {
+    return (
+      <div className="space-y-6">
+        <BackToProjectsLink />
+        <ErrorState
+          title={t("issueTracker.workspace.title", "Workspace")}
+          message="Open a project environment first — the workspace is scoped to the active project."
+        />
+      </div>
+    );
+  }
+
+  if (resolution.state === "loading") {
+    return (
+      <div className="space-y-6">
+        <BackToProjectsLink />
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-[560px] w-full" />
+      </div>
+    );
+  }
+
+  if (resolution.state === "error") {
+    return (
+      <div className="space-y-6">
+        <BackToProjectsLink />
+        <ErrorState
+          title={t("issueTracker.workspace.title", "Workspace")}
+          message="The active project could not be loaded."
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <BackToProjectsLink />
-      <WorkspacePage />
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-foreground">
+            {t("issueTracker.workspace.title", "Workspace")}
+          </h1>
+          <EnvHeaderChip />
+        </div>
+        <p className="text-sm text-muted-foreground">
+          {t(
+            "issueTracker.workspace.subtitle",
+            "Open a folder and edit files like VS Code. Changes autosave to disk.",
+          )}
+        </p>
+      </div>
+      <Workbench project={resolution.project} variant="workspace" />
     </div>
-  );
-}
-
-export function PanelPage() {
-  return (
-    <DevServerWrapper>
-      <PanelBody />
-    </DevServerWrapper>
   );
 }

@@ -44,10 +44,9 @@
 //
 // Filter the result to the roles you care about (`developer`, `tester`),
 // copy the `itemId` / `firstName` / `lastName` / `email` triplet into
-// `HARDCODED_USERS` below. Mirrors the maintenance pattern of
-// `RECIPIENTS_BY_ROLE` in `notifier.ts` — both exist because browser-
-// side callers can't *guarantee* an IAM list response, but for users
-// the live API path is now the normal case.
+// `HARDCODED_USERS` below. This roster also backs the notifier's
+// recipient fallback — see `fetchUserIdsByRoles` at the bottom of this
+// file.
 
 import { useQuery } from "@tanstack/react-query";
 import { blocksClient } from "./client";
@@ -78,6 +77,10 @@ interface RawUser {
   name?: string;
   /** IAM roles — shape varies by tenant (strings or objects). */
   roles?: unknown;
+  /** `false` on deactivated accounts — they must not receive
+   *  notifications or appear in assign dropdowns (the hardcoded roster
+   *  always excluded them; the live path honours the same rule). */
+  active?: boolean;
 }
 
 interface RawUsersResponse {
@@ -157,16 +160,21 @@ export function useUsersByRole(role: string) {
     gcTime: 10 * 60 * 1000,
     queryFn: async () => {
       try {
-        // The SDK's POST-shaped `list` carries the filter in the body.
-        // Some tenants accept `filter: { roles: role }`, some accept
-        // `filter: { role }` — sending both is harmless (the gateway
-        // ignores unknown fields) but the canonical shape is `roles`.
+        // The roles-filter shape is unusable on this tenant: the string
+        // form `filter: { roles: role }` 400s ("could not be converted
+        // to List<String>") and the array form matches 0 rows (both
+        // verified 2026-11-21 via `blocks iam users list --body`). So
+        // fetch the roster UNFILTERED and match the role locally — the
+        // same approach `fetchUserIdsByRoles` uses for the notifier.
         const raw = (await blocksClient.iam.users.list({
           pageNo: 1,
           pageSize: 200,
-          filter: { roles: role },
         })) as unknown;
         const live = unwrapUsers(raw)
+          .filter(
+            (u) =>
+              u.active !== false && allRoleStrings(u.roles).includes(role),
+          )
           .map(toUserOption)
           .filter((u): u is UserOption => u !== null)
           // Stable alphabetical order — keeps the dropdown predictable
@@ -252,29 +260,71 @@ export function useAllJoinedUsers() {
 // Master tenant roster — single source of truth for every user lookup
 // in the app. Captured from `blocks iam users list --project
 // Dd333bf2f23274fb481e4f363ee44b28b --page-size 100 --json` on
-// 2026-09-19. Update this list (or re-run the CLI and paste the
+// 2026-11-21. Update this list (or re-run the CLI and paste the
 // result back) whenever anyone is added or removed from the tenant.
 // Used to build:
 //
 //   - `HARDCODED_USERS_BY_ROLE` — feeds `useUsersByRole(role)` as the
-//     fallback when `iam.users.list` 403s from the browser.
+//     fallback when `iam.users.list` fails from the browser.
 //   - `HARDCODED_USER_BY_ID` — feeds `lookupUserById(id)` so any
 //     user-reference field in the app (Created/Updated by, Assigned
 //     Developer, Assigned QA, ...) can render the friendly name +
 //     email instead of the raw OIDC `sub`.
 //
-// Mirrors the maintenance pattern of `RECIPIENTS_BY_ROLE` in
-// `notifier.ts` — both exist because the browser session can't
-// enumerate IAM users on this tenant.
+// The live IAM call is the normal path everywhere now; this roster
+// exists only as the offline / permission-loss safety net, shared by
+// the notifier's recipient fallback via `fetchUserIdsByRoles` (below).
 //
 // `role` is the IAM `roles.default` triplet folded to a single
 // string for indexing; the dropdown hook only queries `developer` /
 // `tester` today but the master list keeps the manager too so id→name
 // resolution works for Created/Updated-by audit fields regardless of
 // the actor's role.
+//
+// Only ACTIVE accounts holding an app role are listed. Skipped from
+// the 2026-11-21 capture: `firmb-signup@` (no app role),
+// `policy-test@` (deactivated, clouduser only), `meraz-zoarder1@` (no
+// app role), and `hafijulzoarder@gmail.com` (developer role but
+// inactive / PendingVerification — the same exclusion the earlier
+// roster made).
 const HARDCODED_USERS: readonly (UserOption & {
   role: "developer" | "tester" | "manager";
 })[] = [
+  {
+    id: "abc7d502-5494-4b6c-9d82-1dd7a0acaa34",
+    role: "tester",
+    name: "Zaber Ahmed",
+    email: "tester@yopmail.com",
+    displayName: "Zaber Ahmed (tester)",
+  },
+  {
+    id: "db4bca2e-459d-4bd5-8c65-4700ca858084",
+    role: "tester",
+    name: "Meraj Zoarder",
+    email: "meraz-zoarder14@yopmail.com",
+    displayName: "Meraj Zoarder (meraz-zoarder14)",
+  },
+  {
+    id: "5cd278c6-4e70-45d4-a19b-622246cb2d38",
+    role: "developer",
+    name: "Shameem Alom",
+    email: "developer@yopmail.com",
+    displayName: "Shameem Alom (developer)",
+  },
+  {
+    id: "d39eb926-6c04-461c-8833-6ed00189a520",
+    role: "developer",
+    name: "Hafizul Zoarder",
+    email: "hafizulzoarder@gmail.com",
+    displayName: "Hafizul Zoarder (hafizulzoarder)",
+  },
+  {
+    id: "4832284e-9219-42d5-bd2a-4d60dd30a3e8",
+    role: "developer",
+    name: "Meraj Zoarder",
+    email: "meraz-zoarder13@yopmail.com",
+    displayName: "Meraj Zoarder (meraz-zoarder13)",
+  },
   {
     id: "9890d32d-c956-429d-88d7-cce465824fe5",
     role: "developer",
@@ -283,23 +333,11 @@ const HARDCODED_USERS: readonly (UserOption & {
     displayName: "Meraj Zoarder (meraz-zoarder15)",
   },
   {
-    // Invited 2026-09-19 — added to the safety-net roster so the
-    // dropdown still shows this user even if the live IAM call is
-    // ever blocked. With "View Users" permission now granted to the
-    // manager role, the SDK call is the source of truth and this
-    // entry is only consulted when the API call fails.
-    id: "4832284e-9219-42d5-bd2a-4d60dd30a3e8",
-    role: "developer",
-    name: "Meraj Zoarder",
-    email: "meraz-zoarder13@yopmail.com",
-    displayName: "Meraj Zoarder (meraz-zoarder13)",
-  },
-  {
-    id: "db4bca2e-459d-4bd5-8c65-4700ca858084",
-    role: "tester",
-    name: "Meraj Zoarder",
-    email: "meraz-zoarder14@yopmail.com",
-    displayName: "Meraj Zoarder (meraz-zoarder14)",
+    id: "1c0abd8b-b531-4d47-b401-2097cb9af234",
+    role: "manager",
+    name: "Mostafizur Rahman",
+    email: "manager@yopmail.com",
+    displayName: "Mostafizur Rahman (manager)",
   },
   {
     id: "41a74053-2c79-4fd5-aab3-90abce656a1d",
@@ -363,4 +401,91 @@ export function lookupRoleById(
 ): "developer" | "tester" | "manager" | undefined {
   if (!id) return undefined;
   return HARDCODED_USERS.find((u) => u.id === id)?.role;
+}
+
+// --- Notifier recipient resolution (plain async — hook-free) ----------------
+//
+// `notifyRole` in `notifier.ts` resolves role → recipient ids through
+// this function at each notification event, so a member added to (or
+// removed from) a role in IAM starts/stops receiving broadcasts without
+// a code edit or redeploy. One unfiltered `iam.users.list` call covers
+// every requested role — the per-role `filter: { roles }` shape matches
+// one role at a time and would fire N calls for a
+// `["tester", "developer"]` broadcast.
+//
+// Semantics deliberately mirror `useUsersByRole`, with one twist:
+//   * a failed read (403 / network / revoked "View Users" grant) falls
+//     back to `HARDCODED_USERS_BY_ROLE` so events still reach the last
+//     known roster;
+//   * a successful read that matches at least one member of ANY
+//     requested role wins as-is;
+//   * a successful read that matches NO member of any requested role
+//     ALSO falls back — an empty result is indistinguishable from a
+//     silently-mismatched response shape, and for a notification
+//     surface dropping every recipient is the worse failure mode.
+//
+// A 60-second module-level TTL cache keeps rapid back-to-back events
+// (e.g. one action that triggers project + environment notifications)
+// from firing one IAM round-trip each. Deliberately NOT TanStack Query:
+// this runs inside fire-and-forget mutation callbacks, outside
+// component lifecycle, where a roster stale by a minute is harmless.
+
+const RECIPIENT_CACHE_TTL_MS = 60_000;
+let recipientCache: { key: string; ids: string[]; at: number } | null = null;
+
+export async function fetchUserIdsByRoles(
+  roles: readonly string[],
+): Promise<string[]> {
+  const key = [...roles].sort().join(",");
+  if (
+    recipientCache &&
+    recipientCache.key === key &&
+    Date.now() - recipientCache.at < RECIPIENT_CACHE_TTL_MS
+  ) {
+    return recipientCache.ids;
+  }
+
+  const wanted = new Set(roles);
+  let ids: string[] | null = null;
+  try {
+    const raw = (await blocksClient.iam.users.list({
+      pageNo: 1,
+      pageSize: 200,
+    })) as unknown;
+    ids = unwrapUsers(raw)
+      .map((u) => {
+        const option = toUserOption(u);
+        return option &&
+          u.active !== false &&
+          allRoleStrings(u.roles).some((r) => wanted.has(r))
+          ? option.id
+          : null;
+      })
+      .filter((id): id is string => id !== null);
+  } catch {
+    // 403 / 401 / network — fall through to the safety-net roster.
+    ids = null;
+  }
+
+  if (ids === null || ids.length === 0) {
+    ids = Array.from(
+      new Set(
+        roles.flatMap((r) => HARDCODED_USERS_BY_ROLE[r]?.map((u) => u.id) ?? []),
+      ),
+    );
+  }
+
+  recipientCache = { key, ids, at: Date.now() };
+  return ids;
+}
+
+// Collect EVERY role string a user holds — not just the first, because
+// `notifyRole` matches broadcasts against the full role set. Same shape
+// variance as `firstRoleString` above: plain strings, arrays, or
+// objects keyed by name (`roles: { default: ["developer"] }`).
+function allRoleStrings(v: unknown): string[] {
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
+  if (Array.isArray(v)) return v.flatMap(allRoleStrings);
+  if (v && typeof v === "object") return Object.values(v).flatMap(allRoleStrings);
+  return [];
 }

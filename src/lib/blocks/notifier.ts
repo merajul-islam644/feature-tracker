@@ -1,12 +1,12 @@
 // Thin wrapper around the custom `Notification` data-collection so call
-// sites stay tidy. Replaces the previous platform-notifier path; the
-// historical context for that decision lives in
-// `docs/platform-bug-notifier-enumeration.md`.
+// sites stay tidy.
 //
 // Two surfaces live here:
 //
 //   1. `notifyRole(role, payload)` — fire-and-forget wrapper that writes
-//      one `Notification` row per recipient in `RECIPIENTS_BY_ROLE`.
+//      one `Notification` row per recipient, resolved LIVE from IAM at
+//      each event via `fetchUserIdsByRoles` in `users.ts` (a hardcoded
+//      roster lives there as the safety-net fallback).
 //      Each row carries the full denormalized payload (projectName,
 //      featureName, flowName, actorName, etc.) so the inbox can render
 //      a title/body without a follow-up read. Errors are swallowed
@@ -62,6 +62,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { blocksClient } from "./client";
+import { fetchUserIdsByRoles } from "./users";
 import {
   notificationsCollection,
   type CloudNotification,
@@ -80,54 +81,19 @@ export interface NotifyRolePayload {
   [key: string]: unknown;
 }
 
-// Configuration name was used by the old `blocksClient.notifier.notify`
-// path. Replaced by the data-collection write; the constant is kept as
-// a historical pointer so anyone grepping the old name lands here.
-
-// Notification recipients, indexed by IAM role. `notifyRole(role)`
-// looks the role up here and targets the resulting user ids
-// directly. `notifyRole` writes one `Notification` row per user id, so
-// each recipient can filter their inbox with
+// Recipients are NOT hardcoded here anymore — `notifyRole` resolves
+// role → user ids live from IAM via `fetchUserIdsByRoles` (users.ts),
+// so membership changes take effect within that resolver's 60-second
+// cache window with no code edit or redeploy. The old
+// `RECIPIENTS_BY_ROLE` map and its server-side-proxy TODO are retired:
+// the "View Users" permission has been granted to every app role
+// (manager 2026-09-19, developer + tester 2026-09-23), so the browser
+// session CAN enumerate the roster. The per-user inbox isolation is
+// unchanged — `notifyRole` still writes one `Notification` row per
+// user id so each recipient filters their inbox with
 // `filter: { userId: <me> }` (matches the `DirectMessage.recipientId`
 // and `CallSignal.recipientId` pattern — workspace-readable collection,
 // client-side per-user isolation).
-//
-// Hardcoded map: `iam.users.list({ filter: { roles: role } })` returns
-// 403 from a browser session — the endpoint is admin-only. Verified via
-// `blocks iam users list` on 2026-09-24 — the tenant has:
-//   - 1 active tester:   Meraj Zoarder (meraz-zoarder14@yopmail.com,
-//     db4bca2e-459d-4bd5-8c65-4700ca858084)
-//   - 3 active developers: Hafizul Zoarder (d39eb926-…), Meraj
-//     Zoarder meraz-zoarder13 (4832284e-…), Meraj Zoarder
-//     meraz-zoarder15 (9890d32d-…).
-//   - 1 inactive developer (hafijulzoarder@gmail.com, f3610e95-…)
-//     intentionally excluded.
-//
-// TODO(server-side-proxy): the long-term fix is a server-side proxy
-// that holds an admin token and forwards
-// `iam.users.list({ filter: { roles: role } })` on behalf of the
-// browser. Until that proxy ships, any new testers/developers added
-// via `blocks iam users update --roles <role> …` need their id
-// appended here, and a redeploy is required to pick the new ids up.
-export const RECIPIENTS_BY_ROLE: Record<string, readonly string[]> = {
-  tester: ["db4bca2e-459d-4bd5-8c65-4700ca858084"],
-  developer: [
-    "d39eb926-6c04-461c-8833-6ed00189a520",
-    "4832284e-9219-42d5-bd2a-4d60dd30a3e8",
-    "9890d32d-c956-429d-88d7-cce465824fe5",
-  ],
-  // Managers — populated per the user request dated 2026-09-27: a
-  // tester/dev creating a flow should notify "everyone except the
-  // actor", which means testers' + developers' + managers' recipient
-  // lists all need to have entries so the actor-exclusion filter
-  // (see `notifyRole` above) can drop the actor and leave the others.
-  // Confirmed via `blocks iam users list --json` (filter on `roles:
-  // ["manager"]`) — 41a74053-… is the active manager
-  // (Meraj Zoarder, merajzoarder6@gmail.com). Re-verify before
-  // adding new managers; the long-term TODO at the top of this
-  // section tracks when the server-side proxy replaces this map.
-  manager: ["41a74053-2c79-4fd5-aab3-90abce656a1d"],
-};
 
 export async function notifyRole(
   roles: string | readonly string[],
@@ -139,9 +105,9 @@ export async function notifyRole(
   // holds both roles (e.g. a tester-also-developer) doesn't see the
   // same row twice in their inbox.
   const roleList = Array.isArray(roles) ? roles : [roles];
-  const userIds = Array.from(
-    new Set(roleList.flatMap((r) => RECIPIENTS_BY_ROLE[r] ?? [])),
-  );
+  // Live IAM resolution — cached for 60 s with the admin-CLI-derived
+  // roster as the failure fallback (semantics in `fetchUserIdsByRoles`).
+  const userIds = Array.from(new Set(await fetchUserIdsByRoles(roleList)));
   // Actor exclusion — the user who triggered the action should not be
   // notified about their own action. The actor id is carried on
   // `payload.actorId` (every call site already populates it from
@@ -149,18 +115,17 @@ export async function notifyRole(
   // filter — every uid compares unequal to "" so nothing is dropped,
   // preserving the behaviour for any legacy caller that didn't stamp
   // the actor. Verified 2026-09-27: tester-creates-flow self-notify
-  // bug — the actor's uid was in `RECIPIENTS_BY_ROLE.tester`, so the
+  // bug — the actor's uid was in the tester recipient list, so the
   // tester saw their own action in the bell. Filter dropped them.
   const actorId =
     typeof payload.actorId === "string" ? payload.actorId : "";
   const filteredUserIds =
     actorId === "" ? userIds : userIds.filter((uid) => uid !== actorId);
-  // No recipients registered for any of the requested roles (after
+  // No recipients resolved for any of the requested roles (after
   // excluding the actor) — silently no-op. This happens when
-  // notifyRole is called with a role we haven't onboarded (e.g.
-  // `admin`) or when the actor was the only registered recipient for
-  // the requested role (the common bug case: a tester creating a
-  // flow with a single tester in the map).
+  // notifyRole is called with a role nobody holds (e.g. `admin`) or
+  // when the actor was the only member of the requested role (the
+  // common case: a tester creating a flow as the only tester).
   if (filteredUserIds.length === 0) return undefined;
   // Build the row payload ONCE — every recipient's row carries the
   // same denormalized fields, only `userId` differs.
@@ -341,9 +306,11 @@ export function getResourceHref(item: InboxItem): string | null {
     return `${base}${env}?comments=${encodeURIComponent(item.flowId)}`;
   }
   if (item.context === "environment") {
-    // Environment notifications only carry a slug — pick a sensible
-    // default env if none is attached so the link still lands on a
-    // valid page.
+    // Deleted envs have no page left to land on — link to the project
+    // root instead of a 404 env slug. Everything else links to the env
+    // itself (defaulting to `dev` when the row carries no slug so the
+    // link still lands on a valid page).
+    if (item.action === "deleted") return base;
     return `${base}/${item.envSlug ?? "dev"}`;
   }
   return null;
@@ -420,6 +387,8 @@ function deriveTitle(payload: Record<string, unknown>): string {
     return oldName && oldName !== newName
       ? "Environment renamed"
       : "Environment updated";
+  if (ctx === "environment" && action === "deleted")
+    return "Environment deleted";
   if (ctx === "flow" && action === "status_changed")
     return "Flow status updated";
   if (ctx === "flow" && action === "stack_changed")
@@ -535,6 +504,10 @@ function deriveBody(payload: Record<string, unknown>): string {
         projectName ? ` in project “${projectName}”` : ""
       }.`;
     }
+    if (action === "deleted")
+      return `${actorName} deleted environment “${envSlug}”${
+        projectName ? ` from project “${projectName}”` : ""
+      }.`;
   }
   // Flow chip / clone events (added in Option C). `flowName` covers
   // status_changed / stack_changed / cloned; `envSlug` is the
@@ -649,14 +622,16 @@ function toInboxItem(n: CloudNotification): InboxItem | null {
 // cope with whatever the array holds.
 const INBOX_PAGE_SIZE = 60;
 
-// How often the bell re-fetches the inbox. Was 5s (matched the old
-// announcements/direct-messages cadence) — page-scoped fetching policy
-// (user directive 2026-10-01) cut the ambient pollers down because 12
-// calls/min per surface is the definition of an unnecessary call. 30s
-// keeps the bell feeling live while dropping the steady-state cost to 2
-// calls/min; the hidden-tab skip and the mark-all cooldown still apply
-// on top.
-const INBOX_POLL_MS = 30_000;
+// How often the bell re-fetches the inbox. Was 5s, then 30s (page-
+// scoped fetching policy, user directive 2026-10-01, cut ambient
+// pollers because 12 calls/min per surface is the definition of an
+// unnecessary call). 2026-11-21 user directive raises latency to the
+// top concern: a tester-authored flow must reach the manager's bell
+// promptly, and 30s read "the notification needs a page refresh".
+// 10s keeps the visible-tab worst case at ~10s for 6 calls/min, and
+// the hidden-tab skip means a parked background tab still costs zero.
+// The mark-all cooldown and the snapshot patch still apply on top.
+const INBOX_POLL_MS = 10_000;
 
 export function useNotificationInbox() {
   const { currentUser } = useAuth();
@@ -1024,32 +999,47 @@ export function useNotificationInbox() {
   //          for bulk sweeps, never for single-row mark-read.
   useEffect(() => {
     if (!userId) return;
-    const id = window.setInterval(() => {
-      // Skip while the tab is hidden — the user isn't watching the bell
-      // and the eventual-consistency / cooldown defenses still apply on
-      // the first tick after refocus. Saves ~12 calls/minute when the
-      // app is parked in a background tab. (For comparison: the
-      // announcements / call-signals pollers keep firing in background
-      // because their UX is supposed to surface to the user even when
-      // they aren't looking — a notification badge / auto-open dialog
-      // when refocusing. The inbox bell doesn't have that property.)
+    // One guarded tick, shared by every trigger. The guards (in this
+    // order) exist because each one answers a specific observed bug:
+    //   * hidden-tab skip — the user isn't watching the bell, so don't
+    //     burn the calls; the first tick after refocus catches up.
+    //   * in-flight mark-read/mark-all — the tick can race the pending
+    //     update and overwrite the optimistic "all read" cache flip
+    //     with stale "unread" rows from the read replica.
+    //   * post-mark-all cooldown — the platform's read lag can stretch
+    //     past the snapshot TTL, so the periodic invalidate pauses
+    //     while the replica catches up.
+    const guardedTick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
-      if (
-        markReadMutation.isPending ||
-        markAllReadMutation.isPending
-      ) {
+      if (markReadMutation.isPending || markAllReadMutation.isPending) {
         return;
       }
       if (Date.now() < pollingCooldownUntilRef.current) {
-        // Background polling is paused while the platform's read
-        // replica catches up. New writes from managers will surface
-        // on the first tick after cooldown (or sooner via a manual
-        // refetch through `queryFn` + snapshot patch).
         return;
       }
       void qc.invalidateQueries({ queryKey: ["notifications", userId] });
-    }, INBOX_POLL_MS);
-    return () => window.clearInterval(id);
+    };
+    const id = window.setInterval(guardedTick, INBOX_POLL_MS);
+    // Instant catch-up on focus / visibility regain — without this, a
+    // manager switching to the app window waits for the next interval
+    // tick (and reads the stale bell as "notification needs a page
+    // refresh"). The query keeps `refetchOnWindowFocus: false` on
+    // purpose: a raw TanStack focus refetch would bypass the cooldown
+    // and snapshot guards above, exactly the clobber path the cooldown
+    // exists to prevent. Routing focus through the guarded tick gives
+    // the instant refresh without reopening that hole.
+    const onFocus = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        guardedTick();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
   }, [
     userId,
     qc,

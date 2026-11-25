@@ -375,7 +375,6 @@ export type ChatToolName =
   | "workspace_search"
   | "workspace_exec_command"
   | "workspace_npm_scripts"
-  | "workspace_dev_server"
   | "workspace_open_file"
   | "workspace_open_folder"
   | "workspace_git_status"

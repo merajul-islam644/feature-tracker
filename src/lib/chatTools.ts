@@ -748,32 +748,6 @@ export const chatTools: AnthropicTool[] = [
     input_schema: { type: "object", properties: {} },
   },
   {
-    name: "workspace_dev_server",
-    description:
-      "Start, stop, or check the workspace's long-lived dev server (the same manager the Dev-servers panel uses). action=start spawns the chosen npm script (default `dev`) on a port and WAITS until the server answers HTTP (up to ~30s), then returns the preview URL (http://localhost:<port>). action=stop SIGTERMs it. action=status reports the current state + URL. This is THE way to run the app for a live UI walkthrough — never `workspace_exec_command` with `npm run dev` (that blocks until timeout and gets killed).",
-    input_schema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          enum: ["start", "stop", "status"],
-          description: "What to do with the dev server.",
-        },
-        script: {
-          type: "string",
-          description:
-            "npm script name for action=start (default \"dev\"). Ignored by stop/status.",
-        },
-        port: {
-          type: "number",
-          description:
-            "Port for action=start (default 5173; pass a different one if 5173 is taken or the script hard-codes another port).",
-        },
-      },
-      required: ["action"],
-    },
-  },
-  {
     name: "workspace_open_file",
     description:
       "Open a workspace file in the user's editor as a new tab (and focus it). Use AFTER writing or editing a file so the user sees the result, or when the user asks to open/show a file. The file must exist — create it first with workspace_write_file if needed.",
@@ -990,7 +964,6 @@ export const toolLabel: Record<AnthropicTool["name"], string> = {
   workspace_rename_path: "rename or move a workspace file/folder",
   workspace_search: "search text across the workspace",
   workspace_exec_command: "run a shell command in the workspace",
-  workspace_dev_server: "start/stop/check the workspace dev server",
   workspace_npm_scripts: "read the workspace package.json scripts",
   workspace_open_file: "open a file in the editor",
   workspace_open_folder: "open a folder as the workspace root",
@@ -1141,8 +1114,6 @@ export const toolActionSummary: Record<
   workspace_exec_command: (input) =>
     `Ran \`${input.command as string}\`.`,
   workspace_npm_scripts: () => "Read the workspace package.json.",
-  workspace_dev_server: (input) =>
-    `${input.action === "start" ? "Started" : input.action === "stop" ? "Stopped" : "Checked"} the workspace dev server${input.script ? ` (${input.script as string})` : ""}.`,
   workspace_open_file: (input) =>
     `Opened ${input.path as string} in the editor.`,
   workspace_open_folder: (input) =>

@@ -55,14 +55,20 @@ export function IssueSummary({ counts }: Props) {
       {tiles.map((t) => {
         const Icon = t.icon;
         return (
-          <Card key={t.label} className="p-3">
-            <div className="flex items-center gap-2">
-              <Icon className={`h-4 w-4 shrink-0 ${t.tone}`} aria-hidden="true" />
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {t.label}
-              </p>
-            </div>
-            <p className={`mt-1 text-xl font-semibold tabular-nums ${t.tone}`}>
+          // Single-line compact tile: icon + label left, count right —
+          // keeps the six-tile strip to one tight row instead of a
+          // card wall eating the page's vertical space.
+          <Card
+            key={t.label}
+            className="flex items-center gap-2 px-2.5 py-2"
+          >
+            <Icon className={`h-3.5 w-3.5 shrink-0 ${t.tone}`} aria-hidden="true" />
+            <p className="truncate text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              {t.label}
+            </p>
+            <p
+              className={`ml-auto text-base font-semibold tabular-nums ${t.tone}`}
+            >
               {t.value}
             </p>
           </Card>

@@ -9,6 +9,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -2355,6 +2356,38 @@ export function useAppendIceCandidates(): UseMutationResult<
 // same defense-in-depth pattern as the tester guards on project
 // mutations (the composer doesn't even render for non-managers).
 
+// Data-gateway mutations answer HTTP 200 even when the write is REJECTED —
+// the body carries either a GraphQL `errors` array or an IAM-style
+// `{ isSuccess: false, message }` envelope, and the SDK never throws on
+// either. Verified live 2026-11-21: a post dropped under a transient IAM
+// policy denial still surfaced as success in the UI while no row existed
+// server-side. This guard converts those envelopes into thrown errors so
+// the existing `onError` toasts fire honestly.
+function assertMutationOk(res: unknown, fallbackMessage: string): void {
+  const r = res as
+    | { errors?: unknown; isSuccess?: boolean; message?: string }
+    | undefined;
+  if (!r || typeof r !== "object") return;
+  if (Array.isArray(r.errors) && r.errors.length > 0) {
+    const first = r.errors[0] as { message?: string } | undefined;
+    throw new Error(first?.message || fallbackMessage);
+  }
+  if (r.isSuccess === false) {
+    throw new Error(r.message || fallbackMessage);
+  }
+}
+
+// The platform stamps `acknowledged: false` on writes it accepted
+// structurally but failed to execute (same silent pattern, one level
+// deeper — see the markNotificationAsRead precedent). Checks the
+// unwrapped inner record; `message` rides along when present.
+function assertAcknowledged(item: unknown, fallbackMessage: string): void {
+  const r = item as { acknowledged?: boolean; message?: string } | undefined;
+  if (r && r.acknowledged === false) {
+    throw new Error(r.message || fallbackMessage);
+  }
+}
+
 export function useAnnouncements(): UseQueryResult<Announcement[]> {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
@@ -2364,13 +2397,21 @@ export function useAnnouncements(): UseQueryResult<Announcement[]> {
     // workspace-wide.
     queryKey: [...queryKeys.announcements, userId],
     enabled: Boolean(userId),
-    // Polls every 60 s. This used to be 5 s with background refetch —
-    // a workspace banner doesn't need WhatsApp liveness, and the pair
-    // made the announcement read the single hottest query in the app
-    // (12 requests/minute on every page, tab hidden or not). 60 s still
-    // surfaces a fresh post without a reload; the composer's own
-    // invalidation covers the poster's screen instantly.
-    refetchInterval: 60_000,
+    // Poll cadence history: 5s (made this the hottest query in the app,
+    // 12 req/min on every page) → 60s (2026-10 latency directive) →
+    // 15s (2026-11-21 user directive: a manager's post must reach every
+    // member quickly — at 60s a member whose poll tick had just fired
+    // before the post waited a full minute while a lucky-phase member
+    // got it in seconds, reading as "tester got it fast, developer
+    // got it late"). 15s caps the visible-tab worst case at 15s for
+    // 4 calls/min; hidden tabs stay paused. `refetchOnWindowFocus`
+    // gives the instant catch-up on tab switches — safe here (unlike
+    // the notifier inbox) because announcements carry no optimistic
+    // client state for a focus refetch to clobber; the auto-open
+    // baseline compares (id → postedAt), and an unchanged repost of
+    // identical timestamps never double-fires.
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
     queryFn: async () => {
       const raw = await announcementsCollection.list({
         pageNo: 1,
@@ -2407,10 +2448,12 @@ export function usePostAnnouncement(): UseMutationResult<
         authorId: userId,
         content: input.content,
       })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      assertMutationOk(created, "IAM rejected the announcement post.");
       const item =
         "data" in created && created.data
           ? created.data
           : (created as CloudAnnouncement);
+      assertAcknowledged(item, "IAM rejected the announcement post.");
       return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
@@ -2440,10 +2483,12 @@ export function useUpdateAnnouncement(): UseMutationResult<
         authorId: input.authorId,
         content: input.content,
       })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      assertMutationOk(updated, "IAM rejected the announcement edit.");
       const item =
         "data" in updated && updated.data
           ? updated.data
           : (updated as CloudAnnouncement);
+      assertAcknowledged(item, "IAM rejected the announcement edit.");
       return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
@@ -2476,10 +2521,12 @@ export function useRepostAnnouncement(): UseMutationResult<
         authorId: source.authorId,
         content: source.content,
       })) as { data?: CloudAnnouncement } | CloudAnnouncement;
+      assertMutationOk(updated, "IAM rejected the announcement repost.");
       const item =
         "data" in updated && updated.data
           ? updated.data
           : (updated as CloudAnnouncement);
+      assertAcknowledged(item, "IAM rejected the announcement repost.");
       return toAnnouncement(item as Parameters<typeof toAnnouncement>[0]);
     },
     onSuccess: () => {
@@ -2699,7 +2746,7 @@ export interface AddFlowCommentReplyInput {
  *     read hasn't landed yet — notification metadata would be wrong.
  *   * `parent.authorId === actor.id`: the replier IS the parent author
  *     (e.g. a comment author replying to themselves); skip the
- *     self-notification (same rationale as `RECIPIENTS_BY_ROLE`'s
+ *     self-notification (same rationale as `notifyRole`'s
  *     actor-exclusion filter).
  */
 export function useAddFlowCommentReply(): UseMutationResult<
@@ -2772,7 +2819,7 @@ export function useAddFlowCommentReply(): UseMutationResult<
  *     cache-not-yet-landed; we'd rather drop the notification than
  *     send a wrong-target one).
  *   * `parent.authorId === actorId` → bail (self-notify skip; same
- *     rationale as `RECIPIENTS_BY_ROLE`'s actor-exclusion filter).
+ *     rationale as `notifyRole`'s actor-exclusion filter).
  *
  * Metadata resolution: the flow / project names come from the React
  * Query cache populated by `useProjects` / `useFlows`. The notification
@@ -4965,12 +5012,19 @@ export function useUpdateProject(): UseMutationResult<
         });
       }
       if (vars.patch.envLabelOverrides !== undefined) {
-        // Env rename — `envLabelOverrides` is `{ [slug]: label }`. We
-        // don't get old/new labels in the patch (only the new map), so
-        // we emit one notification per changed slug against the
-        // post-state keys. Testers see "X renamed env A to B".
+        // Env rename (canonical envs) — `envLabelOverrides` rides the
+        // FULL post-state map (`useRenameProjectEnv` spreads the existing
+        // overrides and sets one key), so diff against the cached
+        // pre-state and notify only the slugs whose label actually
+        // changed. Without the diff, renaming env A would fire "renamed"
+        // once per env on the project. Testers see "X renamed env A to B".
+        const cached = qc.getQueryData<Project>(
+          queryKeys.project(userId, project.id),
+        );
+        const prevLabels = cached?.envLabelOverrides ?? {};
         const newLabels = vars.patch.envLabelOverrides;
         for (const slug of Object.keys(newLabels)) {
+          if (prevLabels[slug] === newLabels[slug]) continue;
           void notifyRole(["tester", "developer"], {
             context: "environment",
             actionName: "renamed",
@@ -4987,20 +5041,41 @@ export function useUpdateProject(): UseMutationResult<
         }
       }
       if (vars.patch.customEnvs !== undefined) {
-        // Env add — `customEnvs` is the new full list. Anything that
-        // wasn't in the pre-state is "added". Since the hook doesn't
-        // capture pre-state, we fire one event per slug in the new
-        // list. The inbox groups by `value` so duplicates from
-        // re-submits don't pile up.
-        const newEnvs = vars.patch.customEnvs;
-        for (const slug of newEnvs) {
+        // Env add / custom-env edit — `customEnvs` rides the FULL new
+        // list (`useAddProjectEnv` appends to the cached list,
+        // `useRenameProjectEnv` rewrites one entry), so the patch alone
+        // can't say what changed. Diff against the cached pre-state —
+        // at onSuccess time the refetch triggered by the invalidations
+        // above hasn't landed yet, so `getQueryData` still serves the
+        // pre-update project (the same trick the rename branch uses for
+        // oldName):
+        //   * slug absent from pre-state → "created" (the actual add)
+        //   * slug present with a changed label → "renamed"
+        //   * slug present, unchanged → silent (re-submits and sibling
+        //     edits no longer spam "created" for every env on the
+        //     project — the old behaviour)
+        const cached = qc.getQueryData<Project>(
+          queryKeys.project(userId, project.id),
+        );
+        const prevBySlug = new Map(
+          (cached?.customEnvs ?? []).map((e) => [e.slug, e.label]),
+        );
+        for (const env of vars.patch.customEnvs) {
+          const prevLabel = prevBySlug.get(env.slug);
+          const actionName =
+            prevLabel === undefined
+              ? "created"
+              : prevLabel !== env.label
+                ? "renamed"
+                : null;
+          if (!actionName) continue;
           void notifyRole(["tester", "developer"], {
             context: "environment",
-            actionName: "created",
-            value: `${project.id}:${slug}`,
+            actionName,
+            value: `${project.id}:${env.slug}`,
             projectId: project.id,
             projectName: project.name,
-            envSlug: slug,
+            envSlug: env.slug,
             actorName,
             actorId: userId,
           }).catch(() => {});
@@ -6094,22 +6169,36 @@ export function useIssueTrackerIssues(opts?: {
   const { currentUser } = useAuth();
   const userId = currentUser?.id ?? "";
   const roles = currentUser?.roles ?? [];
-  const isTester = roles.includes("tester");
-  const isDeveloper = roles.includes("developer");
-  // Only these two roles need the cross-user fetch; manager keeps the
-  // tight wire filter.
-  const fetchUnscoped = isTester || isDeveloper;
+  const isManager = roles.includes("manager");
   // Env scoping — same shape as targets / secrets: an Issue row carries
   // its own projectId / envSlug, so the filter sits on top of the wire
-  // fetch whether it's scoped by CreatedBy or unscoped. Disabled
-  // outside an env context.
+  // fetch. Disabled outside an env context.
   const activeEnv = useActiveEnv();
+  // Assignment visibility (user request 2026-11-25): a member sees a
+  // project's issues only when that project sits on their Members-page
+  // card; managers bypass — they're the ones doing the assigning.
+  // While the assignment lookup is still loading we fail OPEN so the
+  // surface isn't flashed empty before the settled state arrives. The
+  // flag rides the queryKey so a resolved lookup (or a Members-page
+  // edit) swaps the cached variant and refetches.
+  const assignmentsQuery = useMemberProjectAssignments();
+  const assignedProjectIds = useMemo(
+    () =>
+      assignmentsQuery.data?.find((a) => a.userId === userId)?.projectIds ??
+      [],
+    [assignmentsQuery.data, userId],
+  );
+  const canSeeEnvIssues =
+    isManager ||
+    assignmentsQuery.isLoading ||
+    Boolean(activeEnv && assignedProjectIds.includes(activeEnv.projectId));
   return useQuery({
     queryKey: [
       ...queryKeys.issueTrackerIssues(userId),
       roles.join(","),
       activeEnv?.projectId ?? "",
       activeEnv?.envSlug ?? "",
+      canSeeEnvIssues ? "assigned" : "unassigned",
     ],
     enabled: Boolean(userId && activeEnv) && (opts?.enabled ?? true),
     // See `useIssueTrackerTargets` — same rationale. The IssueTracker
@@ -6120,33 +6209,29 @@ export function useIssueTrackerIssues(opts?: {
     // the moment a row is added or a status changes.
     staleTime: 30_000,
     queryFn: async () => {
-      const envFilter = {
-        projectId: activeEnv!.projectId,
-        envSlug: activeEnv!.envSlug,
-      };
-      const raw = fetchUnscoped
-        ? await issuesCollection.list({
-            filter: envFilter,
-            pageNo: 1,
-            pageSize: 200,
-            sort: { detectedAt: -1 },
-          })
-        : await issuesCollection.list({
-            filter: { ...createdByFilter(userId), ...envFilter },
-            pageNo: 1,
-            pageSize: 200,
-            sort: { detectedAt: -1 },
-          });
-      const rows = unwrapPaged<unknown>(raw).items.map((i) =>
+      if (!canSeeEnvIssues) {
+        // Not assigned (non-manager): the Issues page shows its own
+        // "not assigned" card — the query contributes nothing.
+        return [];
+      }
+      // Assigned members and managers see EVERY issue in the env. The
+      // pre-assignment layers — the `CreatedBy: me` wire filter for
+      // roles outside tester/developer, and the assignedToMe +
+      // approvedById post-filter for tester/developer (the old
+      // work-queue triage model) — are superseded by the
+      // project-assignment rule above and deliberately gone.
+      const raw = await issuesCollection.list({
+        filter: {
+          projectId: activeEnv!.projectId,
+          envSlug: activeEnv!.envSlug,
+        },
+        pageNo: 1,
+        pageSize: 200,
+        sort: { detectedAt: -1 },
+      });
+      return unwrapPaged<unknown>(raw).items.map((i) =>
         toIssue(i as Parameters<typeof toIssue>[0]),
       );
-      if (!fetchUnscoped) return rows;
-      const assignedToMe = rows.filter((i) =>
-        (i.assignedDeveloperIds ?? []).includes(userId),
-      );
-      return isTester
-        ? assignedToMe
-        : assignedToMe.filter((i) => !!i.approvedById);
     },
   });
 }
@@ -6771,6 +6856,12 @@ export function useFileDownloadUrl(
     staleTime: 5 * 60 * 1000,
     gcTime: 30 * 60 * 1000,
     retry: 1,
+    // Self-heal: a transient failure on the one-shot presign request
+    // otherwise caches an errored query and the avatar falls back to
+    // initials until a full remount. Focus / visibility regain retries
+    // it (and refreshes near-expiry presigned URLs) without any user
+    // action.
+    refetchOnWindowFocus: true,
     queryFn: () => fetchFileDownloadUrl(fileId as string),
   });
 }
@@ -8446,6 +8537,7 @@ export function useCreateEnvironment(): UseMutationResult<
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
   // Manager-only guard — mirrors `useAddProjectEnv` /
   // `useRenameProjectEnv`. Env management is a project-structure change,
   // the same class of action as creating a project; the UI hides the
@@ -8522,7 +8614,7 @@ export function useCreateEnvironment(): UseMutationResult<
         updatedAt: now,
       };
     },
-    onSuccess: (_env, input) => {
+    onSuccess: (env, input) => {
       qc.invalidateQueries({
         queryKey: queryKeys.environments(input.projectId),
       });
@@ -8531,6 +8623,32 @@ export function useCreateEnvironment(): UseMutationResult<
       // its 5-minute staleTime.
       qc.invalidateQueries({
         queryKey: queryKeys.allEnvironments(),
+      });
+      // Broadcast to tester + developer roles (2026-11-21 user directive:
+      // a manager adding an environment must reach testers/developers).
+      // This hook is the real "Add Environment" path (AddEnvironmentModal
+      // → useCreateEnvironment) — until now only the `useUpdateProject`
+      // customEnvs branch notified, which this modal never touches, so
+      // modal-added envs were silent. The actor-exclusion filter inside
+      // `notifyRole` drops the actor when they also hold a recipient
+      // role; tester actors can't reach this mutation at all (guard
+      // above). Same fire-and-forget discipline as every other notifier
+      // call site — a notifier hiccup never fails the env create.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      void notifyRole(["tester", "developer"], {
+        context: "environment",
+        actionName: "created",
+        value: `${input.projectId}:${env.slug}`,
+        projectId: input.projectId,
+        projectName: projects?.find((p) => p.id === input.projectId)?.name,
+        envSlug: env.slug,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
       });
     },
   });
@@ -8554,6 +8672,7 @@ export function useUpdateEnvironment(): UseMutationResult<
 > {
   const { currentUser } = useAuth();
   const qc = useQueryClient();
+  const userId = currentUser?.id ?? "";
   // Manager-only guard — same class of action as `useCreateEnvironment`.
   const isTester = currentUser?.roles?.includes("tester") ?? false;
   return useMutation({
@@ -8622,6 +8741,42 @@ export function useUpdateEnvironment(): UseMutationResult<
         }),
         `environment ${input.id}`,
       );
+      // Broadcast label / slug changes to tester + developer roles
+      // (2026-11-21 user directive: env create / update / delete all
+      // notify). Fired here rather than in onSuccess because the
+      // pre-change row (old slug / label) is only in scope inside
+      // mutationFn; the fire sits after the write ack, so a failed
+      // update never notifies. Color / order-only tweaks stay silent —
+      // nobody needs a bell row for a hue change.
+      const labelChanged = nextLabel !== (row.label ?? "");
+      const slugChanged = nextSlug !== (row.slug ?? "");
+      if (labelChanged || slugChanged) {
+        const projects = qc.getQueryData<Project[]>(
+          queryKeys.projects(userId),
+        );
+        void notifyRole(
+          ["tester", "developer"],
+          {
+            context: "environment",
+            actionName: "renamed",
+            value: `${input.projectId}:${nextSlug}`,
+            projectId: input.projectId,
+            projectName: projects?.find((p) => p.id === input.projectId)?.name,
+            envSlug: nextSlug,
+            // Slug change → "renamed 'old-slug' to 'new-slug'"; a
+            // label-only change renders as "updated environment" (the
+            // derive falls back when oldName is absent).
+            ...(slugChanged
+              ? { oldName: row.slug ?? "", newName: nextSlug }
+              : { newName: nextLabel }),
+            actorName: currentUser?.name ?? "A manager",
+            actorId: userId,
+          },
+        ).catch(() => {});
+        void qc.invalidateQueries({
+          queryKey: queryKeys.notifications(userId),
+        });
+      }
     },
     onSuccess: (_res, input) => {
       qc.invalidateQueries({
@@ -8686,6 +8841,28 @@ export function useDeleteEnvironment(): UseMutationResult<
         await environmentsCollection.delete(input.id),
         `environment ${input.id}`,
       );
+      // Broadcast the deletion to tester + developer roles (2026-11-21
+      // user directive: env create / update / delete all notify). Fired
+      // here — not in onSuccess — because the deleted row's slug is only
+      // in scope inside mutationFn; by this point the row is already
+      // gone from the cloud, so the notification can never describe a
+      // still-existing environment.
+      const projects = qc.getQueryData<Project[]>(
+        queryKeys.projects(userId),
+      );
+      void notifyRole(["tester", "developer"], {
+        context: "environment",
+        actionName: "deleted",
+        value: `${input.projectId}:${envSlug}`,
+        projectId: input.projectId,
+        projectName: projects?.find((p) => p.id === input.projectId)?.name,
+        envSlug,
+        actorName: currentUser?.name ?? "A manager",
+        actorId: userId,
+      }).catch(() => {});
+      void qc.invalidateQueries({
+        queryKey: queryKeys.notifications(userId),
+      });
     },
     onSuccess: (_res, input) => {
       // Same invalidation set as the project cascade plus the feature

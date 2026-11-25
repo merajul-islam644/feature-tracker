@@ -1,0 +1,95 @@
+{
+  "collectionName": "blx_TestCaseResults",
+  "fields": [
+    {
+      "name": "key",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Logical case-result id (case-<runKey>-<index>) for key->ItemId resolution.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "runKey",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "The TestRun.key this case result belongs to — the read filter (runKey: <runKey>).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "projectId",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Lattice project id — denormalized from the run for per-project queries.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "name",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Case title as reported by the runner.",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "status",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "passed | failed | skipped | timed out (runner status, lowercased).",
+      "requiredOn": "Both",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "durationMs",
+      "type": "Double",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Case duration in milliseconds.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "errorMessage",
+      "type": "String",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Cleaned error text for failures; empty when passed.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    },
+    {
+      "name": "sortOrder",
+      "type": "Double",
+      "isArray": false,
+      "isPIIData": false,
+      "isUniqueData": false,
+      "description": "Stable ordering inside the run detail view.",
+      "requiredOn": "None",
+      "fields": [],
+      "validationRule": null
+    }
+  ],
+  "schemaName": "TestCaseResult",
+  "schemaType": 1
+}

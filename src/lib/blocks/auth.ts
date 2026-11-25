@@ -53,8 +53,18 @@ export async function completeLogin(
 
 // Confirms the session cookie is real by hitting `/iam/v4/auth/me`.
 // Returns `null` if IAM says the caller is not authenticated.
+//
+// The status check is REQUIRED, not decoration: the gateway answers a
+// DEAD session with HTTP 403 + an error body ("No policy grants access",
+// verified live 2026-11-21), and the SDK's json() resolves that body
+// instead of throwing — so trusting the body alone would mark a
+// signed-out user as authenticated and the app would freeze on stale
+// data with no way back. `isAuthenticated()` checks the raw response
+// status first; only a genuinely ok /auth/me yields claims.
 export async function fetchSessionClaims(): Promise<BlocksOidcUserInfo | null> {
   try {
+    const alive = await blocksClient.auth.isAuthenticated();
+    if (!alive) return null;
     return await blocksClient.auth.userInfo();
   } catch {
     return null;

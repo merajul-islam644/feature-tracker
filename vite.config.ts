@@ -80,6 +80,91 @@ interface ChatProvider {
     content: AnthropicResponseContent[];
     stop_reason: string;
   }>;
+  /**
+   * Stream the same chat turn to `res` as Anthropic-format SSE events —
+   * the single downstream wire shape (body.stream is true here). Native
+   * Anthropic gateways are relayed byte-for-byte; OpenAI gateways are
+   * translated live by `translateOpenAiStreamToAnthropic`. Resolves when
+   * the response is fully written; throws only on pre-response failures
+   * (headers not yet sent — the caller's 502 catch is safe).
+   */
+  streamChat: (
+    cfg: { url: string; token: string; model: string },
+    body: AnthropicRequestBody & { stream: true },
+    res: ServerResponse,
+    signal: AbortSignal,
+  ) => Promise<void>;
+}
+
+// ── SSE plumbing shared by both providers' streamChat ───────────────────
+
+/** SSE response envelope — every header tuned against proxy buffering so
+ *  deltas reach the browser the moment the gateway emits them. */
+function beginSse(res: ServerResponse): void {
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/event-stream");
+  res.setHeader("cache-control", "no-cache");
+  res.setHeader("connection", "keep-alive");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders?.();
+}
+
+/** Write one Anthropic-format SSE event frame. */
+function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/** Strict user/assistant alternation for the upstream `messages` array.
+ *  The workbench ledger can carry back-to-back same-role rows (e.g. a
+ *  "[tool results]" user entry followed by the next user text), and
+ *  Anthropic's Messages API rejects non-alternating messages outright —
+ *  merge consecutive same-role entries and lead with a user row so any
+ *  provider accepts the shape. */
+function normalizeTurns(
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const merged: Array<{ role: "user" | "assistant"; content: string }> = [];
+  for (const message of messages) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === message.role) {
+      last.content = `${last.content}\n\n${message.content}`;
+    } else {
+      merged.push({ ...message });
+    }
+  }
+  if (merged.length > 0 && merged[0].role !== "user") {
+    merged.unshift({ role: "user", content: "(conversation context)" });
+  }
+  return merged;
+}
+
+/** Pump a byte stream to the client verbatim — the passthrough core. */
+async function pipeToRes(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<void> {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch {
+    // Upstream died / client disconnected mid-stream — close cleanly;
+    // the client's reader just sees stream end.
+    res.end();
+  }
+}
+
+/** Non-OK upstream in stream mode: pass status + error body through
+ *  verbatim — the client's !response.ok branch parses the message out of
+ *  it, so the user sees "401 unauthorized" / "404 model not found". */
+async function writeStreamError(res: ServerResponse, upstream: Response): Promise<void> {
+  res.statusCode = upstream.status;
+  res.setHeader(
+    "content-type",
+    upstream.headers.get("content-type") ?? "application/json",
+  );
+  res.end(await upstream.text().catch(() => ""));
 }
 
 function createAnthropicChatProvider(): ChatProvider {
@@ -111,6 +196,56 @@ function createAnthropicChatProvider(): ChatProvider {
       }
       return (await upstream.json()) as Awaited<ReturnType<ChatProvider["sendChat"]>>;
     },
+    async streamChat(cfg, body, res, signal) {
+      const upstream = await fetch(`${cfg.url.replace(/\/+$/, "")}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${cfg.token}`,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!upstream.ok || !upstream.body) {
+        await writeStreamError(res, upstream);
+        return;
+      }
+      // Native Anthropic SSE — relay byte-for-byte, no parsing here; the
+      // client (workbenchAi.ts → streamAnthropicResponse) reads the
+      // events itself.
+      beginSse(res);
+      await pipeToRes(upstream.body, res);
+    },
+  };
+}
+
+// Anthropic → OpenAI request translation, shared by sendChat (single
+// JSON) and streamChat (SSE):
+//   • Anthropic `system` → OpenAI system message at the head.
+//   • Anthropic `tools[]` → OpenAI `tools[].function.parameters` (we
+//     pass through `input_schema` unchanged — both APIs use JSON
+//     Schema for the function parameter shape).
+function toOpenAiRequest(
+  cfg: { url: string; token: string; model: string },
+  body: AnthropicRequestBody,
+): { model: string; max_tokens: number; messages: Array<{ role: string; content: string }>; tools?: unknown[] } {
+  const openaiMessages = body.system
+    ? [{ role: "system", content: body.system }, ...body.messages]
+    : [...body.messages];
+  const openaiTools = body.tools?.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description ?? "",
+      parameters: t.input_schema,
+    },
+  }));
+  return {
+    model: cfg.model,
+    max_tokens: body.max_tokens,
+    messages: openaiMessages,
+    ...(openaiTools ? { tools: openaiTools } : {}),
   };
 }
 
@@ -121,23 +256,6 @@ function createOpenAIChatProvider(): ChatProvider {
     notConfiguredMessage: () =>
       "OpenAI provider is not configured. Open Settings → AI Gateway, pick OpenAI, and enter the Base URL + API key.",
     async sendChat(cfg, body, signal) {
-      // Anthropic → OpenAI request translation.
-      //   • Anthropic `system` → OpenAI system message at the head.
-      //   • Anthropic `tools[]` → OpenAI `tools[].function.parameters` (we
-      //     pass through `input_schema` unchanged — both APIs use JSON
-      //     Schema for the function parameter shape).
-      const openaiMessages = body.system
-        ? [{ role: "system", content: body.system }, ...body.messages]
-        : [...body.messages];
-      const openaiTools = body.tools?.map((t) => ({
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description ?? "",
-          parameters: t.input_schema,
-        },
-      }));
-
       const upstream = await fetch(
         `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
         {
@@ -146,12 +264,7 @@ function createOpenAIChatProvider(): ChatProvider {
             "content-type": "application/json",
             authorization: `Bearer ${cfg.token}`,
           },
-          body: JSON.stringify({
-            model: cfg.model,
-            max_tokens: body.max_tokens,
-            messages: openaiMessages,
-            ...(openaiTools ? { tools: openaiTools } : {}),
-          }),
+          body: JSON.stringify(toOpenAiRequest(cfg, body)),
           signal,
         },
       );
@@ -222,7 +335,145 @@ function createOpenAIChatProvider(): ChatProvider {
         stop_reason: stopReason,
       };
     },
+    async streamChat(cfg, body, res, signal) {
+      const upstream = await fetch(
+        `${cfg.url.replace(/\/+$/, "")}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${cfg.token}`,
+          },
+          body: JSON.stringify({ ...toOpenAiRequest(cfg, body), stream: true }),
+          signal,
+        },
+      );
+      if (!upstream.ok || !upstream.body) {
+        await writeStreamError(res, upstream);
+        return;
+      }
+      // OpenAI's chunk stream is NOT the downstream wire — translate it
+      // into Anthropic SSE events live so the client keeps parsing one
+      // shape (this file's declared design).
+      beginSse(res);
+      await translateOpenAiStreamToAnthropic(upstream.body, res);
+    },
   };
+}
+
+// Translate an OpenAI chat-completions SSE stream into the Anthropic SSE
+// event shapes the client parses. Mappings:
+//   delta.content                        → content_block_delta {text_delta}
+//   delta.tool_calls[i] with id          → content_block_start {tool_use}
+//   delta.tool_calls[i].arguments fragment → content_block_delta {input_json_delta}
+//   finish_reason / data: [DONE]         → message_stop
+//   {"error": …} mid-stream              → {"type":"error"} event
+async function translateOpenAiStreamToAnthropic(
+  body: ReadableStream<Uint8Array>,
+  res: ServerResponse,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  // Anthropic block indexes are allocated in arrival order — the client
+  // appends blocks to its content array in the same order.
+  let nextIndex = 0;
+  let textIndex: number | null = null;
+  const toolIndexes = new Map<number, number>(); // OpenAI tool idx → Anthropic idx
+  let stopped = false;
+  const emitStop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    sseEvent(res, { type: "message_stop" });
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith("data:")) continue;
+        const dataStr = line.slice(5).trim();
+        if (!dataStr) continue;
+        if (dataStr === "[DONE]") {
+          emitStop();
+          res.end();
+          return;
+        }
+        let chunk: {
+          choices?: Array<{
+            delta?: {
+              content?: string | null;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+            finish_reason?: string | null;
+          }>;
+          error?: { message?: string };
+        };
+        try {
+          chunk = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
+        if (chunk.error) {
+          sseEvent(res, { type: "error", error: { message: chunk.error.message ?? "stream error" } });
+          res.end();
+          return;
+        }
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta;
+        if (!delta && !choice?.finish_reason) continue;
+        const text = delta?.content;
+        if (typeof text === "string" && text.length > 0) {
+          if (textIndex === null) {
+            textIndex = nextIndex;
+            nextIndex += 1;
+            sseEvent(res, { type: "content_block_start", index: textIndex, content_block: { type: "text" } });
+          }
+          sseEvent(res, { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text } });
+        }
+        for (const tc of delta?.tool_calls ?? []) {
+          const openaiIdx = typeof tc.index === "number" ? tc.index : 0;
+          let blockIndex = toolIndexes.get(openaiIdx);
+          if (blockIndex === undefined && (tc.id || tc.function?.name)) {
+            blockIndex = nextIndex;
+            nextIndex += 1;
+            toolIndexes.set(openaiIdx, blockIndex);
+            sseEvent(res, {
+              type: "content_block_start",
+              index: blockIndex,
+              content_block: {
+                type: "tool_use",
+                id: tc.id ?? `toolu_${openaiIdx}`,
+                name: tc.function?.name ?? "",
+              },
+            });
+          }
+          if (blockIndex !== undefined && tc.function?.arguments) {
+            sseEvent(res, {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+            });
+          }
+        }
+        if (choice?.finish_reason) emitStop();
+      }
+    }
+    emitStop();
+    res.end();
+  } catch {
+    // Upstream died mid-stream — close cleanly (partial answer stands).
+    res.end();
+  }
 }
 
 const CHAT_PROVIDERS: Record<string, () => ChatProvider> = {
@@ -370,6 +621,30 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
                   }))
               : [];
 
+          // ── SSE streaming passthrough ──
+          // When the client asks (stream:true), the selected provider
+          // streams the answer as Anthropic-format SSE: Anthropic
+          // gateways are relayed byte-for-byte, OpenAI gateways are
+          // translated live (see each provider's streamChat). The client
+          // parses the SSE events itself — one wire shape downstream.
+          if (parsed?.stream === true) {
+            await provider.streamChat(
+              cfg,
+              {
+                model: cfg.model,
+                max_tokens: 16384,
+                system: systemPrompt,
+                messages: normalizeTurns([...history, { role: "user", content: userText }]),
+                ...(tools ? { tools } : {}),
+                ...(toolChoice ? { tool_choice: toolChoice } : {}),
+                stream: true,
+              },
+              res,
+              abort.signal,
+            );
+            return;
+          }
+
           // Provider receives an Anthropic-format body; each provider
           // factory translates to its native wire (or passes through for
           // Anthropic) and returns Anthropic-format JSON.
@@ -382,7 +657,7 @@ function aiChatProxy(_env: Record<string, string>): Plugin {
               // mid-thought, returning content:null with stop max_tokens.
               max_tokens: 16384,
               system: systemPrompt,
-              messages: [...history, { role: "user", content: userText }],
+              messages: normalizeTurns([...history, { role: "user", content: userText }]),
               ...(tools ? { tools } : {}),
               ...(toolChoice ? { tool_choice: toolChoice } : {}),
             },
@@ -476,463 +751,18 @@ function mailBridgeProxy(env: Record<string, string>): Plugin {
   };
 }
 
-// Server-side proxy for the dev-server sandbox.
-//
-// `mcp-server` (on `:8787`) owns the per-(workspace, port) child
-// processes that the /panel workspace's terminal + preview panels
-// drive. The browser hits `/api/dev-server/*` and this middleware
-// forwards transparently — same registrable domain as the Lattice
-// page, so the IAM cookie + Vite HMR iframe both work.
-//
-// Behaviour:
-//   • GET  /api/dev-server/<wsId>/<port>/events   → SSE pump (preserves
-//                                                    the streaming
-//                                                    response so the
-//                                                    xterm panel can
-//                                                    see live output)
-//   • POST /api/dev-server/start                  → JSON forward
-//   • POST /api/dev-server/stop                   → JSON forward
-//   • GET  /api/dev-server/<wsId>/<port>/status   → JSON forward
-//   • GET  /api/dev-server/<wsId>/<port>/files/* → JSON forward
-//   • PUT  /api/dev-server/<wsId>/<port>/files/* → JSON forward
-//   • GET  /api/dev-server/<wsId>/<port>/proxy/*  → stream relay —
-//                                                    reverse-proxy to
-//                                                    127.0.0.1:<port>.
-//                                                    The dev-server
-//                                                    preview iframe
-//                                                    hangs off this.
-//
-// When `DEV_SERVER_BACKEND_URL` is unset the proxy returns 503 and
-// the client (`devServerApi`) throws — the workspace context catches
-// and degrades to "Run mode only".
-function devServerProxy(env: Record<string, string>): Plugin {
-  // Default to the local MCP server. Set to empty string to disable
-  // (the proxy will then 503 every request).
-  const backendUrl = (
-    env.DEV_SERVER_BACKEND_URL !== undefined
-      ? env.DEV_SERVER_BACKEND_URL
-      : "http://localhost:8787"
-  ).replace(/\/+$/, "");
-
-  return {
-    name: "feature-tracker:dev-server-proxy",
-    apply: "serve",
-    configureServer(server) {
-      const notConfigured = (res: ServerResponse) => {
-        res.statusCode = 503;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error: "dev_server_not_configured",
-            message:
-              "DEV_SERVER_BACKEND_URL is not set on the Vite server. Set it (and VITE_USE_DEV_SERVER=1 on the client) to enable the dev-server sandbox.",
-          }),
-        );
-      };
-
-      // Single mount at `/api/dev-server` catches every sub-path. The
-      // forward URL is `${backendUrl}/dev-server${req.url}` because
-      // Connect has already peeled the `/api/dev-server` prefix off by
-      // the time this handler sees the request.
-      server.middlewares.use("/api/dev-server", async (req, res) => {
-        if (!backendUrl) {
-          notConfigured(res);
-          return;
-        }
-        // SSE pump for `/events`, `/watch` and `/diagnostics` —
-        // preserves the streaming response so the terminal/dev-server
-        // panel, the file watcher and the LSP Problems feed get their
-        // frames without buffering. Without this branch, the
-        // JSON-forward fallback below would `await upstream.text()`
-        // and never complete on a long-lived SSE.
-        const ssePath = (req.url ?? "").split("?")[0];
-        if (
-          req.method === "GET" &&
-          (ssePath.endsWith("/events") ||
-            ssePath.endsWith("/watch") ||
-            ssePath.endsWith("/diagnostics"))
-        ) {
-          try {
-            const upstream = await fetch(
-              `${backendUrl}/dev-server${req.url ?? "/"}`,
-              {
-                headers: {
-                  accept: "text/event-stream",
-                  // Forward `accept-encoding` identity so the SSE
-                  // stream isn't gzipped — Vite's compression
-                  // middleware would otherwise buffer the response.
-                  "accept-encoding": "identity",
-                },
-              },
-            );
-            res.statusCode = upstream.status;
-            res.setHeader(
-              "content-type",
-              upstream.headers.get("content-type") ?? "text/event-stream",
-            );
-            res.setHeader("cache-control", "no-cache");
-            res.setHeader("connection", "keep-alive");
-            res.setHeader("x-accel-buffering", "no");
-            if (upstream.body) {
-              const reader = upstream.body.getReader();
-              const pump = async () => {
-                try {
-                  while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    res.write(Buffer.from(value));
-                  }
-                  res.end();
-                } catch {
-                  res.end();
-                }
-              };
-              pump();
-            } else {
-              res.end();
-            }
-          } catch (err) {
-            res.statusCode = 502;
-            res.setHeader("content-type", "application/json");
-            res.end(
-              JSON.stringify({
-                error: "upstream_failure",
-                message: err instanceof Error ? err.message : String(err),
-              }),
-            );
-          }
-          return;
-        }
-        // JSON forward for everything else (start, stop, status, files,
-        // proxy GET). The proxy/* path is a reverse-proxy on the
-        // backend side — the vite proxy here just forwards the bytes.
-        try {
-          const upstream = await fetch(
-            `${backendUrl}/dev-server${req.url ?? "/"}`,
-            {
-              method: req.method,
-              headers: { "content-type": "application/json" },
-              body: ["GET", "HEAD"].includes(req.method ?? "")
-                ? undefined
-                : await readBody(req),
-            },
-          );
-          const text = await upstream.text();
-          res.statusCode = upstream.status;
-          res.setHeader(
-            "content-type",
-            upstream.headers.get("content-type") ?? "application/json",
-          );
-          res.end(text);
-        } catch (err) {
-          res.statusCode = 502;
-          res.setHeader("content-type", "application/json");
-          res.end(
-            JSON.stringify({
-              error: "upstream_failure",
-              message: err instanceof Error ? err.message : String(err),
-            }),
-          );
-        }
-      });
-    },
-  };
-}
-
-// Local-agent bridge — same shape as prod-backend.mjs's `upgrade`
-// handler. The local agent opens a WebSocket to ws://<vite-host>/
-// api/dev-server/_agent; we forward the upgrade to ws://localhost:
-// <MCP_PORT>/_agent. Both server-side paths are inside the same dev
-// machine, so the wire is plain ws:// (no TLS). The agent's URL
-// must match the agent's --remote flag.
-function agentBridgeProxy(env: Record<string, string>): Plugin {
-  const mcpHttpUrl = (
-    env.DEV_SERVER_BACKEND_URL !== undefined
-      ? env.DEV_SERVER_BACKEND_URL
-      : "http://localhost:8787"
-  ).replace(/\/+$/, "");
-  const mcpWsUrl = mcpHttpUrl.replace(/^http/, "ws");
-
-  return {
-    name: "feature-tracker:agent-bridge-proxy",
-    apply: "serve",
-    configureServer(server) {
-      const bind = (httpServer: import("node:http").Server) => {
-        httpServer.on("upgrade", (req, clientSocket, head) => {
-          const reqUrl = req.url || "";
-          // Only consume upgrades targeted at the agent bridge. For
-          // every other path (Vite's own HMR, etc.) we just return
-          // so the remaining "upgrade" listeners — Node's
-          // EventEmitter fires them all — handle it. Destroying
-          // here would also kill Vite's HMR socket and freeze the
-   // dev page on a blank screen.
-          if (!reqUrl.startsWith("/api/dev-server/_agent")) {
-            return;
-          }
-          // Dynamic import so `ws` is only loaded when the upgrade
-          // actually fires (cold start of dev mode stays fast).
-          import("ws").then(({ WebSocket, WebSocketServer }) => {
-            const upstreamPath = reqUrl.replace(/^\/api\/dev-server/, "");
-            const upstreamUrl = `${mcpWsUrl}${upstreamPath}`;
-            // Upgrade the agent's socket in-place via ws's noServer mode.
-            // handleUpgrade writes the HTTP/1.1 101 Switching Protocols
-            // response — without it the agent sees no 101 and closes with
-            // code=1006.
-            const wss = new WebSocketServer({ noServer: true });
-            wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
-              const upstreamHeaders: Record<string, string> = {};
-              for (const [k, v] of Object.entries(req.headers)) {
-                if (!v) continue;
-                if (k === "host") continue;
-                upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
-              }
-              const upstream = new WebSocket(upstreamUrl, {
-                headers: upstreamHeaders,
-              });
-
-              let closed = false;
-              const cleanup = (code: number, reason: string) => {
-                if (closed) return;
-                closed = true;
-                try {
-                  clientWs.close(code, reason);
-                } catch {
-                  /* */
-                }
-                try {
-                  if (upstream.readyState <= 1) upstream.close(code, reason);
-                } catch {
-                  /* */
-                }
-              };
-
-              clientWs.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-                try {
-                  if (upstream.readyState === 1) {
-                    upstream.send(data as Buffer, { binary: isBinary });
-                  }
-                } catch {
-                  cleanup(1011, "upstream_send_failed");
-                }
-              });
-              clientWs.on("close", (code: number, reason: Buffer) =>
-                cleanup(code, reason?.toString?.() ?? ""),
-              );
-              clientWs.on("error", () => cleanup(1011, "client_error"));
-
-              upstream.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-                try {
-                  const buf = isBinary
-                    ? Buffer.isBuffer(data)
-                      ? data
-                      : Buffer.from(data as ArrayBuffer)
-                    : Buffer.from(data as unknown as string);
-                  clientWs.send(buf, { binary: isBinary });
-                } catch {
-                  cleanup(1011, "client_send_failed");
-                }
-              });
-              upstream.on("close", (code: number, reason: Buffer) => {
-                cleanup(code, reason?.toString?.() ?? "");
-              });
-              upstream.on("error", () => cleanup(1011, "upstream_error"));
-            });
-          }).catch(() => {
-            try {
-              clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-              clientSocket.destroy();
-            } catch {
-              /* */
-            }
-          });
-        });
-      };
-      // httpServer is created during Vite's setup; bind immediately
-      // if it exists, otherwise wait for the listening event.
-      const httpServer = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
-      if (httpServer) {
-        bind(httpServer);
-      } else {
-        server.httpServer?.once("listening", () => {
-          const hs = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
-          if (hs) bind(hs);
-        });
-      }
-    },
-  };
-}
-
-// Interactive shell bridge — forward `/api/dev-terminal/*` WebSocket
-// upgrades to `ws://localhost:8787/dev-terminal/*` (or wherever
-// `DEV_SERVER_BACKEND_URL` points). The terminal panel in
-// WorkspacePage opens a single WS that mcp-server keeps alive for
-// the duration of the PTY — this proxy is the leg from the visitor
-// to the backend. Bytes pass through bidirectionally with no
-// framing: xterm.js' `term.onData` strings go up, PTY output
-// strings come back down.
-function terminalProxy(env: Record<string, string>): Plugin {
-  const mcpHttpUrl = (
-    env.DEV_SERVER_BACKEND_URL !== undefined
-      ? env.DEV_SERVER_BACKEND_URL
-      : "http://localhost:8787"
-  ).replace(/\/+$/, "");
-  const mcpWsUrl = mcpHttpUrl.replace(/^http/, "ws");
-
-  return {
-    name: "feature-tracker:terminal-proxy",
-    apply: "serve",
-    configureServer(server) {
-      // HTTP forward for the non-WS routes under `/api/dev-terminal/*`
-      // (today: only `GET /shells` — the dropdown catalog). The
-      // upgrade handler below covers `GET /shell` (the PTY WS). The
-      // plugin's middleware must run before Vite's SPA fallback, so
-      // we mount it explicitly here.
-      server.middlewares.use("/api/dev-terminal", async (req, res) => {
-        try {
-          const upstream = await fetch(
-            `${mcpHttpUrl}/dev-terminal${req.url ?? "/"}`,
-            {
-              method: req.method,
-              headers: { "content-type": "application/json" },
-              body: ["GET", "HEAD"].includes((req.method ?? "GET").toUpperCase())
-                ? undefined
-                : await readBody(req),
-            },
-          );
-          const text = await upstream.text();
-          res.statusCode = upstream.status;
-          res.setHeader(
-            "content-type",
-            upstream.headers.get("content-type") ?? "application/json",
-          );
-          res.end(text);
-        } catch (err) {
-          res.statusCode = 502;
-          res.setHeader("content-type", "application/json");
-          res.end(
-            JSON.stringify({
-              error: "upstream_failure",
-              message: err instanceof Error ? err.message : String(err),
-            }),
-          );
-        }
-      });
-      const bind = (httpServer: import("node:http").Server) => {
-        httpServer.on("upgrade", (req, clientSocket, head) => {
-          const reqUrl = req.url || "";
-          console.log("[vite:dev-terminal-proxy] upgrade", reqUrl);
-          // Same fan-out rule as the agent-bridge plugin: only
-          // consume upgrades for our path; every other upgrade
-          // (Vite's own HMR, etc.) must pass through untouched.
-          if (!reqUrl.startsWith("/api/dev-terminal/")) {
-            return;
-          }
-          (() => {
-            const WebSocket = NodeWebSocket;
-            const WebSocketServer = NodeWebSocketServer;
-            const upstreamPath = reqUrl.replace(/^\/api\/dev-terminal/, "");
-            const upstreamUrl = `${mcpWsUrl}/dev-terminal${upstreamPath}`;
-            const wss = new WebSocketServer({ noServer: true });
-            try {
-            console.log("[vite:dev-terminal-proxy] handleUpgrade", upstreamUrl);
-            wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
-              const upstreamHeaders: Record<string, string> = {};
-              for (const [k, v] of Object.entries(req.headers)) {
-                if (!v) continue;
-                if (k === "host") continue;
-                upstreamHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
-              }
-              const upstream = new WebSocket(upstreamUrl, {
-                headers: upstreamHeaders,
-              });
-
-              let closed = false;
-              const cleanup = (code: number, reason: string) => {
-                if (closed) return;
-                closed = true;
-                try {
-                  clientWs.close(code, reason);
-                } catch {
-                  /* */
-                }
-                try {
-                  if (upstream.readyState <= 1) upstream.close(code, reason);
-                } catch {
-                  /* */
-                }
-              };
-
-              clientWs.on("message", (data, isBinary) => {
-                try {
-                  if (upstream.readyState === 1) {
-                    upstream.send(data as Buffer, { binary: isBinary });
-                  }
-                } catch {
-                  cleanup(1011, "upstream_send_failed");
-                }
-              });
-              clientWs.on("close", (code, reason) =>
-                cleanup(code, reason?.toString?.() ?? ""),
-              );
-              clientWs.on("error", () => cleanup(1011, "client_error"));
-
-              upstream.on("message", (data, isBinary) => {
-                try {
-                  const buf = isBinary
-                    ? Buffer.isBuffer(data)
-                      ? data
-                      : Buffer.from(data as ArrayBuffer)
-                    : Buffer.from(data as unknown as string);
-                  clientWs.send(buf, { binary: isBinary });
-                } catch {
-                  cleanup(1011, "client_send_failed");
-                }
-              });
-              upstream.on("close", (code, reason) => {
-                cleanup(code, reason?.toString?.() ?? "");
-              });
-              upstream.on("error", () => cleanup(1011, "upstream_error"));
-            });
-            } catch {
-              try {
-                clientSocket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-                clientSocket.destroy();
-              } catch {
-                /* */
-              }
-            }
-          })();
-        });
-      };
-      const httpServer = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
-      if (httpServer) {
-        bind(httpServer);
-      } else {
-        server.httpServer?.once("listening", () => {
-          const hs = (server as unknown as { httpServer?: import("node:http").Server }).httpServer;
-          if (hs) bind(hs);
-        });
-      }
-    },
-  };
-}
-
-// Server-side proxy for the Issue Tracker verification endpoints (MCP).
-// Same shape as aiChatProxy: when VERIFY_BACKEND_URL is unset the proxy
-// returns 503, and the client falls back to the in-browser mock so the UI
-// keeps working in dev without a backend running. Today's flow (Test
-// Connection against a fake URL) is fully preserved when
-// `VITE_USE_REAL_VERIFY` is unset on the client.
 function verifyProxy(env: Record<string, string>): Plugin {
   // Default to the local MCP server (mcp-server/ sub-folder). When the
   // env var is set to an empty string explicitly, the proxy keeps the
   // previous in-process stub behaviour (503). Set it to any other URL
   // to forward to that backend. `env` comes from loadEnv() so a value
-  // in .env works without the shell exporting it.
+  // in .env works without the shell exporting it. Default is EMPTY —
+  // the built-in stub backend answers when unset (the mcp-server that
+  // used to live on :8787 was retired).
   const backendUrl = (
     env.VERIFY_BACKEND_URL !== undefined
       ? env.VERIFY_BACKEND_URL
-      : "http://localhost:8787"
+      : ""
   ).replace(/\/+$/, "");
 
   return {
@@ -1281,28 +1111,22 @@ function verifyProxy(env: Record<string, string>): Plugin {
       });
 
       // ──────────────────────────────────────────────────────────────────
-      //  /api/playwright — bridge to the OFFICIAL Playwright MCP server.
-      //  GET  /api/playwright/tools → tool catalog (spawned via the
-      //                             mcp-server backend on :8787)
+      //  /api/playwright — bridge to the OFFICIAL Playwright MCP server,
+      //  hosted by the LOCAL RUNNER (:9090, mcp-server retired).
+      //  GET  /api/playwright/tools → live tool catalog
       //  POST /api/playwright/call  → forward one browser tool call.
-      //  The catalog is read live from `npx @playwright/mcp@latest`, so
+      //  The catalog is read live from the pinned @playwright/mcp, so
       //  the chatbot's browser tools always match the official server.
       // ──────────────────────────────────────────────────────────────────
       server.middlewares.use("/api/playwright", async (req, res) => {
-        if (!backendUrl) {
-          res.statusCode = 503;
-          res.setHeader("content-type", "application/json");
-          res.end(
-            JSON.stringify({
-              error: "verify_not_configured",
-              message: "VERIFY_BACKEND_URL is not set — the Playwright MCP bridge is unavailable.",
-            }),
-          );
-          return;
-        }
+        // Retired mcp-server gate — the runner replaces it. A stale
+        // runner (no /playwright routes) surfaces as a 404 upstream and
+        // reads clearly in the 502 below.
         try {
           const upstreamPath = (req.url ?? "/").replace(/^\/api/, "");
-          const upstream = await fetch(`${backendUrl}/playwright${upstreamPath}`, {
+          // The Playwright bridge now lives in the LOCAL RUNNER (the
+          // mcp-server was retired) — same route shapes, loopback-only.
+          const upstream = await fetch(`http://localhost:9090/playwright${upstreamPath}`, {
             method: req.method,
             headers: { "content-type": "application/json" },
             body:
@@ -1328,50 +1152,6 @@ function verifyProxy(env: Record<string, string>): Plugin {
         }
       });
 
-      // /api/tools → mcp-server /tools/*. The Configure drawer installs
-      // arbitrary npm packages into the runner's environment, so user code
-      // can `require()` them. Lives on the same backend (mcp-server on
-      // :8787) as the Playwright bridge — same forward path, distinct
-      // mount prefix so the two never collide.
-      server.middlewares.use("/api/tools", async (req, res) => {
-        if (!backendUrl) {
-          res.statusCode = 503;
-          res.setHeader("content-type", "application/json");
-          res.end(
-            JSON.stringify({
-              error: "verify_not_configured",
-              message: "VERIFY_BACKEND_URL is not set — the npm tool installer is unavailable.",
-            }),
-          );
-          return;
-        }
-        try {
-          const upstreamPath = (req.url ?? "/").replace(/^\/api/, "");
-          const upstream = await fetch(`${backendUrl}/tools${upstreamPath}`, {
-            method: req.method,
-            headers: { "content-type": "application/json" },
-            body:
-              req.method === "POST"
-                ? await readBody(req)
-                : undefined,
-          });
-          res.statusCode = upstream.status;
-          res.setHeader(
-            "content-type",
-            upstream.headers.get("content-type") ?? "application/json",
-          );
-          res.end(await upstream.text());
-        } catch (err) {
-          res.statusCode = 502;
-          res.setHeader("content-type", "application/json");
-          res.end(
-            JSON.stringify({
-              error: "upstream_failure",
-              message: err instanceof Error ? err.message : String(err),
-            }),
-          );
-        }
-      });
 
       server.middlewares.use("/api/secrets", async (req, res) => {
         if (!backendUrl) {
@@ -2105,9 +1885,6 @@ export default defineConfig(({ mode, command }) => {
     aiChatProxy(env),
     aiAvatarProxy(env),
     verifyProxy(env),
-    devServerProxy(env),
-    agentBridgeProxy(env),
-    terminalProxy(env),
     mailBridgeProxy(env),
     customUrlBanner("https://dbeegi.slsblx.com:5173/projects"),
   ],

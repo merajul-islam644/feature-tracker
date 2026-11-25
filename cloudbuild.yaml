@@ -69,10 +69,8 @@ options:
 
 steps:
   # ── 1. install ──────────────────────────────────────────────────────────
-  # Single container → two `npm ci` runs: frontend + mcp-server. The
-  # Dockerfile copies mcp-server's node_modules from the deps cache, so
-  # the image-mcp step is gone (mcp-server is built INTO the same
-  # image). Both lockfiles are committed, so the build is reproducible.
+  # Frontend deps only. (mcp-server used to be installed here too; it was
+  # retired from the repo in b6a9bda and is no longer part of the image.)
   - id: install
     name: gcr.io/cloud-builders/npm
     entrypoint: sh
@@ -80,7 +78,6 @@ steps:
       - "-c"
       - |
         npm ci
-        cd mcp-server && npm ci
     dir: "."
 
   # ── 2. typecheck ────────────────────────────────────────────────────────
@@ -110,10 +107,9 @@ steps:
     waitFor: ["typecheck"]
 
   # ── 4. build the SPA container image ────────────────────────────────────
-  # The Dockerfile is multi-stage (deps → build → runtime). prod-backend.mjs
-  # spawns mcp-server as a child process at startup, so the runtime image
-  # contains both. No mcp-server-specific build args — its only env
-  # requirement (MCP_PORT=8787) is hardcoded in the spawn block.
+  # The Dockerfile is multi-stage (deps → build → runtime). The runtime
+  # serves the SPA + self-contained /api routes via prod-backend.mjs; the
+  # mcp-server child process it used to co-locate was retired (b6a9bda).
   - id: image
     name: gcr.io/cloud-builders/docker
     args:
@@ -138,9 +134,9 @@ steps:
   # ── 6. optional Cloud Run deploy ────────────────────────────────────────
   # Runs only when the trigger passes a _SERVICE substitution. Same
   # pipeline serves both "build image only" (omitting _SERVICE) and
-  # "build + deploy" workflows without duplicating config. The single
-  # deployed service runs BOTH prod-backend.mjs and the mcp-server
-  # child process.
+  # "build + deploy" workflows without duplicating config. The deployed
+  # service runs prod-backend.mjs serving the SPA and its self-contained
+  # /api routes (the retired mcp-server child is no longer in the image).
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: sh
