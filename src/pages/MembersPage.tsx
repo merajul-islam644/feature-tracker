@@ -37,6 +37,7 @@ import {
 } from "@/lib/blocks/hooks";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { UserAvatar } from "@/components/ui/UserAvatar";
+import { ProfileHovercard } from "@/components/ui/ProfileHovercard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -465,11 +466,15 @@ function MemberCard({
             `UserAvatar` resolves the picture via the shared
             `useProfilePics` map keyed by IAM `sub`. */}
         <div className="flex flex-col items-center gap-2 text-center">
-          <UserAvatar
-            userId={member.id}
-            name={member.name}
-            className="h-28 w-28 text-3xl"
-          />
+          <ProfileHovercard userId={member.id} fallbackName={member.name} side="bottom">
+            <span className="inline-flex">
+              <UserAvatar
+                userId={member.id}
+                name={member.name}
+                className="h-28 w-28 text-3xl"
+              />
+            </span>
+          </ProfileHovercard>
           <div>
             <h3 className="text-base font-semibold text-foreground">
               {/* "I am" prefix reads as a self-introduction

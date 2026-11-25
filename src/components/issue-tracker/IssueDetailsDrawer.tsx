@@ -1,6 +1,6 @@
 // Issue detail drawer (spec section 25). Slides in from the right.
 
-import { X, ExternalLink, RefreshCcw } from "lucide-react";
+import { ExternalLink, RefreshCcw } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -55,23 +55,16 @@ export function IssueDetailsDrawer({ issue, onClose, onChangeStatus, onVerifyAga
         {issue && (
           <>
             <SheetHeader>
-              <div className="flex items-start justify-between gap-2">
-                <div className="space-y-1">
-                  <SheetTitle className="text-base">{issue.title}</SheetTitle>
-                  <SheetDescription id="issue-drawer-desc">
-                    {issue.applicationName} — {issue.url}
-                  </SheetDescription>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={onClose}
-                  aria-label="Close details"
-                  className="-mr-2 -mt-1 text-muted-foreground hover:text-foreground"
-                >
-                  <X className="h-4 w-4" aria-hidden="true" />
-                </Button>
+              <div className="space-y-1 pr-8">
+                {/* pr-8 clears the Sheet's built-in top-right close
+                    button — the drawer no longer draws its own X (it
+                    used to sit beside the built-in one, showing two
+                    crosses). SheetPrimitive.Close still routes through
+                    onOpenChange → onClose. */}
+                <SheetTitle className="text-base">{issue.title}</SheetTitle>
+                <SheetDescription id="issue-drawer-desc">
+                  {issue.applicationName} — {issue.url}
+                </SheetDescription>
               </div>
             </SheetHeader>
 

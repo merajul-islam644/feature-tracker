@@ -13,10 +13,12 @@
 // columns are fixed-width so cards keep a readable line length.
 
 import { useMemo, useState } from "react";
-import { BadgeCheck, ChevronRight, Clock3, FolderKanban, Inbox } from "lucide-react";
+import { BadgeCheck, Clock3, FolderKanban, Inbox } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { UserAvatar } from "@/components/ui/UserAvatar";
-import { useUsersByRole } from "@/lib/blocks/users";
+import { ProfileHovercard } from "@/components/ui/ProfileHovercard";
+import { useMemberProjectAssignments } from "@/lib/blocks/hooks";
+import { useAllJoinedUsers } from "@/lib/blocks/users";
 import type { Issue, IssueStatus } from "@/types/issue-tracker";
 
 interface Props {
@@ -25,6 +27,8 @@ interface Props {
   onSelect: (id: string) => void;
   /** Status change for a dropped card (store's updateIssueStatus). */
   onMoveStatus: (id: string, status: IssueStatus) => void;
+  /** Env scoping — resolves which Members-page assignees to show. */
+  projectId: string;
 }
 
 // Lifecycle order — matches the status chip row in IssueFilters so the
@@ -85,16 +89,10 @@ export function IssueBoard({
   selectedIssueId,
   onSelect,
   onMoveStatus,
+  projectId,
 }: Props) {
-  // Collapse state is per-column, session-local (GitHub persists it to
-  // the project view; we keep it in component state — the board
-  // rebuilds fresh every visit, which matches how the rest of the
-  // issue tracker treats view state).
-  const [collapsed, setCollapsed] = useState<Record<IssueStatus, boolean>>(
-    () => Object.fromEntries(BOARD_COLUMNS.map((c) => [c.status, false])) as Record<IssueStatus, boolean>,
-  );
-  // The column currently under a dragged card — highlights the drop
-  // target so the user can see where the release will land.
+  // The card stack is plain (no per-column collapse) — the chevron the
+  // user marked came off, so columns stay open.
   const [dragOverStatus, setDragOverStatus] = useState<IssueStatus | null>(
     null,
   );
@@ -112,13 +110,24 @@ export function IssueBoard({
     return byStatus;
   }, [issues]);
 
-  // Developer roster — resolves assignee ids on cards into avatar
-  // names. TanStack caches it per role, so the whole board shares one
-  // read; an empty roster (still loading / 403 fallback) just hides
-  // the avatar stack.
-  const developers = useUsersByRole("developer").data ?? [];
-  const developerName = (id: string) =>
-    developers.find((d) => d.id === id)?.name;
+  // Project assignees (Members page): everyone whose card lists this
+  // project — shown on every board card as the GitHub-style avatar
+  // stack in the boxed spot the user marked.
+  const assignmentsQuery = useMemberProjectAssignments();
+  // Live IAM roster — resolves every avatar on the board (project
+  // assignees + issue-level assignees) into names / emails / roles for
+  // the hovercard and footer. TanStack caches it (5 min), so the whole
+  // board shares one read.
+  const joinedUsers = useAllJoinedUsers().data ?? [];
+  const memberName = (id: string) =>
+    joinedUsers.find((u) => u.id === id)?.name;
+  const projectAssignees = useMemo(() => {
+    const ids = new Set<string>();
+    for (const a of assignmentsQuery.data ?? []) {
+      if (a.projectIds.includes(projectId)) ids.add(a.userId);
+    }
+    return [...ids];
+  }, [assignmentsQuery.data, projectId]);
 
   // Drop reads the id straight from the dataTransfer (set in
   // dragStart) — synchronous and reliable. The draggingId state is a
@@ -159,42 +168,8 @@ export function IssueBoard({
     <div className="issues-scrollbar -mx-1 flex h-full min-h-0 items-stretch gap-3 overflow-x-auto px-1 pb-1">
       {BOARD_COLUMNS.map((col) => {
         const list = columns.get(col.status) ?? [];
-        const isCollapsed = collapsed[col.status];
         const isDropTarget = dragOverStatus === col.status;
-        return isCollapsed ? (
-          // Collapsed rail — vertical label + count; click re-expands.
-          <button
-            key={col.status}
-            type="button"
-            onClick={() =>
-              setCollapsed((prev) => ({ ...prev, [col.status]: false }))
-            }
-            aria-label={`${col.label} — ${list.length} issues. Expand column`}
-            className={cn(
-              "flex w-11 shrink-0 flex-col items-center gap-2 rounded-lg border border-border bg-muted/40 px-1 py-3 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              isDropTarget && "ring-2 ring-primary",
-            )}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOverStatus(col.status);
-            }}
-            onDrop={(e) => handleDrop(e, col.status)}
-          >
-            <span
-              className={cn("h-1.5 w-1.5 rounded-full", columnDot[col.status])}
-              aria-hidden="true"
-            />
-            <span className="text-xs font-semibold tabular-nums text-foreground">
-              {list.length}
-            </span>
-            <span
-              className="mt-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground [writing-mode:vertical-rl]"
-              style={{ maxHeight: 220, overflow: "hidden" }}
-            >
-              {col.label}
-            </span>
-          </button>
-        ) : (
+        return (
           <section
             key={col.status}
             aria-label={`${col.label} column`}
@@ -216,8 +191,8 @@ export function IssueBoard({
             }}
             onDrop={(e) => handleDrop(e, col.status)}
           >
-            {/* Column header — dot + title + count + collapse chevron,
-                the same anatomy as a GitHub project column header. */}
+            {/* Column header — dot + title + count. No collapse chevron
+                (removed by user request). */}
             <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2.5">
               <span
                 className={cn("h-2 w-2 rounded-full", columnDot[col.status])}
@@ -229,17 +204,6 @@ export function IssueBoard({
               <span className="rounded-full bg-muted px-1.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
                 {list.length}
               </span>
-              <button
-                type="button"
-                onClick={() =>
-                  setCollapsed((prev) => ({ ...prev, [col.status]: true }))
-                }
-                aria-label={`Collapse ${col.label} column`}
-                title="Collapse column"
-                className="ml-auto rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
             </div>
             {/* Card stack — fills the column's remaining height and
                 scrolls vertically INSIDE the column (min-h-0 lets the
@@ -272,9 +236,11 @@ export function IssueBoard({
                       selectedIssueId === issue.id && "ring-2 ring-primary",
                     )}
                   >
-                    {/* Label row — severity pill (tinted, GitHub-label
-                        style) + category, with recurrence / approval
-                        badges pushed right. */}
+                    {/* Label row — severity pill + category left; the
+                        project's Members-page assignees as the
+                        GitHub-style avatar stack right (the spot the
+                        user boxed), with recurrence / approval badges
+                        after them. */}
                     <div className="flex items-center gap-1.5">
                       <span
                         className={cn(
@@ -289,7 +255,45 @@ export function IssueBoard({
                           {issue.category}
                         </span>
                       )}
-                      <span className="ml-auto flex shrink-0 items-center gap-1">
+                      {projectAssignees.length > 0 && (
+                        <span className="ml-auto flex shrink-0 items-center -space-x-1.5">
+                          {projectAssignees.slice(0, 3).map((id) => {
+                            // GitHub-style hovercard on hover — the
+                            // shared profile hovercard (avatar, name,
+                            // role, email from the live IAM roster).
+                            return (
+                              <ProfileHovercard
+                                key={id}
+                                userId={id}
+                                side="top"
+                              >
+                                <span
+                                  className="cursor-default"
+                                  aria-label="Assigned member"
+                                >
+                                  <UserAvatar
+                                    userId={id}
+                                    name={memberName(id) ?? "?"}
+                                    size="sm"
+                                    className="h-5 w-5 text-[8px] ring-1 ring-card"
+                                  />
+                                </span>
+                              </ProfileHovercard>
+                            );
+                          })}
+                          {projectAssignees.length > 3 && (
+                            <span className="rounded-full bg-muted px-1 text-[9px] font-semibold tabular-nums text-muted-foreground">
+                              +{projectAssignees.length - 3}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      <span
+                        className={cn(
+                          "flex shrink-0 items-center gap-1",
+                          projectAssignees.length === 0 && "ml-auto",
+                        )}
+                      >
                         {(issue.occurrenceCount ?? 1) > 1 && (
                           <span
                             className="rounded bg-muted px-1 text-[10px] font-medium tabular-nums text-muted-foreground"
@@ -337,7 +341,7 @@ export function IssueBoard({
                                 <UserAvatar
                                   key={id}
                                   userId={id}
-                                  name={developerName(id) ?? "?"}
+                                  name={memberName(id) ?? "?"}
                                   size="sm"
                                   className="h-5 w-5 border border-card text-[8px] ring-1 ring-card"
                                 />
@@ -355,7 +359,7 @@ export function IssueBoard({
               )}
             </div>
           </section>
-        )
+        );
       })}
     </div>
   );

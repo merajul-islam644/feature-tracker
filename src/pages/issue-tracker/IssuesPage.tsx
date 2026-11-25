@@ -272,6 +272,7 @@ export function IssuesPage() {
               onMoveStatus={(id, status) =>
                 void updateIssueStatus(id, status)
               }
+              projectId={projectId ?? ""}
             />
           ) : (
             <IssueList
