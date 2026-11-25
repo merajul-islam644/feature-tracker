@@ -633,7 +633,12 @@ body.wb-resizing .wb-sidebar { transition: none; }
   display: flex;
   min-height: 36px;
   overflow-x: auto;
+  /* Narrow layouts overflow the tab strip — the native horizontal bar
+     (light track + arrows) sat as a second bar above the breadcrumbs.
+     Scroll still works by wheel/drag; the bar itself stays hidden. */
+  scrollbar-width: none;
 }
+.wb-tabs::-webkit-scrollbar { display: none; }
 /* Editor title actions at the strip's RIGHT end (VS Code's toolbar
    position): the active file's auto-save status + undo/redo. Sticky so
    they stay pinned even when many tabs scroll under them. */
