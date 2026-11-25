@@ -52,7 +52,12 @@ export function AppLayout() {
               sidebar (SidebarProvider starts from defaultOpen alone). */}
           <SidebarStatePersistence />
           <AppSidebar />
-          <SidebarInset>
+          {/* min-w-0: as a flex-row item of SidebarProvider this <main>
+              would otherwise size to its content's min-width — wide
+              surfaces (the Issues board's 8 columns) pushed the whole
+              page into a body-level horizontal scroll. min-w-0 lets it
+              stay viewport-bound so each page owns its own overflow. */}
+          <SidebarInset className="min-w-0">
             <Topbar />
             <div className="flex-1 bg-background">
               {/* The 6xl cap fits laptops; from 2xl (≥1536px — external

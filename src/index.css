@@ -439,6 +439,28 @@
     @apply transition-colors duration-200 hover:bg-accent/40;
   }
 
+  /* Thin, unobtrusive scrollbars for the issues board (GitHub-style).
+     The classic platform scrollbars took a ~12px band per axis and, on
+     the board, read as two stacked horizontal bars under the columns. */
+  .issues-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .issues-scrollbar::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+  .issues-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .issues-scrollbar::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background: hsl(var(--border));
+  }
+  .issues-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--border-strong));
+  }
+
   /* Dot indicator for status chips */
   .status-dot {
     @apply h-2 w-2 shrink-0 rounded-full;
