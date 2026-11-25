@@ -1547,9 +1547,14 @@ app.post("/api/workbench/mkdir", async (req, res) => {
 // The AI chat's browser_* tools + /test-runner read their tool catalog
 // and forward calls through these routes; the shapes mirror the old
 // mcp-server exactly so the vite proxy and clients stay untouched.
-app.get("/playwright/status", (_req, res) => {
+// /playwright/status answers BOTH verbs: the app's localFolder client
+// posts (postJson) while tooling probes with GET — a GET-only registration
+// 404'd the POST and broke the panel's /mcp command.
+const playwrightStatusHandler = (_req, res) => {
   res.json(playwrightStatus());
-});
+};
+app.get("/playwright/status", playwrightStatusHandler);
+app.post("/playwright/status", playwrightStatusHandler);
 
 app.post("/playwright/disconnect", (_req, res) => {
   res.json(playwrightDisconnect());
@@ -1613,7 +1618,14 @@ app.post("/api/devserver/start", async (req, res) => {
   const shellArgs = isWin ? ["/d", "/s", "/c", line] : ["-lc", line];
   let child;
   try {
-    child = spawn(shell, shellArgs, { cwd: safe, windowsHide: true, detached: isWin, stdio: "ignore" });
+    // windowsHide WITHOUT detached: on Windows `detached: true` hands the
+    // child its OWN console window (DETACHED_PROCESS outranks the
+    // CREATE_NO_WINDOW that windowsHide requests) — every dev-server start
+    // popped a visible cmd.exe on the user's desktop. Without detached,
+    // CREATE_NO_WINDOW hides it; the child still survives this runner's
+    // exit (stdio "ignore", no job object ties them together), and
+    // child.pid stays the real shell so the taskkill /T stop path works.
+    child = spawn(shell, shellArgs, { cwd: safe, windowsHide: true, stdio: "ignore" });
   } catch (error) {
     res.status(500).json({ error: String(error?.message || error).slice(0, 300) });
     return;

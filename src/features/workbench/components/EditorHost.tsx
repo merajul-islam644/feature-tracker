@@ -23,12 +23,16 @@ function useMonacoTheme(): "vs" | "vs-dark" {
   const read = (): "vs" | "vs-dark" => {
     const explicit = document.documentElement.getAttribute("data-theme");
     if (explicit) return explicit === "dark" ? "vs-dark" : "vs";
+    // The shell's dark state also rides the Tailwind `dark` class (a
+    // browser can hold the class without the attribute) — without this
+    // check the editor painted white on a dark shell.
+    if (document.documentElement.classList.contains("dark")) return "vs-dark";
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "vs-dark" : "vs";
   };
   const [theme, setTheme] = useState(read);
   useEffect(() => {
     const observer = new MutationObserver(() => setTheme(read()));
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class"] });
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => setTheme(read());
     media.addEventListener("change", onChange);

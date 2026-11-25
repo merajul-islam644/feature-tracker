@@ -12,6 +12,22 @@
   height: clamp(560px, calc(100vh - 240px), 920px);
   overflow: hidden;
 }
+/* ZEN — full screen: the workbench leaves the page flow and pins over
+   the whole viewport, hiding the app chrome behind it. */
+.wb-root.wb-zen {
+  border: none;
+  border-radius: 0;
+  height: 100vh;
+  inset: 0;
+  /* !important — the page's Tailwind `space-y-*` utility puts a 16px
+     margin-top on this element (equal specificity, later source order)
+     and would leave a gap above the full-screen overlay. */
+  margin: 0 !important;
+  max-height: none;
+  position: fixed;
+  width: 100vw;
+  z-index: 60;
+}
 
 /* activity bar | sidebar | main, with the bottom panel stacked under
    the main area (VS Code layout). Hidden sidebar/panel collapse their
@@ -19,7 +35,9 @@
 .wb-frame {
   display: grid;
   flex: 1;
-  grid-template-columns: 48px auto minmax(0, 1fr);
+  /* 4th track: the right sidebar — `auto` so the empty track collapses
+     to zero width when the panel is hidden. */
+  grid-template-columns: 48px auto minmax(0, 1fr) auto;
   /* The editor row never shrinks below its chrome (tab strip + crumbs):
      a floor of `auto` keeps them intact on short windows where the
      maximized panel's 62vh used to crush them into a clipped sliver. */
@@ -36,7 +54,112 @@
   min-width: 0;
   overflow: hidden;
 }
-.wb-panel { grid-area: 2 / 3 / 3 / 4; }
+.wb-panel { grid-area: 2 / 3 / 3 / 5; }
+/* Right sidebar spans the full frame height (VS Code's secondary side
+   bar); the maximized bottom panel hides it along with the editor. */
+.wb-right-zone { grid-area: 1 / 4 / 2 / 5; }
+.wb-frame.panel-max .wb-right-zone { display: none; }
+/* ---------- right zone (AI chat beside the editor) ---------- */
+
+.wb-right-zone {
+  background: hsl(var(--card));
+  border-left: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+.wb-right-zone > .wb-ai-panel { flex: 1; min-height: 0; }
+/* Sash on the zone's left edge — drag horizontally to resize the AI
+   column, hover/active tints in the primary. */
+.wb-right-sash {
+  bottom: 0;
+  cursor: col-resize;
+  left: -3px;
+  position: absolute;
+  top: 0;
+  touch-action: none;
+  width: 7px;
+  z-index: 6;
+}
+.wb-right-sash:hover,
+.wb-right-sash:active { background: hsl(var(--primary) / 0.35); }
+
+/* ---------- AI session tabs (multiple chats at once) ---------- */
+
+.wb-ai-tabs {
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  margin-bottom: 0;
+  overflow-x: auto;
+  padding: 4px 6px 6px;
+  scrollbar-width: none;
+}
+/* With tabs present, the messages' own 10px top padding stacked on the
+   strip's border made the below-gap triple the above-gap — 3px here
+   lands it level with the 4px the strip carries on top. */
+.wb-ai-tabs + .wb-ai-messages { padding-top: 3px; }
+.wb-ai-tabs::-webkit-scrollbar { display: none; }
+.wb-ai-tab {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  gap: 5px;
+  max-width: 160px;
+  padding: 4px 6px 4px 8px;
+}
+.wb-ai-tab:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.wb-ai-tab.active {
+  background: hsl(var(--primary) / 0.14);
+  border-color: hsl(var(--border));
+  color: hsl(var(--foreground));
+}
+.wb-ai-tab:disabled { cursor: default; opacity: 0.5; }
+.wb-ai-tab-icon { flex-shrink: 0; opacity: 0.8; }
+.wb-ai-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-ai-tab-close {
+  align-items: center;
+  border-radius: 4px;
+  display: inline-flex;
+  opacity: 0.6;
+}
+.wb-ai-tab-close:hover { background: hsl(var(--muted)); opacity: 1; }
+/* AI panel header title — icon + text on one properly centered line. */
+.wb-ai-head .wb-view-title {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+.wb-ai-head .wb-view-title svg { flex-shrink: 0; }
+/* "+ New Chat" — labeled header button (icon-only .wb-icon-btn is a
+   fixed square, so width auto + a border here). */
+.wb-ai-newchat {
+  align-items: center;
+  background: transparent;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: 11px;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+.wb-ai-newchat:hover { border-color: hsl(var(--primary) / 0.6); color: hsl(var(--foreground)); }
+.wb-ai-newchat:disabled { cursor: default; opacity: 0.45; }
 /* Maximized panel: VS Code collapses the editor row to nothing and lets
    the panel fill the whole frame — set on the grid, since the panel's
    own height can't move the row split by itself. The editor area goes
@@ -721,6 +844,7 @@ body.wb-resizing .wb-sidebar { transition: none; }
   flex-direction: column;
   height: 240px;
   min-height: 0;
+  overflow: hidden;
 }
 .wb-panel-head {
   align-items: center;
@@ -901,7 +1025,7 @@ body.wb-resizing .wb-sidebar { transition: none; }
    (never display:none) so xterm's CharSizeService keeps valid dims and
    a tab switch needs no re-fit. */
 .wb-term-hosts { flex: 1; min-height: 0; position: relative; }
-.wb-term-slot { inset: 0; position: absolute; }
+.wb-term-slot { inset: 0; overflow: hidden; position: absolute; }
 .wb-term-empty {
   align-items: center;
   color: hsl(var(--muted-foreground));
@@ -915,7 +1039,19 @@ body.wb-resizing .wb-sidebar { transition: none; }
   flex: 1;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   padding: 6px 12px 8px;
+}
+/* xterm renders an ALWAYS-present viewport scrollbar (overflow-y: scroll
+   in its own css) next to whatever the container shows — that pairing
+   painted TWO vertical bars in the panel corner. The terminal still
+   scrolls by wheel / Shift+PageUp; the redundant bar is hidden. */
+.wb-term-host .xterm-viewport {
+  scrollbar-width: none;
+}
+.wb-term-host .xterm-viewport::-webkit-scrollbar {
+  height: 0;
+  width: 0;
 }
 
 /* ---------- status bar ---------- */
@@ -944,6 +1080,16 @@ body.wb-resizing .wb-sidebar { transition: none; }
   gap: 5px;
   white-space: nowrap;
 }
+/* Zen chip — full-screen toggle in the status bar. */
+.wb-status-zen {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: inherit;
+}
+.wb-status-zen:hover { text-decoration: underline; }
+.wb-status-zen.on { font-weight: 700; }
 .wb-status-url {
   max-width: 220px;
   opacity: 0.85;
@@ -1820,6 +1966,9 @@ body.wb-resizing .wb-sash-arrow { opacity: 0; pointer-events: none; }
   border-bottom-right-radius: 4px;
   color: hsl(var(--primary-foreground));
   max-width: 88%;
+  /* Footer room: the arrival time must always clear the copy button,
+     even in a tiny "hello" bubble. */
+  min-width: 96px;
   padding-bottom: 24px;
   position: relative;
 }
@@ -1981,6 +2130,82 @@ body.wb-resizing .wb-sash-arrow { opacity: 0; pointer-events: none; }
   width: 20px;
 }
 .wb-ai-copy:hover { opacity: 1; }
+/* Arrival time — bottom-left of the bubble's footer zone. `right` is a
+   hard stop BEFORE the copy button (right 4 + 20 wide + 4 gap), so the
+   two can never overlap; a too-long line ellipsizes instead. */
+.wb-ai-msg-time {
+  bottom: 6px;
+  font-size: 10.5px;
+  left: 11px;
+  letter-spacing: 0.2px;
+  opacity: 0.7;
+  overflow: hidden;
+  position: absolute;
+  right: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-ai-msg.user .wb-ai-msg-time { color: hsl(var(--primary-foreground)); }
+/* Approval-mode dropdown in the AI panel header — a compact labeled
+   control with a styled popover (Manual / Auto). */
+.wb-ai-mode-wrap { position: relative; }
+.wb-ai-mode-btn {
+  align-items: center;
+  background: transparent;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 10.5px;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px;
+}
+.wb-ai-mode-btn:hover,
+.wb-ai-mode-btn.open { border-color: hsl(var(--primary) / 0.6); color: hsl(var(--foreground)); }
+/* Auto mode is live — the chip glows in the primary tint as a signal. */
+.wb-ai-mode-btn.auto { border-color: hsl(var(--primary) / 0.45); color: hsl(var(--primary)); }
+.wb-ai-mode-caret { opacity: 0.6; }
+.wb-ai-mode-menu {
+  background: hsl(var(--popover, var(--card)));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: var(--shadow-pop);
+  min-width: 216px;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+}
+.wb-ai-mode-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  margin: 2px 6px 4px;
+  text-transform: uppercase;
+}
+.wb-ai-mode-item {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  text-align: left;
+  width: 100%;
+}
+.wb-ai-mode-item:hover { background: hsl(var(--muted)); }
+.wb-ai-mode-item.on { background: hsl(var(--primary) / 0.12); }
+.wb-ai-mode-item > svg { flex-shrink: 0; margin-top: 1px; }
+.wb-ai-mode-item-text { display: flex; flex-direction: column; gap: 1px; }
+.wb-ai-mode-item-text b { font-size: 11.5px; }
+.wb-ai-mode-item-text small { color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.35; }
+.wb-ai-mode-check { color: hsl(var(--primary)); margin-left: auto; }
 .wb-ai-suggestions { display: flex; flex-direction: column; gap: 4px; padding: 8px 4px; }
 .wb-ai-quick-label {
   color: hsl(var(--muted-foreground));

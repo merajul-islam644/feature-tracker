@@ -21,6 +21,9 @@ export type PaletteMode = "commands" | "files";
 /** Sidebar width bounds, matching VS Code's clamped sash drag. */
 export const SIDEBAR_MIN_WIDTH = 190;
 export const SIDEBAR_MAX_WIDTH = 720;
+/** Right zone (AI chat column) width bounds for its sash drag. */
+export const AI_RIGHT_MIN_WIDTH = 240;
+export const AI_RIGHT_MAX_WIDTH = 760;
 
 export type WorkbenchState = {
   sidebarView: SidebarView;
@@ -33,6 +36,14 @@ export type WorkbenchState = {
   panelTab: PanelTab;
   /** Panel stretched tall (VS Code's maximize). */
   panelMaximized: boolean;
+  /** GLOBAL AI panel — independent of sidebarView: once opened it stays
+   *  visible across every sidebar view switch until the user closes it. */
+  aiPanelVisible: boolean;
+  /** ZEN — the whole workbench fills the viewport (fixed overlay above
+   *  the app chrome), VS Code full-screen style. */
+  zenMode: boolean;
+  /** Right zone width — hosts the AI chat beside the editor. */
+  aiRightWidth: number;
   openTabs: string[];
   /** Path shown in the editor; "" when nothing is open (watermark). */
   activePath: string;
@@ -58,6 +69,9 @@ let state: WorkbenchState = {
   panelVisible: false,
   panelTab: "output",
   panelMaximized: false,
+  aiPanelVisible: false,
+  zenMode: false,
+  aiRightWidth: 360,
   openTabs: [],
   activePath: "",
   diffTabs: [],
@@ -100,7 +114,10 @@ function persistSession(): void {
         // this UI state was being dropped).
         panelVisible: state.panelVisible,
         panelTab: state.panelTab,
-        panelMaximized: state.panelMaximized
+        panelMaximized: state.panelMaximized,
+        aiPanelVisible: state.aiPanelVisible,
+        zenMode: state.zenMode,
+        aiRightWidth: state.aiRightWidth
       })
     );
   } catch {
@@ -119,11 +136,18 @@ const SESSION_FIELDS: (keyof WorkbenchState)[] = [
   "sidebarExpandedWidth",
   "panelVisible",
   "panelTab",
-  "panelMaximized"
+  "panelMaximized",
+  "aiPanelVisible",
+  "zenMode",
+  "aiRightWidth"
 ];
 
 function clampWidth(width: number): number {
   return Math.round(Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width)));
+}
+
+function clampAiRightWidth(width: number): number {
+  return Math.round(Math.min(AI_RIGHT_MAX_WIDTH, Math.max(AI_RIGHT_MIN_WIDTH, width)));
 }
 
 const listeners = new Set<() => void>();
@@ -171,10 +195,20 @@ export const workbenchStore = {
     };
   },
 
-  /** VS Code behaviour: clicking the active view's icon collapses the sidebar. */
+  /** The activity bar's AI icon: toggles the GLOBAL AI panel — it never
+   *  touches sidebarView, so browsing other sidebar views never closes
+   *  the chat. Only the user's explicit close does. */
   setSidebarView(view: SidebarView): void {
+    if (view === "ai") {
+      set({ aiPanelVisible: !state.aiPanelVisible });
+      return;
+    }
     if (state.sidebarView === view && state.sidebarVisible) set({ sidebarVisible: false });
     else set({ sidebarView: view, sidebarVisible: true });
+  },
+  /** The AI panel's own close button (and any programmatic close). */
+  setAiPanelVisible(visible: boolean): void {
+    set({ aiPanelVisible: visible });
   },
   toggleSidebar(): void {
     set({ sidebarVisible: !state.sidebarVisible });
@@ -204,6 +238,18 @@ export const workbenchStore = {
   },
   togglePanelMaximize(): void {
     set({ panelMaximized: !state.panelMaximized });
+  },
+  /** ZEN: the whole workbench fills the viewport (fixed overlay above
+   *  the app chrome). Escape also exits (the Workbench wires it). */
+  toggleZen(): void {
+    set({ zenMode: !state.zenMode });
+  },
+  setZenMode(zen: boolean): void {
+    set({ zenMode: zen });
+  },
+  /** Zone sash (the editor ↔ AI boundary): resizes the AI column. */
+  setAiRightWidth(width: number): void {
+    set({ aiRightWidth: clampAiRightWidth(width) });
   },
   /** Open the bottom panel on a specific tab (used after a run). */
   showPanel(tab: PanelTab): void {
@@ -278,7 +324,10 @@ export const workbenchStore = {
         saved?.panelTab === "output" || saved?.panelTab === "results" || saved?.panelTab === "terminal"
           ? saved.panelTab
           : "output",
-      panelMaximized: typeof saved?.panelMaximized === "boolean" ? saved.panelMaximized : false
+      panelMaximized: typeof saved?.panelMaximized === "boolean" ? saved.panelMaximized : false,
+      aiPanelVisible: typeof saved?.aiPanelVisible === "boolean" ? saved.aiPanelVisible : false,
+      zenMode: typeof saved?.zenMode === "boolean" ? saved.zenMode : false,
+      aiRightWidth: typeof saved?.aiRightWidth === "number" ? clampAiRightWidth(saved.aiRightWidth) : 360
     }, { persist: false });
   },
   /** Fresh workspace session (initial load or import): one tab open,
