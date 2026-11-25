@@ -22,8 +22,11 @@ function badgeText(count: number): string {
   return count > 99 ? "99+" : String(count);
 }
 
-export function ActivityBar({ active, changesCount, visible, onSelect, problemsCount }: {
+export function ActivityBar({ active, aiPanelVisible, changesCount, visible, onSelect, problemsCount }: {
   active: SidebarView;
+  /** GLOBAL AI panel state — the AI icon reflects it instead of the
+   *  sidebar view (the chat stays visible across every view switch). */
+  aiPanelVisible?: boolean;
   /** Dirty-file count shown on the Source Control icon, VS Code-style. */
   changesCount?: number;
   /** Error count shown on the Problems icon, same badge treatment. */
@@ -35,7 +38,9 @@ export function ActivityBar({ active, changesCount, visible, onSelect, problemsC
     <nav aria-label="Activity bar" className="wb-activity">
       {ITEMS.map((item) => {
         const Icon = item.icon;
-        const isActive = visible && item.id === active;
+        const isActive = item.id === "ai"
+          ? aiPanelVisible === true
+          : visible && item.id === active;
         const showBadge =
           (item.id === "scm" && changesCount !== undefined && changesCount > 0) ||
           (item.id === "problems" && problemsCount !== undefined && problemsCount > 0);

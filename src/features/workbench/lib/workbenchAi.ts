@@ -32,6 +32,12 @@ export type WorkbenchAiDeps = {
   readCurrent: (path: string) => Promise<string>;
   /** Queue an AI-proposed file change (diff review, not a disk write). */
   proposeEdit: (path: string, content: string, summary: string) => void;
+  /** AUTO mode: write the file to disk immediately — no review gate.
+   *  Only consulted when `autoAccept` is true. */
+  applyEdit?: (path: string, content: string) => void | Promise<void>;
+  /** True → write/edit tools apply edits via applyEdit directly and
+   *  report "applied" instead of "proposed". */
+  autoAccept?: boolean;
   /** Blocking exec at the workspace root (output mirrored to the panel). */
   exec: (command: string) => Promise<{
     code: number | null;
@@ -212,7 +218,12 @@ const SYSTEM_PROMPT = `You are the Workspace AI inside the Lattice code editor �
 LANGUAGE: The user usually writes in romanized Bengali ("Banglish", e.g. "agula koro", "dekho ki hoyeche", "file ta fix koro") mixed with English, sometimes in proper Bengali script. ALWAYS treat that as intentional and understand it — never ask to repeat, never switch the task to English "because it's easier". Reply in the user's language: Banglish/Bengali input → reply in proper Bengali script (বাংলা লিপি), NEVER romanized Bengali; English input → reply in English. Code, file paths, commands, commit messages and technical terms always stay in English.
 
 Rules:
+- GREETINGS: on a bare "hello"/"hi" (or any clear first greeting), reply with a compact structured intro in the user's language: (1) one line — who you are + which Lattice project you're in (use the HOST PROJECT block when present); (2) a capability bullet list — **Build apps** (React, Next.js, Node/Express, static sites, Python scripts), **Fix & refactor code** (read files, propose edits you review as diffs), **Run things** (installs, builds, tests, dev servers, git operations), **Browse & verify live URLs** (navigate, click through, console/network checks, structured QA report); (3) one folder-status line — if no folder is open, say file/command work waits on Explorer → Open Folder while browser work runs right away; if one IS open, name it; (4) close with ONE short question inviting the task. Keep it tight — never a wall of text.
+- EMOJIS ARE CONTEXTUAL — pick them DYNAMICALLY from the reply's type and mood, never a fixed template: greetings and welcomes feel warm and human (a wave 👋 or similar fits naturally there), status/report lines earn their marks (✓ worked, ⚠ partial, ✗ failed, ⏳ in progress), errors and warnings get serious marks (⚠️ ❌), plans get numbered steps. When no emoji adds anything, use none — a dry factual answer stays dry. Match the moment; don't decorate.
 - Use the tools to do real work (read files, search, run builds/tests, git). Read before editing.
+- CONTINUITY: every turn carries this session's recent history — NEVER claim "each chat starts fresh" or that you can't see prior messages. If a request refers to something outside the visible window (e.g. right after /new), recover IN ORDER: (1) PROJECT MEMORY facts; (2) with a folder open, READ the actual workspace files — the code is ground truth about the app; (3) only if still unclear, ask ONE focused question. Never stall on context those can fill.
+- CREDENTIALS: credentials/keys/tokens the user shares in chat STAY in this session's context — scan the visible history for them before ever saying you don't have them. If a very long task pushed them out of view, say exactly that and ask the user to re-paste — never pretend and never guess. For durability ACROSS sessions, point the user at the Secrets surface instead of saving raw credentials via memory_save.
+- PROACTIVE MEMORY: when you learn a durable fact about the app being built (its name, purpose, stack, conventions), save it via memory_save in the same turn so future sessions inherit it.
 - workspace_write_file / workspace_edit_file create PROPOSALS: the user reviews each as a diff and accepts or rejects. NEVER say a file "was modified" — say "I proposed this change; review the diff".
 - Full-file writes need the ENTIRE new content. Targeted edits: include enough of oldStr to be unambiguous.
 - Long-lived dev servers (npm run dev) are refused by exec — use the workspace_dev_server tool to start/stop them (it waits for readiness and returns the URL).
@@ -221,6 +232,19 @@ Rules:
 - NEVER repeat a tool call you already made — act on the results you already have and push FORWARD to completion. A task ends with a final report, not with re-reading the same files.
 - THINK FIRST: before your first tool call, output a short numbered plan (2-5 steps). Adapt the plan as you learn. Before declaring success, VERIFY the result (read the file back / take a browser snapshot) — never report success unverified.
 - Finish what you start: keep executing your plan across turns until every step is done and verified, then give one final pass/fail summary.
+
+VIRTUAL SENIOR TEAM — every build/design task is executed by a mental team of veterans, EACH with 10–15 years of experience. Think THROUGH each role in order before writing files; the user wants professional-grade output in BOTH functionality and design, never a demo:
+
+1. PRODUCT MANAGER (10–15y) — BEFORE anything technical: who the target user is, the ONE problem this app solves, 3–6 core user stories with acceptance criteria, and an explicit MVP scope with explicit NON-goals (what is deliberately left out). If the brief is vague, the PM makes the reasonable call and states the assumption in one line — never a question barrage.
+2. SOFTWARE ARCHITECT (10–15y) — before any code: pick the stack with a one-line justification, define the data model (entities, fields, persistence), module/file boundaries, state-management strategy, and how it survives reload + failure. Note the top 2–3 architectural risks and how the design addresses them.
+3. UI/SYSTEM DESIGNER (10–15y) — before any markup: screen inventory, layout system (grid/spacing scale), visual language (color palette with actual hex values, typography hierarchy, component states: hover/active/disabled/empty/loading/error), responsiveness plan, accessibility basics (labels, focus, contrast). The design must look like a real product, not a wireframe.
+4. SOFTWARE ENGINEER (10–15y) — implement exactly to that spec: clean separation (components/hooks/constants), meaningful naming, every state handled (empty list, loading, invalid input, network/exec failure), defensive validation, zero dead code.
+5. QA ENGINEER (10–15y) — after building, enumerate a test matrix (happy path + edge cases: empty input, invalid numbers, duplicates, boundary values, reload persistence, destructive actions) and RUN it yourself via the browser/exec tools; report pass/fail per case with evidence. A feature is done only when QA passes it.
+
+Working agreement:
+- For a BUILD task your plan shows the team's conclusions compactly: PM scope (user stories + non-goals), stack + why, data model, screens, visual direction (palette/typography) — then build, then QA-verify live.
+- If a task genuinely needs another specialist (SECURITY for auth/payment flows, DATA MODELING for complex relations, PERFORMANCE for heavy lists/queries, COPYWRITING for product copy, RELEASE/DEVOPS for deploy targets and build reproducibility, TECHNICAL WRITER for README/usage docs when shipping), NAME that role explicitly in the plan and apply its checklist too — never silently skip a concern a professional team would raise.
+- Quality bar: consistent spacing, real empty/error states, keyboard and focus handling, sensible defaults. If any of these is missing, the ENGINEER role is not done yet.
 
 SCAFFOLDING KNOWLEDGE — when the user asks to build an app with a stated stack, do NOT ask clarifying questions about structure or files. You KNOW the standard scaffolding for the common stacks; propose the complete file set immediately:
 
@@ -241,6 +265,19 @@ export type WorkbenchAiGateway = {
   url?: string;
   model?: string;
   token?: string;
+};
+
+/** Which Lattice project the panel lives in — injected into the system
+ *  prompt so the AI can name its host project and reason about what the
+ *  tracked app might be, even with no folder open. */
+export type WorkbenchAiProject = {
+  /** Project display name, e.g. "Testing AI". */
+  name: string;
+  /** Environment slug the panel is scoped to (dev/stg/prod/uat/custom). */
+  env?: string;
+  /** Feature names tracked under this project — the best hint of what
+   *  the app actually is (the project name alone often isn't). */
+  features?: string[];
 };
 
 export type WorkbenchAiTurnResult = {
@@ -296,6 +333,10 @@ async function executeTool(
         const path = str("path");
         const content = typeof input.content === "string" ? input.content : "";
         if (!path || !content.trim()) return "Error: path and non-empty content are required.";
+        if (deps.autoAccept && deps.applyEdit) {
+          await deps.applyEdit(path, content);
+          return `APPLIED ${path} directly (${content.length} chars) — auto-accept mode is ON, no review gate. Report it as APPLIED, never as proposed.`;
+        }
         deps.proposeEdit(path, content, `Write ${path}`);
         return `PROPOSED full rewrite of ${path} (${content.length} chars). The user will review the diff and accept or reject — do NOT assume it was applied.`;
       }
@@ -315,6 +356,10 @@ async function executeTool(
           occurrences > 1
             ? current.split(oldStr).join(newStr)
             : current.replace(oldStr, newStr);
+        if (deps.autoAccept && deps.applyEdit) {
+          await deps.applyEdit(path, nextContent);
+          return `APPLIED targeted edit of ${path} (${occurrences} replacement${occurrences === 1 ? "" : "s"}) — auto-accept mode is ON, no review gate. Report it as APPLIED, never as proposed.`;
+        }
         deps.proposeEdit(path, nextContent, `Edit ${path}`);
         return `PROPOSED targeted edit of ${path} (${occurrences} replacement${occurrences === 1 ? "" : "s"}). The user reviews the diff — do NOT assume it was applied.`;
       }
@@ -602,6 +647,9 @@ export async function runWorkbenchAiTurn({
   signal,
   memory,
   planOnly = false,
+  noWorkspace = false,
+  project,
+  autoAccept = false,
   maxTurns = 24,
 }: {
   prompt: string;
@@ -629,6 +677,19 @@ export async function runWorkbenchAiTurn({
    *  returns is mechanically guaranteed to be tool-free, no prompt
    *  wishful thinking involved. */
   planOnly?: boolean;
+  /** NO WORKSPACE: no folder is open — drop the workspace_* file/
+   *  terminal/git tools but KEEP the browser toolset (the runner's
+   *  Playwright drives Chromium with no folder involved) and
+   *  memory_save, so the panel stays a conversational AND live-URL
+   *  verification surface. The filesystem stays untouchable: the
+   *  dropped tools simply don't exist on the wire. */
+  noWorkspace?: boolean;
+  /** The Lattice project this panel is embedded in — host identity the
+   *  model can name when asked "which project are you in". */
+  project?: WorkbenchAiProject;
+  /** AUTO-ACCEPT mode is on — edits apply directly, so the model must
+   *  narrate "applied", not "proposed". */
+  autoAccept?: boolean;
   maxTurns?: number;
 }): Promise<WorkbenchAiTurnResult> {
   const ledger = [...history];
@@ -676,12 +737,27 @@ export async function runWorkbenchAiTurn({
     onPhase?.("thinking");
     const systemPrompt = [
       SYSTEM_PROMPT,
+      // Host identity — which Lattice project/env this panel lives in.
+      // Available with or without a folder open; the model may reason
+      // about what the app could be from the names, but the prompt pins
+      // it as an educated guess, never verified fact.
+      project?.name
+        ? `HOST PROJECT — you are embedded in Lattice's workspace for the project "${project.name}"${project.env ? ` (environment: ${project.env})` : ""}${project.features && project.features.length > 0 ? `. Its tracked features include: ${project.features.join(", ")}` : ""}.
+- When asked WHICH project you're in or what you're working on, answer from this block.
+- Names are hints, not proof: if asked what the project's app might be, reason from the project and feature names — and SAY it's an educated guess. With a workspace folder open, verify against the actual files instead of trusting the guess; without one, offer to verify once a folder is open.`
+        : "",
       // Project memory — durable facts this session must respect.
       memory && memory.length > 0
         ? `PROJECT MEMORY — durable facts about this project and the user. Obey them; never contradict them without asking:\n${memory.join("\n")}`
         : "",
       planOnly
         ? "PLAN MODE: The user wants a PLAN before any work happens. Reply with ONLY a numbered step-by-step plan (files to touch, commands to run, how you will VERIFY each step). Do NOT start executing. Keep it tight — max ~10 steps."
+        : "",
+      noWorkspace
+        ? "NO WORKSPACE FOLDER is open — the workspace_* tools (files, search, terminal, git, dev server, open folder/file) are NOT available and MUST NOT be attempted. The BROWSER tools ARE fully available and need NO folder: the browser gateway tool and pw_browser_* tools drive a real Chromium through the local runner. When the user gives a URL to open, navigate, check or VERIFY — navigate there yourself, walk the page (snapshot, click through, read console errors, broken links, network failures) and end with a STRUCTURED REPORT: what loaded, what worked, every issue found with severity and evidence, and a pass/fail verdict per area. When the user asks for file/command work, tell them to open a folder first (Explorer → Open Folder)."
+        : "",
+      autoAccept
+        ? "AUTO-ACCEPT MODE is ON: workspace_write_file / workspace_edit_file apply edits to disk DIRECTLY — there is no review gate. Describe every edit as APPLIED (with the file path); NEVER say proposed / diff review / accept-reject."
         : "",
     ]
       .filter(Boolean)
@@ -691,7 +767,22 @@ export async function runWorkbenchAiTurn({
       system: systemPrompt,
       // Plan mode sends NO tool array at all — the model physically
       // cannot emit a tool_use block against a tool-less request.
-      ...(planOnly ? {} : { tools: [...WORKBENCH_TOOLS, ...(await getBrowserTools())] }),
+      // No-workspace mode keeps the BROWSER toolset (the runner's
+      // Playwright drives Chromium with no folder involved) plus
+      // memory_save — only the workspace_* file/terminal/git tools are
+      // dropped, so URL navigation/verification works folder-less.
+      ...(planOnly
+        ? {}
+        : noWorkspace
+          ? {
+              tools: [
+                ...WORKBENCH_TOOLS.filter(
+                  (tool) => tool.name === "browser" || tool.name === "memory_save",
+                ),
+                ...(await getBrowserTools()),
+              ],
+            }
+          : { tools: [...WORKBENCH_TOOLS, ...(await getBrowserTools())] }),
       // `ledger` carries the prompt + every prior turn's tool results —
       // the model continues WITH its context, never from scratch.
       history: ledger,

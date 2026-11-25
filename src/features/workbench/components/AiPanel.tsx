@@ -28,16 +28,17 @@
 // three-dot menu (sessions / skills / memory / context toggle / export
 // / settings / clear) and a proposal counter.
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Bot,
   BrainCircuit,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ClipboardList,
   Copy,
   Square,
   Download,
-  Eraser,
   FilePlus2,
   History,
   MessageSquarePlus,
@@ -47,19 +48,26 @@ import {
   Plus,
   Send,
   Settings,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Wrench,
   X,
   Zap,
 } from "lucide-react";
-import { useUserAiConfig } from "@/lib/blocks/hooks";
+import { useProject, useProjectFeatures, useUserAiConfig } from "@/lib/blocks/hooks";
+import { useActiveEnv } from "@/contexts/ActiveEnvContext";
 import { localFolder } from "../../../lib/workspace/localFolder";
 import { getSelectionText } from "../lib/editorActions";
 import { runWorkbenchAiTurn, type WorkbenchAiContext, type WorkbenchAiTurnResult } from "../lib/workbenchAi";
 import { addMemory, loadMemory, memoryPromptBlock, removeMemory, type AiMemoryEntry } from "../lib/aiMemory";
 import { addSkill, loadSkills, removeSkill, type AiSkill } from "../lib/aiSkills";
 import { loadPlanState, savePlanState } from "../lib/aiPlanStore";
+import {
+  loadApprovalMode,
+  saveApprovalMode,
+  type AiApprovalMode,
+} from "../lib/aiApproval";
 import type { AiProposal } from "../state/workbenchStore";
 import {
   deleteSession,
@@ -72,8 +80,13 @@ import {
   type ChatEntry,
 } from "../lib/aiSessions";
 
-const WELCOME =
-  "I can read, search, edit (as reviewable diffs), run builds/tests and use git in your open folder. What should we work on?";
+/** Welcome husks persisted by OLDER builds as the first chat entry —
+ *  stripped from every restored session so they can never render as a
+ *  bubble again. The fresh-chat hero (empty entries) replaces them. */
+const LEGACY_WELCOME_TEXTS = new Set([
+  "I can read, search, edit (as reviewable diffs), run builds/tests and use git in your open folder. What should we work on?",
+  "Open a folder first — then I can read, edit and run things in it.",
+]);
 
 /** Preset "skills" — one-click prompts that exercise the AI's tools. */
 const SKILLS: { label: string; prompt: string }[] = [
@@ -87,6 +100,23 @@ const SKILLS: { label: string; prompt: string }[] = [
 
 function copyText(text: string): void {
   void navigator.clipboard?.writeText(text).catch(() => undefined);
+}
+
+function formatChatTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+/** Drop legacy welcome husks from a restored session — older builds
+ *  persisted one as the first entry; it must never render as a bubble. */
+function stripLegacyHusk(entries: ChatEntry[]): ChatEntry[] {
+  return entries.filter(
+    (entry) =>
+      !(entry.role === "assistant" && LEGACY_WELCOME_TEXTS.has(entry.text)),
+  );
 }
 
 /** Dependency-free rich rendering, block-aware: fenced code boxes
@@ -255,7 +285,7 @@ function renderInline(text: string): ReactNode[] {
   return out;
 }
 
-export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, onProposeEdit, onExec, onOpenFile, onClose, proposals, onAcceptAll, onRejectAll, onReview, reviewing }: {
+export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, onProposeEdit, onApplyEdit, onExec, onOpenFile, onClose, proposals, onAcceptAll, onRejectAll, onReview, reviewing }: {
   /** Project id — sessions persist keyed by it. */
   projectId: string;
   /** Absolute workspace root (null = no folder open). */
@@ -267,6 +297,8 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   /** Load + return current content (proposal baselines). */
   readCurrent: (path: string) => Promise<string>;
   onProposeEdit: (path: string, content: string, summary: string) => void;
+  /** AUTO mode: write the file to disk immediately (no review card). */
+  onApplyEdit: (path: string, content: string) => void;
   /** Blocking exec — output mirrors into the Output panel. */
   onExec: (command: string) => Promise<{
     code: number | null;
@@ -288,9 +320,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   /** True while the review surface is open (hides the card's CTA). */
   reviewing: boolean;
 }) {
-  const [entries, setEntries] = useState<ChatEntry[]>([
-    { role: "assistant", text: root ? WELCOME : "Open a folder first — then I can read, edit and run things in it." },
-  ]);
+  const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [history, setHistory] = useState<AiHistoryEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -303,12 +333,18 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   /** "thinking" while the model call is in flight, "tools" while tools run. */
   const [phase, setPhase] = useState<"thinking" | "tools" | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  /** Approval-mode dropdown open state (the header's Manual/Auto picker). */
+  const [modeOpen, setModeOpen] = useState(false);
   /** Which menu section is expanded: "sessions" | "skills" | "memory" | null. */
   const [openSection, setOpenSection] = useState<"sessions" | "skills" | "memory" | null>(null);
   /** Saved sessions (localStorage, per project). */
   const [sessions, setSessions] = useState<AiSession[]>([]);
   const [sessionId, setSessionId] = useState<string>(() => newSessionId());
   const [createdAt, setCreatedAt] = useState(() => Date.now());
+  /** OPEN SESSION TABS — multiple chats alive at once (VS Code/Claude
+   *  style). Switching tabs swaps conversations instantly; each session
+   *  keeps its own history in the registry. */
+  const [openTabs, setOpenTabs] = useState<{ id: string; title: string }[]>([]);
   /** Persistent project memory — injected into every turn's system prompt. */
   const [memory, setMemory] = useState<AiMemoryEntry[]>([]);
   /** User-authored skills (localStorage, per project). */
@@ -321,14 +357,39 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
    *  approval card IS the user's pending decision. */
   const [planMode, setPlanMode] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
+  /** APPROVAL MODE — "manual" = edits land as Accept/Reject diff cards;
+   *  "auto" = edits write to disk directly, no gate. Persisted per
+   *  project so the choice survives reloads. */
+  const [approvalMode, setApprovalMode] = useState<AiApprovalMode>("manual");
   /** Memory page quick-add box. */
   const [newMemoryText, setNewMemoryText] = useState("");
+  /** The session restored on mount — once true, saves start flowing.
+   *  Declared BEFORE the save effects so they can guard on it: on a
+   *  fresh mount the save effects must not fire with default state and
+   *  clobber the persisted values before the restore effect reads them
+   *  (that race reset the approval mode to Manual on every reload). */
+  const restoredRef = useRef(false);
+  /** The approval mode loaded from storage on restore. Saves are skipped
+   *  while the state still equals it — a stale re-run of the save effect
+   *  (StrictMode remount, project switch) must never write the
+   *  pre-hydration default back over the persisted value. */
+  const loadedApprovalRef = useRef<AiApprovalMode>("manual");
+  /** Same guard for the plan-state persistence. */
+  const loadedPlanRef = useRef<{ planMode: boolean; pendingPlan: string | null }>({
+    planMode: false,
+    pendingPlan: null,
+  });
   useEffect(() => {
     if (!projectId) return;
+    if (planMode === loadedPlanRef.current.planMode && pendingPlan === loadedPlanRef.current.pendingPlan) return;
     savePlanState(projectId, { planMode, pendingPlan });
+    loadedPlanRef.current = { planMode, pendingPlan };
   }, [projectId, planMode, pendingPlan]);
-  /** The session restored on mount — once true, saves start flowing. */
-  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!projectId || approvalMode === loadedApprovalRef.current) return;
+    saveApprovalMode(projectId, approvalMode);
+    loadedApprovalRef.current = approvalMode;
+  }, [projectId, approvalMode]);
   const listRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -340,6 +401,30 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   // The Settings-saved AI gateway config — attached to every model call.
   const aiConfigQuery = useUserAiConfig();
   const gatewayConfig = aiConfigQuery.data ?? undefined;
+  // HOST PROJECT identity — which Lattice project/env this panel lives
+  // in, plus its tracked feature names. Injected into the system prompt
+  // so the AI can answer "which project are you in" and reason about
+  // what the tracked app might be, with or without a folder open.
+  // Shares the React Query cache with every other useProject/
+  // useProjectFeatures call — no extra network cost.
+  const activeEnv = useActiveEnv();
+  const projectQuery = useProject(projectId);
+  const featuresQuery = useProjectFeatures(projectId, activeEnv?.envSlug);
+  const featureNames = useMemo(
+    () =>
+      (featuresQuery.data ?? [])
+        .map((feature) => feature.name)
+        .filter(Boolean)
+        .slice(0, 25),
+    [featuresQuery.data],
+  );
+  const aiProject = projectQuery.data?.name
+    ? {
+        name: projectQuery.data.name,
+        env: activeEnv?.envSlug,
+        features: featureNames,
+      }
+    : undefined;
   /** Editor-aware context toggle (menu). On by default — Claude-like. */
   const [includeFileContext, setIncludeFileContext] = useState(true);
 
@@ -350,11 +435,16 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   // bubble sealed — a mid-run unmount flush can persist the flag, and
   // an open bubble would swallow the NEXT turn's deltas.
   const sealEntries = (entries: ChatEntry[]): ChatEntry[] =>
-    entries.map((entry) =>
-      entry.role === "assistant" && entry.streaming
-        ? { role: "assistant", text: entry.text }
-        : entry,
-    );
+    entries.map((entry) => {
+      if (entry.role === "assistant" && entry.streaming) {
+        // Sealing drops ONLY the streaming flag — ts/durationMs must
+        // survive (they render under the bubble after restore).
+        const { streaming: _sealed, ...rest } = entry;
+        void _sealed;
+        return rest;
+      }
+      return entry;
+    });
   useEffect(() => {
     if (!projectId) return;
     restoredRef.current = true;
@@ -369,21 +459,27 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
     const plan = loadPlanState(projectId);
     setPlanMode(plan.planMode);
     setPendingPlan(plan.pendingPlan);
+    const loadedApproval = loadApprovalMode(projectId);
+    loadedApprovalRef.current = loadedApproval;
+    setApprovalMode(loadedApproval);
     if (saved.length > 0) {
       const last = saved[0];
       setSessionId(last.id);
-      setEntries(sealEntries(last.entries));
+      // Strip legacy welcome husks — sessions saved by older builds carry
+      // one as their first entry and it must never render as a bubble.
+      setEntries(stripLegacyHusk(sealEntries(last.entries)));
       setHistory(last.history);
       setCreatedAt(last.createdAt || Date.now());
+      setOpenTabs([{ id: last.id, title: last.title }]);
     } else {
       // Fresh project: a brand-new empty chat — never carry the previous
       // project's conversation across the switch.
-      setEntries([
-        { role: "assistant", text: root ? WELCOME : "Open a folder first — then I can read, edit and run things in it." },
-      ]);
+      const fresh = newSessionId();
+      setSessionId(fresh);
+      setEntries([]);
       setHistory([]);
-      setSessionId(newSessionId());
       setCreatedAt(Date.now());
+      setOpenTabs([{ id: fresh, title: "New chat" }]);
     }
   }, [projectId]);
 
@@ -406,16 +502,22 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
     const title =
       entries.find((entry) => entry.role === "user")?.text ||
       titleFromPrompt("New chat");
-    setSessions(
-      upsertSession(projectId, {
-        id: sessionId,
-        title,
-        createdAt,
-        updatedAt: Date.now(),
-        entries,
-        history,
-      }),
-    );
+    const savedList = upsertSession(projectId, {
+      id: sessionId,
+      title,
+      createdAt,
+      updatedAt: Date.now(),
+      entries,
+      history,
+    });
+    setSessions(savedList);
+    // Keep the tab strip's label in step with the auto-generated title.
+    const savedCurrent = savedList.find((session) => session.id === sessionId);
+    if (savedCurrent) {
+      setOpenTabs((tabs) =>
+        tabs.map((tab) => (tab.id === sessionId ? { ...tab, title: savedCurrent.title } : tab)),
+      );
+    }
   }, [projectId, entries, history, sessionId, createdAt]);
 
   // Flush on unmount (switching sidebar views / navigating mid-run) —
@@ -425,7 +527,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   useEffect(
     () => () => {
       const snap = unmountRef.current;
-      if (!snap.projectId || snap.entries.length <= 1) return;
+      if (!snap.projectId || snap.entries.length === 0) return;
       const title =
         snap.entries.find((entry) => entry.role === "user")?.text ||
         titleFromPrompt("New chat");
@@ -474,28 +576,80 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
 
   /** Start a fresh conversation (the old one stays in Sessions). */
   function newChat(): void {
-    setEntries([{ role: "assistant", text: root ? WELCOME : "Open a folder first — then I can read, edit and run things in it." }]);
+    openSessionTab();
+  }
+
+  function restoreSession(session: AiSession): void {
+    setSessionId(session.id);
+    setEntries(stripLegacyHusk(sealEntries(session.entries)));
+    setHistory(session.history);
+    setOpenSection(null);
+  }
+
+  /** Switch to another OPEN tab: flush the current conversation into the
+   *  registry first, then load the target's entries. A tab whose session
+   *  was never saved (fresh, empty) just gets a fresh empty chat. */
+  function switchSession(id: string): void {
+    if (busy || id === sessionId) return;
+    // Flush current: same record the save-effect would write.
+    if (entries.some((entry) => entry.role === "user")) {
+      const title = entries.find((entry) => entry.role === "user")?.text || titleFromPrompt("New chat");
+      setSessions(upsertSession(projectId, { id: sessionId, title, createdAt, updatedAt: Date.now(), entries, history }));
+    }
+    const savedSession = loadSessions(projectId).find((session) => session.id === id);
+    setSessionId(id);
+    setEntries(savedSession ? stripLegacyHusk(sealEntries(savedSession.entries)) : []);
+    setHistory(savedSession ? savedSession.history : []);
+    setCreatedAt(savedSession?.createdAt || Date.now());
+    setOpenTabs((tabs) =>
+      tabs.map((tab) => (tab.id === id ? { ...tab, title: savedSession?.title || tab.title } : tab)),
+    );
+  }
+
+  /** Open a brand-new chat tab (the "+" button, menu "New chat", /new). */
+  function openSessionTab(): void {
+    if (busy) return;
+    const id = newSessionId();
+    setOpenTabs((tabs) => [...tabs, { id, title: "New chat" }]);
+    setSessionId(id);
+    setEntries([]);
     setHistory([]);
-    setSessionId(newSessionId());
     setCreatedAt(Date.now());
     setOpenSection(null);
     setPendingPlan(null);
   }
 
-  function restoreSession(session: AiSession): void {
-    setSessionId(session.id);
-    setEntries(sealEntries(session.entries));
-    setHistory(session.history);
-    setOpenSection(null);
+  /** Close a tab. The session itself stays in the registry (close ≠
+   *  delete) — only the tab goes away. Closing the active tab switches
+   *  to its nearest neighbour; closing the last tab opens a fresh chat. */
+  function closeSessionTab(id: string): void {
+    if (busy) return;
+    const index = openTabs.findIndex((tab) => tab.id === id);
+    const next = openTabs.filter((tab) => tab.id !== id);
+    setOpenTabs(next);
+    if (id !== sessionId) return;
+    if (next.length === 0) {
+      const fresh = newSessionId();
+      setOpenTabs([{ id: fresh, title: "New chat" }]);
+      setSessionId(fresh);
+      setEntries([]);
+      setHistory([]);
+      setCreatedAt(Date.now());
+      return;
+    }
+    const target = next[Math.max(0, Math.min(index, next.length - 1))];
+    switchSession(target.id);
   }
 
   function removeSession(id: string): void {
     setSessions(deleteSession(projectId, id));
-    if (id === sessionId) newChat();
+    // If the removed session held an open tab, close that tab too —
+    // closeSessionTab handles the active-tab neighbour switch.
+    if (openTabs.some((tab) => tab.id === id)) closeSessionTab(id);
   }
 
   function clearChat(): void {
-    setEntries([{ role: "assistant", text: root ? WELCOME : "Open a folder first — then I can read, edit and run things in it." }]);
+    setEntries([]);
     setHistory([]);
     setOpenSection(null);
   }
@@ -644,10 +798,8 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
   async function send(prompt: string, opts?: { executingPlan?: boolean }): Promise<void> {
     const text = prompt.trim();
     if (!text || busy) return;
-    if (!root) {
-      push({ role: "assistant", text: "Open a folder first (Explorer → Open Folder) — I work inside it." });
-      return;
-    }
+    // No folder? The chat still runs — noWorkspace mode sends no tools,
+    // so the model answers conversationally and can't touch files.
     setInput("");
     setMenuOpen(false);
     if (text.startsWith("/")) {
@@ -675,6 +827,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
           : attached.length > 0
             ? `${text}\n📎 ${attached.map((file) => file.name).join(", ")}`
             : text,
+      ts: Date.now(),
     });
     const controller = new AbortController();
     abortRef.current = controller;
@@ -697,7 +850,8 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         if (last && last.role === "assistant" && last.streaming) {
           copy[copy.length - 1] = { role: "assistant", text: last.text + delta, streaming: true };
         } else {
-          copy.push({ role: "assistant", text: delta, streaming: true });
+          // New bubble opens — this moment is its arrival time.
+          copy.push({ role: "assistant", text: delta, streaming: true, ts: Date.now() });
         }
         return copy;
       });
@@ -713,18 +867,29 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
       );
     };
     /** Pin the authoritative final answer onto the last streaming bubble
-     *  (or push one when the turn streamed nothing). */
-    const finalize = (finalText: string): void => {
+     *  (or push one when the turn streamed nothing). durationMs = whole
+     *  send's wall time — shown as "· 3.2s" beside the arrival time. */
+    const finalize = (finalText: string, durationMs?: number): void => {
       setEntries((prev) => {
         const copy = [...prev];
         for (let i = copy.length - 1; i >= 0; i -= 1) {
           const entry = copy[i];
           if (entry.role === "assistant" && entry.streaming) {
-            copy[i] = { role: "assistant", text: finalText };
+            copy[i] = {
+              role: "assistant",
+              text: finalText,
+              ts: entry.ts ?? Date.now(),
+              ...(durationMs !== undefined ? { durationMs } : {}),
+            };
             return copy;
           }
         }
-        copy.push({ role: "assistant", text: finalText });
+        copy.push({
+          role: "assistant",
+          text: finalText,
+          ts: Date.now(),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+        });
         return copy;
       });
     };
@@ -736,19 +901,26 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
       // auto-continues until the task reports completion (bounded by a
       // continuation guard so a confused model can't spin forever).
       let turnPrompt = fullPrompt;
-      let combinedHistory = history.slice(-40);
+      let combinedHistory = history.slice(-60);
       let continuation = 0;
       const MAX_CONTINUATIONS = 8;
       let turnResult: WorkbenchAiTurnResult | null = null;
+      // Whole-send wall clock — lands on the final bubble as durationMs.
+      const turnStart = Date.now();
       for (;;) {
         const result = await runWorkbenchAiTurn({
           prompt: turnPrompt,
           history: combinedHistory,
           context,
           deps: {
-            root,
+            // Never used in noWorkspace mode (no tools are sent) — an
+            // empty string satisfies the type honestly.
+            root: root ?? "",
             readCurrent: readCurrent,
             proposeEdit: onProposeEdit,
+            // Auto-accept mode: write edits straight to disk, no cards.
+            applyEdit: onApplyEdit,
+            autoAccept: approvalMode === "auto",
             exec: onExec,
             openFile: onOpenFile,
             saveMemory: (fact) => {
@@ -759,6 +931,9 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
           // Project memory rides into the system prompt every turn.
           memory: memory.map((entry) => entry.text),
           planOnly: planPhase,
+          noWorkspace: !root,
+          project: aiProject,
+          autoAccept: approvalMode === "auto",
           gateway: gatewayConfig
             ? {
                 provider: gatewayConfig.provider,
@@ -783,7 +958,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
             setPhase(phase === "thinking" ? "thinking" : "tools");
           },
         });
-        combinedHistory = [...combinedHistory, ...result.history].slice(-40);
+        combinedHistory = [...combinedHistory, ...result.history].slice(-60);
         turnResult = result;
         // Interim narration already streamed live into its own bubble —
         // result.thoughts is the same text; pushing it again would echo.
@@ -795,8 +970,10 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
           push({ role: "activity", text: `auto: continuing (${continuation}/${MAX_CONTINUATIONS})` });
           continue;
         }
-        setHistory((prev) => [...prev, ...result.history].slice(-24));
-        finalize(result.text || "(no response)");
+        // 60-entry window — a credentials message must survive a long
+        // tool-heavy stretch (each tool call spends 2 entries).
+        setHistory((prev) => [...prev, ...result.history].slice(-60));
+        finalize(result.text || "(no response)", Date.now() - turnStart);
         break;
       }
       if (planPhase) {
@@ -815,9 +992,9 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
       sealStreaming();
       const message = error instanceof Error ? error.message : String(error);
       if (/abort/i.test(message)) {
-        push({ role: "assistant", text: "Stopped." });
+        push({ role: "assistant", text: "Stopped.", ts: Date.now() });
       } else {
-        push({ role: "assistant", text: `Error: ${message}` });
+        push({ role: "assistant", text: `Error: ${message}`, ts: Date.now() });
       }
     } finally {
       abortRef.current = null;
@@ -844,19 +1021,102 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
     push({ role: "activity", text: "Plan discarded — nothing was executed." });
   }
 
-  /** Fresh chat = only the welcome husk (or nothing at all) — the
-   *  messages area then shows a centered hero instead of a first card. */
-  const isFreshChat =
-    !busy &&
-    (entries.length === 0 ||
-      (entries.length === 1 && entries[0].role === "assistant" && entries[0].text === WELCOME));
+  /** Fresh chat = no messages yet — the messages area then shows a
+   *  centered hero instead of a first card. */
+  const isFreshChat = !busy && entries.length === 0;
   const gatewayReady = Boolean(gatewayConfig?.token);
 
   return (
     <div className="wb-view wb-ai-panel">
       <div className="wb-view-head wb-ai-head">
-        <span className="wb-view-title">AI</span>
+        <span className="wb-view-title wb-ai-title">
+          <Bot size={13} aria-hidden="true" />
+          AI
+        </span>
         <span className="wb-view-actions">
+          {/* New chat — one click starts a fresh session tab. */}
+          <button
+            aria-label="New chat session"
+            className="wb-ai-newchat"
+            disabled={busy}
+            onClick={openSessionTab}
+            title="New chat session"
+            type="button"
+          >
+            <Plus size={13} aria-hidden="true" />
+            New Chat
+          </button>
+          {/* Approval mode — Auto = edits apply instantly, no gate;
+              Manual = every edit lands as an Accept/Reject card. */}
+          <span className="wb-ai-mode-wrap">
+            <button
+              aria-expanded={modeOpen}
+              aria-haspopup="menu"
+              aria-label="AI approval mode"
+              className={`wb-ai-mode-btn${modeOpen ? " open" : ""}${approvalMode === "auto" ? " auto" : ""}`}
+              onClick={() => setModeOpen((open) => !open)}
+              title="Approval mode — how the AI's file edits apply"
+              type="button"
+            >
+              {approvalMode === "auto" ? (
+                <Zap aria-hidden="true" size={12} />
+              ) : (
+                <ShieldCheck aria-hidden="true" size={12} />
+              )}
+              {approvalMode === "auto" ? "Auto" : "Manual"}
+              <ChevronDown aria-hidden="true" className="wb-ai-mode-caret" size={11} />
+            </button>
+            {modeOpen ? (
+              <>
+                <div
+                  aria-hidden="true"
+                  className="wb-ai-menu-shield"
+                  onClick={() => setModeOpen(false)}
+                />
+                <div className="wb-ai-mode-menu" role="menu">
+                  <p className="wb-ai-mode-label">File-edit approval</p>
+                  <button
+                    aria-checked={approvalMode === "manual"}
+                    className={`wb-ai-mode-item${approvalMode === "manual" ? " on" : ""}`}
+                    onClick={() => {
+                      setApprovalMode("manual");
+                      setModeOpen(false);
+                    }}
+                    role="menuitemradio"
+                    type="button"
+                  >
+                    <ShieldCheck aria-hidden="true" size={14} />
+                    <span className="wb-ai-mode-item-text">
+                      <b>Manual review</b>
+                      <small>Every edit waits for your Accept / Reject</small>
+                    </span>
+                    {approvalMode === "manual" ? (
+                      <Check aria-hidden="true" className="wb-ai-mode-check" size={13} />
+                    ) : null}
+                  </button>
+                  <button
+                    aria-checked={approvalMode === "auto"}
+                    className={`wb-ai-mode-item${approvalMode === "auto" ? " on" : ""}`}
+                    onClick={() => {
+                      setApprovalMode("auto");
+                      setModeOpen(false);
+                    }}
+                    role="menuitemradio"
+                    type="button"
+                  >
+                    <Zap aria-hidden="true" size={14} />
+                    <span className="wb-ai-mode-item-text">
+                      <b>Auto-accept</b>
+                      <small>Edits apply instantly — no review gate</small>
+                    </span>
+                    {approvalMode === "auto" ? (
+                      <Check aria-hidden="true" className="wb-ai-mode-check" size={13} />
+                    ) : null}
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </span>
           {proposals.length > 0 ? (
             <span className="wb-activity-badge" style={{ position: "static" }}>
               {proposals.length}
@@ -870,16 +1130,6 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
             type="button"
           >
             <MoreHorizontal size={14} />
-          </button>
-          <button
-            aria-label="Clear chat"
-            className="wb-icon-btn"
-            disabled={busy || entries.length <= 1}
-            onClick={clearChat}
-            title="Clear this conversation"
-            type="button"
-          >
-            <Eraser size={13} />
           </button>
           <button aria-label="Close AI panel" className="wb-icon-btn" onClick={onClose} title="Close" type="button">
             <X size={13} />
@@ -1018,7 +1268,13 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
                       <button
                         className="wb-ai-item-main"
                         onClick={() => {
-                          restoreSession(session);
+                          // Open as a TAB (not a replace) — multiple
+                          // sessions can be alive at once; switching is
+                          // instant and nothing is lost.
+                          if (!openTabs.some((tab) => tab.id === session.id)) {
+                            setOpenTabs((tabs) => [...tabs, { id: session.id, title: session.title }]);
+                          }
+                          switchSession(session.id);
                           setOpenSection(null);
                         }}
                         title={session.title}
@@ -1205,6 +1461,42 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         </div>
       ) : (
         <>
+        {/* Session tabs — multiple chats alive at once, VS Code/Claude
+            style. Switching is instant (registry-backed) and while a
+            turn runs the other tabs lock, so a stream can never bleed
+            into the wrong conversation. */}
+        {openTabs.length > 0 ? (
+          <div className="wb-ai-tabs">
+            {openTabs.map((tab) => (
+              <button
+                aria-current={tab.id === sessionId ? "true" : undefined}
+                className={`wb-ai-tab${tab.id === sessionId ? " active" : ""}`}
+                disabled={busy && tab.id !== sessionId}
+                key={tab.id}
+                onClick={() => switchSession(tab.id)}
+                title={tab.title}
+                type="button"
+              >
+                <Bot aria-hidden="true" className="wb-ai-tab-icon" size={10} />
+                <span className="wb-ai-tab-title">{tab.title}</span>
+                {openTabs.length > 1 ? (
+                  <span
+                    aria-label={`Close tab: ${tab.title}`}
+                    className="wb-ai-tab-close"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closeSessionTab(tab.id);
+                    }}
+                    role="button"
+                    tabIndex={-1}
+                  >
+                    <X size={10} />
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="wb-ai-messages" ref={listRef}>
         {isFreshChat ? (
           <div className="wb-ai-welcome">
@@ -1213,7 +1505,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
             <p className="wb-ai-welcome-sub">
               {root
                 ? "I can read, edit, run and use git across your open folder — just ask in plain language."
-                : "Open a folder first — then I can read, edit and run things in it."}
+                : "Chat and live URL checks work right away — open a folder to unlock file, terminal and git tools."}
             </p>
           </div>
         ) : (
@@ -1237,6 +1529,16 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
               {renderRich(entry.text)}
               {entry.role === "assistant" && entry.streaming ? (
                 <span aria-hidden="true" className="wb-ai-caret" />
+              ) : null}
+              {/* Arrival time — user text and AI responses alike. The
+                  final AI bubble of a send also carries its duration. */}
+              {(entry.role === "user" || entry.role === "assistant") && entry.ts ? (
+                <span className="wb-ai-msg-time">
+                  {formatChatTime(entry.ts)}
+                  {entry.role === "assistant" && entry.durationMs
+                    ? ` · ${(entry.durationMs / 1000).toFixed(1)}s`
+                    : ""}
+                </span>
               ) : null}
               {(entry.role === "assistant" || entry.role === "user") && entry.text ? (
                 <button
@@ -1342,7 +1644,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         <button
           aria-label="Attach a text file"
           className="wb-icon-btn wb-ai-attach"
-          disabled={busy || !root}
+          disabled={busy}
           onClick={() => fileInputRef.current?.click()}
           title="Attach a text file — its content joins your message"
           type="button"
@@ -1352,7 +1654,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
         <textarea
           aria-label="Ask the AI"
           className="wb-ai-input wb-ai-input-area"
-          disabled={busy || !root}
+          disabled={busy}
           onChange={(event) => {
             setInput(event.target.value);
             const el = event.target;
@@ -1366,7 +1668,7 @@ export function AiPanel({ projectId, root, activePath, cursorLine, readCurrent, 
               void send(input);
             }
           }}
-          placeholder={root ? "Ask, edit, run — scoped to your open folder…" : "Open a folder to enable the AI…"}
+          placeholder={root ? "Ask, edit, run — scoped to your open folder…" : "Ask anything — open a folder to unlock file tools…"}
           ref={inputRef}
           rows={2}
           value={input}

@@ -3,10 +3,10 @@
 // -- click opens Source Control), the open folder, workspace size,
 // language, cursor.
 
-import { GitBranch } from "lucide-react";
+import { GitBranch, Maximize2, Minimize2 } from "lucide-react";
 import { useT } from "../../../lib/testpilot/i18n";
 
-export function StatusBar({ runnerOnline, runnerUrl, baseURL, root, filesCount, runnableCount, language, cursor, gitBranch, scmChanges, onOpenScm }: {
+export function StatusBar({ runnerOnline, runnerUrl, baseURL, root, filesCount, runnableCount, language, cursor, gitBranch, scmChanges, onOpenScm, zenMode, onToggleZen }: {
   runnerOnline: boolean | undefined;
   runnerUrl: string;
   baseURL: string;
@@ -22,6 +22,10 @@ export function StatusBar({ runnerOnline, runnerUrl, baseURL, root, filesCount, 
   scmChanges: number;
   /** Clicking the branch chip opens the Source Control view. */
   onOpenScm: () => void;
+  /** ZEN — the workbench fills the whole viewport. */
+  zenMode: boolean;
+  /** Clicking the zen chip toggles full-screen. */
+  onToggleZen: () => void;
 }) {
   const { t } = useT();
   const rootName = root ? root.split(/[\\/]/).filter(Boolean).pop() ?? root : null;
@@ -42,6 +46,16 @@ export function StatusBar({ runnerOnline, runnerUrl, baseURL, root, filesCount, 
         </span>
       </span>
       <span className="wb-status-right">
+        <button
+          aria-pressed={zenMode}
+          className="wb-status-item wb-status-zen"
+          onClick={onToggleZen}
+          title={zenMode ? "Exit full screen (Esc)" : "Fit the editor to the whole screen"}
+          type="button"
+        >
+          {zenMode ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+          {zenMode ? "Exit full screen" : "Full screen"}
+        </button>
         {gitBranch ? (
           <button
             className="wb-status-item wb-status-git"

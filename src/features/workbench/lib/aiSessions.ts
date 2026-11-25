@@ -4,8 +4,21 @@
 // panels keep a conversation history).
 
 export type ChatEntry =
-  | { role: "user"; text: string }
-  | { role: "assistant"; text: string; streaming?: boolean }
+  | {
+      role: "user";
+      text: string;
+      /** Arrival time (epoch ms) — rendered under the bubble. */
+      ts?: number;
+    }
+  | {
+      role: "assistant";
+      text: string;
+      streaming?: boolean;
+      /** Arrival time (epoch ms) — first delta (or finalize) moment. */
+      ts?: number;
+      /** Whole-turn wall time on the FINAL bubble of a send. */
+      durationMs?: number;
+    }
   | { role: "activity"; text: string }
   /** Collapsible "Thought" row — the model's interim plan text. */
   | { role: "thought"; text: string; seconds: number };

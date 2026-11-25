@@ -9,7 +9,7 @@
 //   • pure helpers live in model/treeModel.
 // This component only wires the three together plus keyboard shortcuts.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Bot, PanelLeft, X } from "lucide-react";
 import { ActivityBar } from "./components/ActivityBar";
 import { BranchBar } from "./components/BranchBar";
@@ -69,6 +69,30 @@ export function Workbench({ project, variant = "tests" }: {
   const panelTab = useWorkbench((s) => s.panelTab);
   const panelMaximized = useWorkbench((s) => s.panelMaximized);
   const aiProposals = useWorkbench((s) => s.aiProposals);
+  const aiPanelVisible = useWorkbench((s) => s.aiPanelVisible);
+  const zenMode = useWorkbench((s) => s.zenMode);
+  const aiRightWidth = useWorkbench((s) => s.aiRightWidth);
+  /** The AI chat lives in the RIGHT zone and is GLOBAL: it stays mounted
+   *  across every sidebar-view switch until the user closes it. */
+
+  /** Zone sash (the editor ↔ AI boundary): pointer capture keeps moves
+   *  flowing; dragging left GROWS the AI column. */
+  function startAiZoneResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    const sash = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = aiRightWidth;
+    sash.setPointerCapture(event.pointerId);
+    const onMove = (move: PointerEvent): void => {
+      workbenchStore.setAiRightWidth(startWidth + (startX - move.clientX));
+    };
+    const onUp = (): void => {
+      sash.removeEventListener("pointermove", onMove);
+      sash.removeEventListener("pointerup", onUp);
+    };
+    sash.addEventListener("pointermove", onMove);
+    sash.addEventListener("pointerup", onUp);
+  }
   const aiProposal = aiProposals[0];
   /** Diff-review surface (opened from the AI panel's "Review diffs"). */
   const [aiReviewOpen, setAiReviewOpen] = useState(false);
@@ -255,14 +279,26 @@ export function Workbench({ project, variant = "tests" }: {
     { id: "wb.scm", label: "View: Source Control", run: () => workbenchStore.setSidebarView("scm") },
     { id: "wb.runView", label: "View: Run", run: () => workbenchStore.setSidebarView("run") },
     { id: "wb.sidebar", label: "View: Toggle Sidebar", run: () => workbenchStore.toggleSidebar() },
+    { id: "wb.zen", label: zenMode ? "View: Exit Zen (Full Screen)" : "View: Zen (Full Screen)", run: () => workbenchStore.toggleZen() },
     { id: "wb.panel", label: "View: Toggle Panel", run: () => workbenchStore.togglePanel() },
     { id: "wb.output", label: "Panel: Show Output", run: () => workbenchStore.showPanel("output") },
     { id: "wb.results", label: "Panel: Show Test Results", run: () => workbenchStore.showPanel("results") },
     { id: "wb.terminal", label: "Panel: Show Terminal", run: () => workbenchStore.showPanel("terminal") }
   ], [t, ws, activePath]);
 
+  // ZEN exits on Escape — the app chrome is hidden behind the overlay,
+  // so a keyboard path back is essential.
+  useEffect(() => {
+    if (!zenMode) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") workbenchStore.setZenMode(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zenMode]);
+
   return (
-    <div className={`wb-root${variant === "workspace" ? " wb-variant-workspace" : ""}`}>
+    <div className={`wb-root${variant === "workspace" ? " wb-variant-workspace" : ""}${zenMode ? " wb-zen" : ""}`}>
       {/* The sidebar is hidden (Ctrl+B / hide button): keep a visible way back. */}
       {!sidebarVisible ? (
         <button aria-label="Show sidebar" className="wb-sidebar-restore" onClick={() => workbenchStore.toggleSidebar()} title="Show sidebar (Ctrl+B)" type="button">
@@ -278,6 +314,7 @@ export function Workbench({ project, variant = "tests" }: {
       <div className={`wb-frame${panelMaximized ? " panel-max" : ""}`}>
         <ActivityBar
           active={sidebarView}
+          aiPanelVisible={aiPanelVisible}
           changesCount={ws.gitDirtyPaths.size}
           onSelect={(view: SidebarView) => workbenchStore.setSidebarView(view)}
           problemsCount={ws.problems.filter((problem) => problem.severity === "error").length}
@@ -365,39 +402,8 @@ export function Workbench({ project, variant = "tests" }: {
                 problemsRunning={ws.problemsRunning}
               />
             ) : null}
-            {sidebarView === "ai" ? (
-              <AiPanel
-                projectId={project.id}
-                activePath={activePath}
-                cursorLine={cursor?.line ?? 0}
-                onClose={() => workbenchStore.setSidebarView("explorer")}
-                onExec={(command) => ws.aiExec(command)}
-                onOpenFile={async (path) => {
-                  workbenchStore.openTab(path);
-                  await ws.ensureLoaded([path]);
-                }}
-                onProposeEdit={(path, content, summary) =>
-                  workbenchStore.pushAiProposal({ path, content, summary })
-                }
-                proposals={aiProposals}
-                onAcceptAll={() => void acceptAllAiProposals()}
-                onRejectAll={rejectAllAiProposals}
-                onReview={() => { setAiReviewOpen(true); setAiReviewIndex(0); }}
-                reviewing={aiReviewOpen}
-                readCurrent={async (path) => {
-                  // ensureLoaded RETURNS the content it fetched — use it
-                  // FIRST. Reading through contentOf alone was a stale
-                  // closure over the `contents` state snapshot: every
-                  // file fetched during the AI turn (i.e. anything not
-                  // already open in an editor tab) silently read back
-                  // as "" and the AI fell back to shell workarounds.
-                  const fetched = await ws.ensureLoaded([path]);
-                  if (path in fetched) return fetched[path];
-                  return ws.contentOf(path);
-                }}
-                root={ws.root}
-              />
-            ) : null}
+            {/* The AI chat lives in the RIGHT zone now (see .wb-right-zone
+                below) — the left sidebar keeps file/search/scm/run views. */}
             {/* First open of the Problems view checks immediately — the
                 empty state asking the user to find a button was a dead
                 end. The hook's `problemsChecked` flag makes this exactly
@@ -415,13 +421,12 @@ export function Workbench({ project, variant = "tests" }: {
                 anymore. ALWAYS rendered with the sidebar (user request):
                 when the open folder is not a git clone (or none is open)
                 it shows a muted placeholder instead of the picker. */}
-            {/* Hidden while the AI view is active — the chat needs the
-                vertical space and the branch info is noise mid-conversation. */}
-            {sidebarView !== "ai" ? (
-              <div className="wb-sidebar-branch">
-                <BranchBar
-                  branches={gitBranches.branches}
-                  branchesNote={gitBranches.note}
+            {/* The branch section stays visible in EVERY view — the AI chat
+                moved to the right zone, so nothing needs to hide it now. */}
+            <div className="wb-sidebar-branch">
+              <BranchBar
+                branches={gitBranches.branches}
+                branchesNote={gitBranches.note}
                 busy={ws.saving || ws.opening || ws.gitBusy}
                 onCheckout={(name) => ws.checkoutBranch(name)}
                 onCreateBranch={(name) => ws.createBranch(name)}
@@ -435,8 +440,7 @@ export function Workbench({ project, variant = "tests" }: {
                 }
                 value={ws.gitBranch ?? ""}
               />
-              </div>
-            ) : null}
+            </div>
             <SidebarSash />
           </aside>
         ) : null}
@@ -528,6 +532,46 @@ export function Workbench({ project, variant = "tests" }: {
           )}
         </main>
 
+        {aiPanelVisible ? (
+          <aside className="wb-right-zone" style={{ width: aiRightWidth }}>
+            {/* Zone sash — the editor ↔ AI boundary. */}
+            <div
+              aria-label="Resize AI panel"
+              className="wb-right-sash"
+              onPointerDown={startAiZoneResize}
+              title="Drag to resize"
+            />
+            <AiPanel
+              projectId={project.id}
+              activePath={activePath}
+              cursorLine={cursor?.line ?? 0}
+              onClose={() => workbenchStore.setAiPanelVisible(false)}
+              onExec={(command) => ws.aiExec(command)}
+              onOpenFile={async (path) => {
+                workbenchStore.openTab(path);
+                await ws.ensureLoaded([path]);
+              }}
+              onProposeEdit={(path, content, summary) =>
+                workbenchStore.pushAiProposal({ path, content, summary })
+              }
+              onApplyEdit={(path, content) => void ws.saveFileContent(path, content)}
+              proposals={aiProposals}
+              onAcceptAll={() => void acceptAllAiProposals()}
+              onRejectAll={rejectAllAiProposals}
+              onReview={() => { setAiReviewOpen(true); setAiReviewIndex(0); }}
+              reviewing={aiReviewOpen}
+              readCurrent={async (path) => {
+                // ensureLoaded RETURNS the content it fetched — use it
+                // FIRST (stale-closure guard; see git history).
+                const fetched = await ws.ensureLoaded([path]);
+                if (path in fetched) return fetched[path];
+                return ws.contentOf(path);
+              }}
+              root={ws.root}
+            />
+          </aside>
+        ) : null}
+
         {panelVisible ? (
           <BottomPanel
             maximized={panelMaximized}
@@ -555,11 +599,13 @@ export function Workbench({ project, variant = "tests" }: {
         gitBranch={ws.gitBranch}
         language={language}
         onOpenScm={() => workbenchStore.setSidebarView("scm")}
+        onToggleZen={() => workbenchStore.toggleZen()}
         root={ws.root}
         runnableCount={ws.runnableCount}
         runnerOnline={ws.runnerOnline}
         runnerUrl={ws.runnerUrl}
         scmChanges={ws.gitDirtyPaths.size}
+        zenMode={zenMode}
       />
 
       {paletteMode ? (
