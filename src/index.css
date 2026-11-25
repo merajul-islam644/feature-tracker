@@ -17,7 +17,7 @@
  * being a transformed version of the other. Technical surfaces
  * (code/logs/AI/evidence) intentionally stay dark in both modes.
  *
- * Indigo = identity / primary interaction / focus.
+ * Sky = identity / primary interaction / focus.
  * Cyan   = environment semantics (DEV/STAGING/PROD) only.
  * Status colors reserved for actual statuses.
  */
@@ -59,11 +59,11 @@
 
     /* ========== PRIMARY / SIGNATURE ACCENT ========== */
 
-    --primary: 243 75% 59%;
+    --primary: 199 89% 48%;
     --primary-foreground: 0 0% 100%;
 
-    --primary-muted: 243 80% 96%;
-    --primary-border: 243 70% 82%;
+    --primary-muted: 199 89% 95%;
+    --primary-border: 199 75% 78%;
 
     /* ========== SECONDARY ========== */
 
@@ -75,7 +75,7 @@
     --accent: 40 10% 93%;
     --accent-foreground: 240 8% 16%;
 
-    --ring: 243 75% 59%;
+    --ring: 199 89% 48%;
 
     /* ========== STATUS ========== */
 
@@ -104,7 +104,7 @@
 
     /* ========== LEGACY AI / ENVIRONMENT ACCENTS ========== */
 
-    --ai: 243 75% 59%;                  /* AI surfaces now use --technical */
+    --ai: 199 89% 48%;                  /* AI surfaces now use --technical */
     --ai-foreground: 0 0% 100%;
     --environment: 189 94% 43%;
     --environment-foreground: 0 0% 100%;
@@ -136,17 +136,17 @@
 
     --sidebar-background: 0 0% 100%;
     --sidebar-foreground: 240 10% 12%;
-    --sidebar-primary: 243 75% 59%;
+    --sidebar-primary: 199 89% 48%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 243 80% 96%;
-    --sidebar-accent-foreground: 243 75% 30%;
+    --sidebar-accent: 199 89% 48%;
+    --sidebar-accent-foreground: 0 0% 98%;
     --sidebar-border: 40 9% 84%;
-    --sidebar-ring: 243 75% 59%;
+    --sidebar-ring: 199 89% 48%;
 
     /* ========== HIGHLIGHT (selected rows, search hits) ========== */
 
-    --highlight: 243 80% 96%;
-    --highlight-foreground: 243 75% 30%;
+    --highlight: 199 89% 95%;
+    --highlight-foreground: 199 75% 30%;
   }
 
   .dark {
@@ -186,11 +186,11 @@
 
     /* ========== PRIMARY / SIGNATURE ACCENT ========== */
 
-    --primary: 243 80% 68%;
+    --primary: 199 89% 48%;
     --primary-foreground: 240 10% 10%;
 
-    --primary-muted: 243 35% 20%;
-    --primary-border: 243 45% 36%;
+    --primary-muted: 199 35% 20%;
+    --primary-border: 199 45% 36%;
 
     /* ========== SECONDARY ========== */
 
@@ -202,7 +202,7 @@
     --accent: 240 5% 19%;
     --accent-foreground: 240 8% 94%;
 
-    --ring: 243 80% 68%;
+    --ring: 199 89% 48%;
 
     /* ========== STATUS ========== */
 
@@ -231,7 +231,7 @@
 
     /* ========== LEGACY AI / ENVIRONMENT ACCENTS ========== */
 
-    --ai: 243 80% 68%;
+    --ai: 199 89% 48%;
     --ai-foreground: 240 10% 10%;
     --environment: 189 94% 55%;
     --environment-foreground: 240 10% 10%;
@@ -255,16 +255,16 @@
 
     --sidebar-background: 240 7% 12%;
     --sidebar-foreground: 240 8% 94%;
-    --sidebar-primary: 243 80% 68%;
+    --sidebar-primary: 199 89% 48%;
     --sidebar-primary-foreground: 240 10% 10%;
-    --sidebar-accent: 243 35% 20%;
-    --sidebar-accent-foreground: 240 8% 94%;
+    --sidebar-accent: 199 89% 48%;
+    --sidebar-accent-foreground: 0 0% 98%;
     --sidebar-border: 240 5% 25%;
-    --sidebar-ring: 243 80% 68%;
+    --sidebar-ring: 199 89% 48%;
 
     /* ========== HIGHLIGHT ========== */
 
-    --highlight: 243 35% 20%;
+    --highlight: 199 35% 20%;
     --highlight-foreground: 240 8% 94%;
   }
 }
